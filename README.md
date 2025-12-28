@@ -1,5 +1,7 @@
 # VVCode
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-vivy--company-ea4aaa?logo=github)](https://github.com/sponsors/vivy-company)
+
 A Swift code editor library for macOS and iOS with syntax highlighting, LSP support, and Metal-accelerated rendering.
 
 ## Features
