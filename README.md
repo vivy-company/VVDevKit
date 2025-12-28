@@ -4,7 +4,7 @@
 
 A Swift code editor library for macOS and iOS with syntax highlighting, LSP support, and Metal-accelerated rendering.
 
-Used in [Aizen.win](https://github.com/vivy-company/aizen).
+Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
 > **Note:** This library is under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
 
