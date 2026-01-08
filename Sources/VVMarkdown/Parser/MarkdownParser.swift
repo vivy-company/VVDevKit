@@ -29,6 +29,20 @@ public final class MarkdownParser: @unchecked Sendable {
         self.options = options
     }
 
+    private let emojiShortcodes: [String: String] = [
+        "rocket": "🚀",
+        "fire": "🔥",
+        "thumbsup": "👍",
+        "+1": "👍",
+        "heart": "❤️",
+        "star": "⭐",
+        "sparkles": "✨",
+        "tada": "🎉",
+        "warning": "⚠️",
+        "check": "✅",
+        "x": "❌"
+    ]
+
     /// Parse complete markdown content
     public func parse(_ content: String) -> ParsedMarkdownDocument {
         guard !content.isEmpty else { return .empty }
@@ -215,6 +229,14 @@ public final class MarkdownParser: @unchecked Sendable {
             return MarkdownBlock(.mathBlock(mathContent), index: index)
         }
 
+        if let definitionItems = extractDefinitionList(from: content) {
+            return MarkdownBlock(.definitionList(items: definitionItems), index: index)
+        }
+
+        if let abbreviations = extractAbbreviationList(from: content) {
+            return MarkdownBlock(.abbreviationList(items: abbreviations), index: index)
+        }
+
         return MarkdownBlock(.paragraph(content), index: index)
     }
 
@@ -276,12 +298,27 @@ public final class MarkdownParser: @unchecked Sendable {
 
     private func parseCodeBlock(_ codeBlock: CodeBlock, index: Int) -> MarkdownBlock {
         let language = codeBlock.language?.lowercased()
+        let normalized = normalizeCodeBlock(codeBlock.code)
 
         if language == "math" || language == "latex" || language == "tex" {
-            return MarkdownBlock(.mathBlock(codeBlock.code), index: index)
+            return MarkdownBlock(.mathBlock(normalized), index: index)
+        }
+        if language == "mermaid" || language == "mermaidjs" {
+            return MarkdownBlock(.mermaid(normalized), index: index)
         }
 
-        return MarkdownBlock(.codeBlock(code: codeBlock.code, language: codeBlock.language, isStreaming: false), index: index)
+        return MarkdownBlock(.codeBlock(code: normalized, language: codeBlock.language, isStreaming: false), index: index)
+    }
+
+    private func normalizeCodeBlock(_ code: String) -> String {
+        var trimmed = code
+        while trimmed.last == "\n" || trimmed.last == "\r" {
+            trimmed.removeLast()
+        }
+        if trimmed.contains("\r") {
+            trimmed = trimmed.replacingOccurrences(of: "\r", with: "")
+        }
+        return trimmed
     }
 
     private func parseList(_ list: ListItemContainer, ordered: Bool, startIndex: Int, index: Int) -> MarkdownBlock {
@@ -387,7 +424,170 @@ public final class MarkdownParser: @unchecked Sendable {
             }
         }
 
+        if let first = blocks.first,
+           case .paragraph(let content) = first.type,
+           let extracted = extractAlert(from: content) {
+            var updatedBlocks = blocks
+            if extracted.content.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                updatedBlocks.removeFirst()
+            } else {
+                updatedBlocks[0] = MarkdownBlock(.paragraph(extracted.content), index: 0)
+            }
+            return MarkdownBlock(.alert(kind: extracted.kind, blocks: updatedBlocks), index: index)
+        }
+
         return MarkdownBlock(.blockQuote(blocks: blocks), index: index)
+    }
+
+    private func extractAlert(from content: MarkdownInlineContent) -> (kind: MarkdownAlertKind, content: MarkdownInlineContent)? {
+        guard let result = stripAlertMarker(from: content.plainText) else { return nil }
+        let trimmedContent = dropLeadingCharacters(from: content, count: result.dropCount)
+        return (result.kind, trimmedContent)
+    }
+
+    private func stripAlertMarker(from text: String) -> (kind: MarkdownAlertKind, dropCount: Int)? {
+        var index = text.startIndex
+        while index < text.endIndex, text[index].isWhitespace {
+            index = text.index(after: index)
+        }
+        guard index < text.endIndex else { return nil }
+        if text[index] == "[", text.index(after: index) < text.endIndex, text[text.index(after: index)] == "!" {
+            guard let endIndex = text[index...].firstIndex(of: "]") else { return nil }
+            let kindStart = text.index(index, offsetBy: 2)
+            guard kindStart < endIndex else { return nil }
+            let rawKind = text[kindStart..<endIndex].lowercased()
+            guard let kind = MarkdownAlertKind(rawValue: rawKind) else { return nil }
+
+            var remainderStart = text.index(after: endIndex)
+            while remainderStart < text.endIndex, text[remainderStart].isWhitespace {
+                remainderStart = text.index(after: remainderStart)
+            }
+            let dropCount = text.distance(from: text.startIndex, to: remainderStart)
+            return (kind, dropCount)
+        }
+
+        if text[index] == "!" {
+            let kindStart = text.index(after: index)
+            var kindEnd = kindStart
+            while kindEnd < text.endIndex, text[kindEnd].isLetter {
+                kindEnd = text.index(after: kindEnd)
+            }
+            guard kindStart < kindEnd else { return nil }
+            let rawKind = text[kindStart..<kindEnd].lowercased()
+            guard let kind = MarkdownAlertKind(rawValue: rawKind) else { return nil }
+            var remainderStart = kindEnd
+            while remainderStart < text.endIndex, text[remainderStart].isWhitespace {
+                remainderStart = text.index(after: remainderStart)
+            }
+            let dropCount = text.distance(from: text.startIndex, to: remainderStart)
+            return (kind, dropCount)
+        }
+
+        return nil
+    }
+
+    private func dropLeadingCharacters(from content: MarkdownInlineContent, count: Int) -> MarkdownInlineContent {
+        guard count > 0 else { return content }
+        var remaining = count
+        var newElements: [InlineElement] = []
+        newElements.reserveCapacity(content.elements.count)
+
+        for element in content.elements {
+            if remaining <= 0 {
+                newElements.append(element)
+                continue
+            }
+
+            let (newElement, consumed) = dropLeadingCharacters(from: element, count: remaining)
+            remaining -= consumed
+            if let newElement {
+                newElements.append(newElement)
+            }
+        }
+
+        return MarkdownInlineContent(elements: newElements)
+    }
+
+    private func dropLeadingCharacters(from element: InlineElement, count: Int) -> (InlineElement?, Int) {
+        guard count > 0 else { return (element, 0) }
+
+        switch element {
+        case .text(let text):
+            let length = text.count
+            if count >= length {
+                return (nil, length)
+            }
+            return (.text(String(text.dropFirst(count))), count)
+
+        case .code(let text):
+            let length = text.count
+            if count >= length {
+                return (nil, length)
+            }
+            return (.code(String(text.dropFirst(count))), count)
+
+        case .softBreak:
+            return (count >= 1 ? nil : .softBreak, min(count, 1))
+
+        case .hardBreak:
+            return (count >= 1 ? nil : .hardBreak, min(count, 1))
+
+        case .emphasis(let content):
+            let before = content.plainText.count
+            let trimmed = dropLeadingCharacters(from: content, count: count)
+            let consumed = before - trimmed.plainText.count
+            if trimmed.isEmpty { return (nil, consumed) }
+            return (.emphasis(trimmed), consumed)
+
+        case .strong(let content):
+            let before = content.plainText.count
+            let trimmed = dropLeadingCharacters(from: content, count: count)
+            let consumed = before - trimmed.plainText.count
+            if trimmed.isEmpty { return (nil, consumed) }
+            return (.strong(trimmed), consumed)
+
+        case .strikethrough(let content):
+            let before = content.plainText.count
+            let trimmed = dropLeadingCharacters(from: content, count: count)
+            let consumed = before - trimmed.plainText.count
+            if trimmed.isEmpty { return (nil, consumed) }
+            return (.strikethrough(trimmed), consumed)
+
+        case .link(let text, let url, let title):
+            let before = text.plainText.count
+            let trimmed = dropLeadingCharacters(from: text, count: count)
+            let consumed = before - trimmed.plainText.count
+            if trimmed.isEmpty { return (nil, consumed) }
+            return (.link(text: trimmed, url: url, title: title), consumed)
+
+        case .image(let url, let alt, let title):
+            let length = alt?.count ?? 0
+            if count >= length {
+                return (nil, length)
+            }
+            return (.image(url: url, alt: alt, title: title), count)
+
+        case .html(let html):
+            let length = html.count
+            if count >= length {
+                return (nil, length)
+            }
+            return (.html(String(html.dropFirst(count))), count)
+
+        case .math(let math):
+            let length = math.count
+            if count >= length {
+                return (nil, length)
+            }
+            return (.math(String(math.dropFirst(count))), count)
+
+        case .footnoteReference(let id):
+            let length = id.count + 2
+            if count >= length {
+                return (nil, length)
+            }
+            return (.footnoteReference(id: id), count)
+        }
     }
 
     private func parseTable(_ table: Markdown.Table, index: Int) -> MarkdownBlock {
@@ -473,13 +673,16 @@ public final class MarkdownParser: @unchecked Sendable {
         var currentText = ""
         var i = text.startIndex
 
+        func flushCurrentText() {
+            guard !currentText.isEmpty else { return }
+            result.append(.text(replaceEmojiShortcodes(in: currentText)))
+            currentText = ""
+        }
+
         while i < text.endIndex {
             if text[i] == "[" {
                 if let (footnoteId, endIndex) = extractFootnoteReference(text, from: i) {
-                    if !currentText.isEmpty {
-                        result.append(.text(currentText))
-                        currentText = ""
-                    }
+                    flushCurrentText()
                     result.append(.footnoteReference(id: footnoteId))
                     i = endIndex
                     continue
@@ -497,10 +700,7 @@ public final class MarkdownParser: @unchecked Sendable {
                 }
 
                 if let (math, endIndex) = extractInlineMath(text, from: i) {
-                    if !currentText.isEmpty {
-                        result.append(.text(currentText))
-                        currentText = ""
-                    }
+                    flushCurrentText()
                     result.append(.math(math))
                     i = endIndex
                     continue
@@ -512,10 +712,147 @@ public final class MarkdownParser: @unchecked Sendable {
         }
 
         if !currentText.isEmpty {
-            result.append(.text(currentText))
+            result.append(.text(replaceEmojiShortcodes(in: currentText)))
         }
 
         return result.isEmpty ? [.text(text)] : result
+    }
+
+    private func replaceEmojiShortcodes(in text: String) -> String {
+        guard text.contains(":") else { return text }
+        var result = ""
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            if text[index] == ":" {
+                let start = text.index(after: index)
+                if let end = text[start...].firstIndex(of: ":") {
+                    let shortcode = String(text[start..<end]).lowercased()
+                    if let emoji = emojiShortcodes[shortcode] {
+                        result.append(emoji)
+                        index = text.index(after: end)
+                        continue
+                    }
+                }
+            }
+            result.append(text[index])
+            index = text.index(after: index)
+        }
+
+        return result
+    }
+
+    private func extractDefinitionList(from content: MarkdownInlineContent) -> [MarkdownDefinitionItem]? {
+        let lines = splitInlineContentIntoLines(content)
+        guard lines.count >= 2 else { return nil }
+
+        var items: [MarkdownDefinitionItem] = []
+        var currentTerm: MarkdownInlineContent?
+        var definitions: [MarkdownInlineContent] = []
+        var foundDefinition = false
+
+        for line in lines {
+            let trimmed = line.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if trimmed.hasPrefix(":") {
+                foundDefinition = true
+                if currentTerm != nil {
+                    let definitionText = stripDefinitionPrefix(from: trimmed)
+                    if !definitionText.isEmpty {
+                        definitions.append(MarkdownInlineContent(text: definitionText))
+                    }
+                }
+            } else {
+                if let term = currentTerm, !definitions.isEmpty {
+                    items.append(MarkdownDefinitionItem(term: term, definitions: definitions))
+                    definitions = []
+                }
+                currentTerm = MarkdownInlineContent(text: trimmed)
+            }
+        }
+
+        if let term = currentTerm, !definitions.isEmpty {
+            items.append(MarkdownDefinitionItem(term: term, definitions: definitions))
+        }
+
+        return (foundDefinition && !items.isEmpty) ? items : nil
+    }
+
+    private func extractAbbreviationList(from content: MarkdownInlineContent) -> [MarkdownAbbreviationItem]? {
+        let lines = splitInlineContentIntoLines(content)
+        var items: [MarkdownAbbreviationItem] = []
+        var hasContent = false
+
+        for line in lines {
+            let trimmed = line.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            hasContent = true
+            guard let item = parseAbbreviationDefinition(from: trimmed) else {
+                return nil
+            }
+            items.append(item)
+        }
+
+        guard hasContent, !items.isEmpty else { return nil }
+        return items
+    }
+
+    private func parseAbbreviationDefinition(from text: String) -> MarkdownAbbreviationItem? {
+        guard text.hasPrefix("*[") else { return nil }
+        guard let close = text.firstIndex(of: "]") else { return nil }
+        let afterClose = text.index(after: close)
+        guard afterClose < text.endIndex, text[afterClose] == ":" else { return nil }
+
+        let abbrStart = text.index(text.startIndex, offsetBy: 2)
+        let abbr = String(text[abbrStart..<close]).trimmingCharacters(in: .whitespaces)
+        guard !abbr.isEmpty else { return nil }
+
+        var defStart = text.index(after: afterClose)
+        if defStart < text.endIndex && text[defStart] == " " {
+            defStart = text.index(after: defStart)
+        }
+        let expansion = String(text[defStart...]).trimmingCharacters(in: .whitespaces)
+        guard !expansion.isEmpty else { return nil }
+
+        return MarkdownAbbreviationItem(abbreviation: abbr, expansion: expansion)
+    }
+
+    private func stripDefinitionPrefix(from text: String) -> String {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = trimmed.first, first == ":" || first == " " || first == "\t" {
+            trimmed.removeFirst()
+        }
+        return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func splitInlineContentIntoLines(_ content: MarkdownInlineContent) -> [MarkdownInlineContent] {
+        var lines: [[InlineElement]] = [[]]
+
+        func startNewLine() {
+            lines.append([])
+        }
+
+        for element in content.elements {
+            switch element {
+            case .softBreak, .hardBreak:
+                startNewLine()
+            case .text(let text):
+                let parts = text.split(separator: "\n", omittingEmptySubsequences: false)
+                for (idx, part) in parts.enumerated() {
+                    if !part.isEmpty {
+                        lines[lines.count - 1].append(.text(String(part)))
+                    }
+                    if idx < parts.count - 1 {
+                        startNewLine()
+                    }
+                }
+            default:
+                lines[lines.count - 1].append(element)
+            }
+        }
+
+        return lines.map { MarkdownInlineContent(elements: $0) }
     }
 
     private func extractFootnoteReference(_ text: String, from start: String.Index) -> (String, String.Index)? {

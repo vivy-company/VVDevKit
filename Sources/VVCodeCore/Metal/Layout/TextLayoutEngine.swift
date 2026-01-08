@@ -37,7 +37,7 @@ public struct LineLayout {
 public struct LayoutGlyph {
     public let glyphID: CGGlyph
     public let position: CGPoint        // Position relative to line origin
-    public let fontVariant: FontVariant
+    public let font: CTFont
     public let color: SIMD4<Float>
     public let characterIndex: Int      // Index in original string
     public let characterCount: Int      // Number of chars (>1 for ligatures)
@@ -45,14 +45,14 @@ public struct LayoutGlyph {
     public init(
         glyphID: CGGlyph,
         position: CGPoint,
-        fontVariant: FontVariant,
+        font: CTFont,
         color: SIMD4<Float>,
         characterIndex: Int,
         characterCount: Int = 1
     ) {
         self.glyphID = glyphID
         self.position = position
-        self.fontVariant = fontVariant
+        self.font = font
         self.color = color
         self.characterIndex = characterIndex
         self.characterCount = characterCount
@@ -193,7 +193,7 @@ public final class TextLayoutEngine {
                 glyphs.append(LayoutGlyph(
                     glyphID: shaped.glyphID,
                     position: CGPoint(x: xPosition + shaped.position.x, y: shaped.position.y),
-                    fontVariant: run.fontVariant,
+                    font: shaped.font,
                     color: run.color,
                     characterIndex: shaped.characterIndex,
                     characterCount: shaped.characterCount
@@ -257,10 +257,10 @@ public final class TextLayoutEngine {
                 return glyph.position.x
             }
 
-            if offset <= glyphEnd, let font = fonts[glyph.fontVariant] {
+            if offset <= glyphEnd {
                 var glyphID = glyph.glyphID
                 var advance = CGSize.zero
-                CTFontGetAdvancesForGlyphs(font, .horizontal, &glyphID, &advance, 1)
+                CTFontGetAdvancesForGlyphs(glyph.font, .horizontal, &glyphID, &advance, 1)
 
                 if glyph.characterCount > 1 {
                     if offset >= glyphEnd {
@@ -279,12 +279,10 @@ public final class TextLayoutEngine {
             // If this is the last glyph
             if i == line.glyphs.count - 1 {
                 // Return position after this glyph
-                if let font = fonts[glyph.fontVariant] {
-                    var glyphID = glyph.glyphID
-                    var advance = CGSize.zero
-                    CTFontGetAdvancesForGlyphs(font, .horizontal, &glyphID, &advance, 1)
-                    return glyph.position.x + advance.width
-                }
+                var glyphID = glyph.glyphID
+                var advance = CGSize.zero
+                CTFontGetAdvancesForGlyphs(glyph.font, .horizontal, &glyphID, &advance, 1)
+                return glyph.position.x + advance.width
             }
         }
 
@@ -296,27 +294,25 @@ public final class TextLayoutEngine {
         guard !line.glyphs.isEmpty else { return 0 }
 
         for glyph in line.glyphs {
-            if let font = fonts[glyph.fontVariant] {
-                var glyphID = glyph.glyphID
-                var advance = CGSize.zero
-                CTFontGetAdvancesForGlyphs(font, .horizontal, &glyphID, &advance, 1)
+            var glyphID = glyph.glyphID
+            var advance = CGSize.zero
+            CTFontGetAdvancesForGlyphs(glyph.font, .horizontal, &glyphID, &advance, 1)
 
-                let glyphEnd = glyph.position.x + advance.width
-                if x < glyphEnd {
-                    if glyph.characterCount > 1 && advance.width > 0 {
-                        let subAdvance = advance.width / CGFloat(glyph.characterCount)
-                        let relative = max(0, min(advance.width, x - glyph.position.x))
-                        let rawIndex = Int(floor((relative / subAdvance) + 0.5))
-                        let clamped = min(glyph.characterCount, max(0, rawIndex))
-                        return glyph.characterIndex + clamped
+            let glyphEnd = glyph.position.x + advance.width
+            if x < glyphEnd {
+                if glyph.characterCount > 1 && advance.width > 0 {
+                    let subAdvance = advance.width / CGFloat(glyph.characterCount)
+                    let relative = max(0, min(advance.width, x - glyph.position.x))
+                    let rawIndex = Int(floor((relative / subAdvance) + 0.5))
+                    let clamped = min(glyph.characterCount, max(0, rawIndex))
+                    return glyph.characterIndex + clamped
+                } else {
+                    // Check if closer to start or end of glyph
+                    let mid = glyph.position.x + advance.width / 2
+                    if x < mid {
+                        return glyph.characterIndex
                     } else {
-                        // Check if closer to start or end of glyph
-                        let mid = glyph.position.x + advance.width / 2
-                        if x < mid {
-                            return glyph.characterIndex
-                        } else {
-                            return glyph.characterIndex + glyph.characterCount
-                        }
+                        return glyph.characterIndex + glyph.characterCount
                     }
                 }
             }
@@ -436,6 +432,9 @@ public final class TextLayoutEngine {
             let glyphCount = CTRunGetGlyphCount(run)
             guard glyphCount > 0 else { continue }
 
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            let runFont = attributes[kCTFontAttributeName] as! CTFont
+
             // Get glyphs
             var glyphs = [CGGlyph](repeating: 0, count: glyphCount)
             CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
@@ -461,6 +460,7 @@ public final class TextLayoutEngine {
                     glyphID: glyphs[i],
                     position: positions[i],
                     advance: advances[i].width,
+                    font: runFont,
                     characterIndex: startCharIndex + charIndex,
                     characterCount: max(1, charCount)
                 ))

@@ -7,6 +7,11 @@ import Foundation
 @preconcurrency import Metal
 import MetalKit
 import CoreGraphics
+import ImageIO
+
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
 
 #if canImport(AppKit)
 import AppKit
@@ -206,6 +211,12 @@ public final class MarkdownImageLoader: @unchecked Sendable {
     }
 
     private func createTexture(from data: Data) -> MTLTexture? {
+        if isSVGData(data) {
+            if let svgImage = renderSVGImage(from: data) {
+                return createTexture(from: svgImage)
+            }
+        }
+
         #if canImport(AppKit)
         guard let image = NSImage(data: data),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
@@ -219,6 +230,31 @@ public final class MarkdownImageLoader: @unchecked Sendable {
         #endif
 
         return createTexture(from: cgImage)
+    }
+
+    private func isSVGData(_ data: Data) -> Bool {
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        let lower = text.lowercased()
+        return lower.contains("<svg") || lower.contains("image/svg+xml")
+    }
+
+    private func renderSVGImage(from data: Data) -> CGImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceTypeIdentifierHint: svgTypeIdentifier()
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
+            return nil
+        }
+        return CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+    }
+
+    private func svgTypeIdentifier() -> CFString {
+        #if canImport(UniformTypeIdentifiers)
+        if #available(macOS 11.0, iOS 14.0, tvOS 14.0, *) {
+            return UTType.svg.identifier as CFString
+        }
+        #endif
+        return "public.svg-image" as CFString
     }
 
     private func createTexture(from cgImage: CGImage) -> MTLTexture? {

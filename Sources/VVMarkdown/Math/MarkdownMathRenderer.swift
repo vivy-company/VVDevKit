@@ -26,6 +26,15 @@ public enum MathToken: Sendable, Equatable {
     case group([MathToken])
     case space(CGFloat)
     case delimiter(String)
+    case matrix(rows: [[[MathToken]]], style: MatrixStyle)
+}
+
+public enum MatrixStyle: Sendable, Equatable {
+    case plain
+    case parentheses
+    case brackets
+    case bars
+    case doubleBars
 }
 
 // MARK: - Math Symbol
@@ -287,6 +296,15 @@ public final class MarkdownMathRenderer: @unchecked Sendable {
                     let (content, newIdx) = parseGroup(latex, from: index)
                     tokens.append(.sqrt(tokenize(content)))
                     index = newIdx
+                } else if command == "begin" {
+                    let (envName, envIndex) = parseGroup(latex, from: index)
+                    if let (matrixToken, newIdx) = parseMatrixEnvironment(latex, from: envIndex, name: envName) {
+                        tokens.append(matrixToken)
+                        index = newIdx
+                    } else {
+                        tokens.append(.text("\\begin{\(envName)}"))
+                        index = envIndex
+                    }
                 } else if command == "left" || command == "right" {
                     if index < latex.endIndex {
                         let delimChar = String(latex[index])
@@ -424,6 +442,91 @@ public final class MarkdownMathRenderer: @unchecked Sendable {
         }
     }
 
+    private func parseMatrixEnvironment(_ latex: String, from startIndex: String.Index, name: String) -> (MathToken, String.Index)? {
+        let env = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let style: MatrixStyle
+        switch env {
+        case "matrix": style = .plain
+        case "pmatrix": style = .parentheses
+        case "bmatrix": style = .brackets
+        case "vmatrix": style = .bars
+        case "Vmatrix": style = .doubleBars
+        default: return nil
+        }
+
+        let endToken = "\\end{\(env)}"
+        guard let endRange = latex[startIndex...].range(of: endToken) else {
+            return nil
+        }
+
+        let content = String(latex[startIndex..<endRange.lowerBound])
+        let rows = parseMatrixRows(content)
+        let tokenRows = rows.map { row in
+            row.map { cell in tokenize(cell) }
+        }
+        return (.matrix(rows: tokenRows, style: style), endRange.upperBound)
+    }
+
+    private func parseMatrixRows(_ content: String) -> [[String]] {
+        var rows: [[String]] = []
+        var currentRow: [String] = []
+        var currentCell = ""
+        var depth = 0
+        var index = content.startIndex
+
+        func flushCell() {
+            currentRow.append(currentCell.trimmingCharacters(in: .whitespacesAndNewlines))
+            currentCell = ""
+        }
+
+        func flushRow() {
+            flushCell()
+            rows.append(currentRow)
+            currentRow = []
+        }
+
+        while index < content.endIndex {
+            let char = content[index]
+
+            if char == "{" {
+                depth += 1
+                currentCell.append(char)
+                index = content.index(after: index)
+                continue
+            }
+            if char == "}" {
+                depth = max(0, depth - 1)
+                currentCell.append(char)
+                index = content.index(after: index)
+                continue
+            }
+
+            if depth == 0, char == "\\" {
+                let next = content.index(after: index)
+                if next < content.endIndex, content[next] == "\\" {
+                    flushRow()
+                    index = content.index(after: next)
+                    continue
+                }
+            }
+
+            if depth == 0, char == "&" {
+                flushCell()
+                index = content.index(after: index)
+                continue
+            }
+
+            currentCell.append(char)
+            index = content.index(after: index)
+        }
+
+        if !currentCell.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !currentRow.isEmpty {
+            flushRow()
+        }
+
+        return rows
+    }
+
     // MARK: - Rendering
 
     private func renderToText(tokens: [MathToken]) -> String {
@@ -448,6 +551,11 @@ public final class MarkdownMathRenderer: @unchecked Sendable {
                 result += " "
             case .delimiter(let d):
                 result += d
+            case .matrix(let rows, _):
+                let renderedRows = rows.map { row in
+                    row.map { renderToText(tokens: $0) }.joined(separator: " ")
+                }
+                result += renderedRows.joined(separator: " ")
             }
         }
         return result
@@ -525,6 +633,8 @@ public final class MarkdownMathRenderer: @unchecked Sendable {
                     isItalic: false
                 ))
                 x += estimateTextWidth(d, fontSize: scaledSize)
+            case .matrix(let rows, let style):
+                layoutMatrix(rows: rows, style: style, runs: &runs, x: &x, y: y + yOffset, fontSize: scaledSize)
             }
         }
     }
@@ -555,8 +665,108 @@ public final class MarkdownMathRenderer: @unchecked Sendable {
                 width += fontSize * em
             case .delimiter(let d):
                 width += estimateTextWidth(d, fontSize: fontSize)
+            case .matrix(let rows, _):
+                width += estimateMatrixWidth(rows: rows, fontSize: fontSize)
             }
         }
         return width
+    }
+
+    private func layoutMatrix(
+        rows: [[[MathToken]]],
+        style: MatrixStyle,
+        runs: inout [MathGlyphRun],
+        x: inout CGFloat,
+        y: CGFloat,
+        fontSize: CGFloat
+    ) {
+        let rowCount = max(1, rows.count)
+        let colCount = rows.map { $0.count }.max() ?? 1
+        let rowHeight = fontSize * 1.4
+        let colSpacing = fontSize * 0.6
+        let rowSpacing = fontSize * 0.2
+
+        var colWidths: [CGFloat] = Array(repeating: 0, count: colCount)
+        for row in rows {
+            for (idx, cell) in row.enumerated() {
+                let width = estimateTokensWidth(cell, fontSize: fontSize)
+                if idx < colWidths.count {
+                    colWidths[idx] = max(colWidths[idx], width)
+                }
+            }
+        }
+
+        let matrixWidth = colWidths.reduce(0, +) + CGFloat(max(0, colCount - 1)) * colSpacing
+        let matrixHeight = CGFloat(rowCount) * rowHeight + CGFloat(max(0, rowCount - 1)) * rowSpacing
+        let topY = y - matrixHeight * 0.5
+
+        let (leftDelim, rightDelim) = matrixDelimiters(for: style)
+        let delimiterFontSize = fontSize * max(1.0, min(1.6, CGFloat(rowCount) * 0.6))
+        let delimiterYOffset = matrixHeight * 0.5
+
+        if let left = leftDelim {
+            runs.append(MathGlyphRun(
+                text: left,
+                position: CGPoint(x: x, y: topY + delimiterYOffset),
+                fontSize: delimiterFontSize,
+                color: mathColor,
+                isItalic: false
+            ))
+            x += estimateTextWidth(left, fontSize: delimiterFontSize) + fontSize * 0.4
+        }
+
+        for rowIndex in 0..<rowCount {
+            let row = rowIndex < rows.count ? rows[rowIndex] : []
+            var cellX = x
+            let baselineY = topY + CGFloat(rowIndex) * (rowHeight + rowSpacing) + rowHeight * 0.7
+            for colIndex in 0..<colCount {
+                let cell = colIndex < row.count ? row[colIndex] : []
+                var innerX = cellX
+                layoutTokens(cell, runs: &runs, x: &innerX, y: baselineY, fontSize: fontSize, scriptLevel: 0)
+                cellX += colWidths[colIndex] + colSpacing
+            }
+        }
+
+        x += matrixWidth
+
+        if let right = rightDelim {
+            x += fontSize * 0.4
+            runs.append(MathGlyphRun(
+                text: right,
+                position: CGPoint(x: x, y: topY + delimiterYOffset),
+                fontSize: delimiterFontSize,
+                color: mathColor,
+                isItalic: false
+            ))
+            x += estimateTextWidth(right, fontSize: delimiterFontSize)
+        }
+    }
+
+    private func matrixDelimiters(for style: MatrixStyle) -> (String?, String?) {
+        switch style {
+        case .plain:
+            return (nil, nil)
+        case .parentheses:
+            return ("(", ")")
+        case .brackets:
+            return ("[", "]")
+        case .bars:
+            return ("|", "|")
+        case .doubleBars:
+            return ("\u{2016}", "\u{2016}")
+        }
+    }
+
+    private func estimateMatrixWidth(rows: [[[MathToken]]], fontSize: CGFloat) -> CGFloat {
+        let colCount = rows.map { $0.count }.max() ?? 1
+        let colSpacing = fontSize * 0.6
+        var colWidths: [CGFloat] = Array(repeating: 0, count: colCount)
+        for row in rows {
+            for (idx, cell) in row.enumerated() {
+                let width = estimateTokensWidth(cell, fontSize: fontSize)
+                colWidths[idx] = max(colWidths[idx], width)
+            }
+        }
+        return colWidths.reduce(0, +) + CGFloat(max(0, colCount - 1)) * colSpacing + fontSize
     }
 }

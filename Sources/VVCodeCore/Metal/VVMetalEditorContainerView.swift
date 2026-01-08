@@ -11,12 +11,10 @@ public final class VVMetalEditorContainerView: NSView {
     // MARK: - Properties
 
     public private(set) var metalTextView: MetalTextView!
-    public private(set) var gutterView: MetalGutterView!
     public private(set) var hiddenInputView: HiddenInputView!
     public private(set) var scrollView: NSScrollView!
     private var documentView: MetalDocumentView!
 
-    private var renderer: MetalRenderer!
     private var textStorage: String = ""
 
     // Configuration
@@ -31,6 +29,8 @@ public final class VVMetalEditorContainerView: NSView {
     private var selectionAnchorLine: Int?
     private var selectionAnchorColumn: Int?
     private var selectionAnchorRange: NSRange?
+    private var markedTextRange: NSRange?
+    private var isComposingMarkedText: Bool = false
 
     private enum SelectionMode {
         case character
@@ -47,6 +47,11 @@ public final class VVMetalEditorContainerView: NSView {
         case searchForward
         case searchBackward
         case replaceCharacter
+    }
+
+    public enum SearchScope {
+        case currentFile
+        case openDocuments
     }
 
     private struct Selection {
@@ -76,6 +81,11 @@ public final class VVMetalEditorContainerView: NSView {
     private var lastSearchQuery: String = ""
     private var lastSearchForward: Bool = true
     private var searchReturnMode: HelixMode?
+    private var searchScope: SearchScope = .currentFile
+    private var searchOverlayActive: Bool = false
+    public var onSearchOpenDocuments: ((String) -> Void)?
+    public var onSearchRequest: ((SearchScope) -> Void)?
+    public var onRepeatSearchRequest: ((Bool) -> Void)?
     private var lastFindCharacter: Character?
     private var lastFindForward: Bool = true
     private var pendingGCommand = false
@@ -86,17 +96,8 @@ public final class VVMetalEditorContainerView: NSView {
     }
     private var pendingFind: PendingFind?
 
-    private var statusBar: MetalStatusBarView!
     private let defaultStatusBarHeight: CGFloat = 22
     private var statusBarHeight: CGFloat { defaultStatusBarHeight }
-    private var statusBarBottomInset: CGFloat {
-        guard helixModeEnabled else { return 0 }
-        return metalTextView?.lineHeight ?? defaultStatusBarHeight
-    }
-    private var statusBarTotalHeight: CGFloat {
-        guard helixModeEnabled else { return 0 }
-        return statusBarHeight + statusBarBottomInset
-    }
 
     // Syntax highlighting
     private var highlighter: TreeSitterHighlighter?
@@ -115,6 +116,10 @@ public final class VVMetalEditorContainerView: NSView {
     private var lastHighlightedRange: NSRange?
     private var dirtyHighlightRange: NSRange?
     private var lastParsedText: String?
+    private var textRevision: Int = 0
+    private var searchCache: (query: String, caseSensitive: Bool, token: Int, matches: [NSRange])?
+    private let searchMatchLimit: Int = 20_000
+    private var searchOptions = SearchEngine.Options(caseSensitive: true)
 
     // Line map for position calculations
     private var lineMap: LineMap?
@@ -186,13 +191,6 @@ public final class VVMetalEditorContainerView: NSView {
             fatalError("Metal is not supported on this device")
         }
 
-        // Create renderer
-        do {
-            renderer = try MetalRenderer(device: device, baseFont: _configuration.font)
-        } catch {
-            fatalError("Failed to create Metal renderer: \(error)")
-        }
-
         // Create Metal text view
         metalTextView = MetalTextView(
             frame: bounds,
@@ -215,44 +213,35 @@ public final class VVMetalEditorContainerView: NSView {
         scrollView.drawsBackground = false
         scrollView.contentView.postsBoundsChangedNotifications = true
 
-        // Create gutter view
-        gutterView = MetalGutterView(frame: NSRect(x: 0, y: 0, width: 50, height: bounds.height), renderer: renderer)
-        gutterView.baselineProvider = { [weak metalTextView] line in
-            metalTextView?.baselineY(forLine: line)
-        }
-        gutterView.visibleLineRangeProvider = { [weak metalTextView] scrollOffset, height in
-            metalTextView?.visibleLineRange(scrollOffset: scrollOffset, height: height) ?? (0, 0)
-        }
-        gutterView.linePresenceProvider = { [weak metalTextView] line in
-            metalTextView?.baselineY(forLine: line) != nil
-        }
-        gutterView.lineForPointProvider = { [weak metalTextView] y in
-            metalTextView?.documentLineIndex(atY: y)
-        }
-        gutterView.onToggleFold = { [weak self] line in
-            self?.toggleFold(atLine: line)
-        }
-
         // Create hidden input view
         hiddenInputView = HiddenInputView()
         hiddenInputView.inputDelegate = self
         hiddenInputView.metalTextView = metalTextView
+        hiddenInputView.textProvider = { [weak self] in
+            self?.textStorage ?? ""
+        }
+        hiddenInputView.selectedRangeProvider = { [weak self] in
+            if let range = self?.selectionRanges.first {
+                return range
+            }
+            let length = self?.currentTextLengthUTF16() ?? 0
+            return NSRange(location: length, length: 0)
+        }
+        hiddenInputView.markedRangeProvider = { [weak self] in
+            self?.markedTextRange
+        }
 
         // Set delegate for mouse events
         metalTextView.textDelegate = self
+        metalTextView.onToggleFold = { [weak self] line in
+            self?.toggleFold(atLine: line)
+        }
+        metalTextView.menu = buildContextMenu()
 
         // Add subviews
-        statusBar = MetalStatusBarView(
-            frame: NSRect(x: 0, y: 0, width: bounds.width, height: defaultStatusBarHeight),
-            renderer: renderer,
-            font: _configuration.font
-        )
-
-        addSubview(gutterView)
         addSubview(scrollView)
         scrollView.addSubview(metalTextView)
         addSubview(hiddenInputView)
-        addSubview(statusBar)
 
         // Setup scroll observation
         NotificationCenter.default.publisher(for: NSView.boundsDidChangeNotification, object: scrollView.contentView)
@@ -263,25 +252,14 @@ public final class VVMetalEditorContainerView: NSView {
 
         setupStatusBar()
         updateHelixUI()
-        syncGutterInsets()
     }
 
     // MARK: - Layout
 
     override public func layout() {
         super.layout()
-
-        let gutterWidth = gutterView.requiredWidth
-        let reservedHeight = statusBarTotalHeight
-        let availableHeight = max(0, bounds.height - reservedHeight)
-        gutterView.frame = NSRect(x: 0, y: reservedHeight, width: gutterWidth, height: availableHeight)
-        scrollView.frame = NSRect(x: gutterWidth, y: reservedHeight, width: bounds.width - gutterWidth, height: availableHeight)
-        let barHeight = helixModeEnabled ? statusBarHeight : 0
-        statusBar.frame = NSRect(x: 0, y: statusBarBottomInset, width: bounds.width, height: barHeight)
-
+        scrollView.frame = bounds
         updateContentSize()
-
-        layoutStatusBar()
     }
 
     override public func viewDidChangeBackingProperties() {
@@ -305,6 +283,10 @@ public final class VVMetalEditorContainerView: NSView {
         let normalized = normalizeLineEndings(text)
         let textChanged = normalized != textStorage
         textStorage = normalized
+        textRevision &+= 1
+        searchCache = nil
+        metalTextView.setSearchMatchRanges([])
+        metalTextView.setActiveSearchMatch(nil)
         if lastEditRange == nil {
             previousText = textStorage
         }
@@ -313,7 +295,6 @@ public final class VVMetalEditorContainerView: NSView {
         }
         lineMap = LineMap(text: textStorage)
         metalTextView.setText(textStorage)
-        gutterView.setLineCount(lineMap?.lineCount ?? 0)
         recomputeFolding()
 
         if applyHighlighting {
@@ -333,6 +314,93 @@ public final class VVMetalEditorContainerView: NSView {
     /// Get the text content
     public var text: String {
         textStorage
+    }
+
+    /// Select a UTF-16 range and optionally scroll it into view.
+    public func selectRange(_ range: NSRange, scrollToVisible: Bool = true) {
+        let clamped = clampRangeToDocument(range)
+        applySelection(clamped)
+        if scrollToVisible {
+            scrollToRange(clamped)
+        }
+    }
+
+    public func findMatches(query: String, limit: Int? = nil) -> [NSRange] {
+        guard !query.isEmpty else { return [] }
+        let matches = searchMatches(for: query, options: searchOptions)
+        if let limit, matches.count > limit {
+            return Array(matches.prefix(limit))
+        }
+        return matches
+    }
+
+    public func findNextMatch(query: String, forward: Bool) -> NSRange? {
+        guard !query.isEmpty else { return nil }
+        let matches = searchMatches(for: query, options: searchOptions)
+        guard !matches.isEmpty else { return nil }
+        let cursor = selections.first?.cursor ?? 0
+        let match = nextMatch(from: cursor, forward: forward, matches: matches)
+        metalTextView?.setSearchMatchRanges(matches)
+        metalTextView?.setActiveSearchMatch(match)
+        return match
+    }
+
+    public func matchCount(query: String) -> Int {
+        guard !query.isEmpty else { return 0 }
+        return searchMatches(for: query, options: searchOptions).count
+    }
+
+    @discardableResult
+    public func setSearchHighlights(query: String) -> Int {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            metalTextView?.setSearchMatchRanges([])
+            metalTextView?.setActiveSearchMatch(nil)
+            return 0
+        }
+        let matches = searchMatches(for: trimmed, options: searchOptions)
+        metalTextView?.setSearchMatchRanges(matches)
+        let cursor = selections.first?.cursor ?? 0
+        let active = nextMatch(from: cursor, forward: true, matches: matches)
+        metalTextView?.setActiveSearchMatch(active)
+        return matches.count
+    }
+
+    public func setActiveSearchMatch(_ range: NSRange?) {
+        metalTextView?.setActiveSearchMatch(range)
+    }
+
+    public func clearSearchHighlights() {
+        metalTextView?.setSearchMatchRanges([])
+        metalTextView?.setActiveSearchMatch(nil)
+    }
+
+    public func setSearchOptions(_ options: SearchEngine.Options) {
+        searchOptions = options
+        searchCache = nil
+        updateSearchOverlay()
+    }
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = true
+
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "")
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "")
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "")
+        let selectAllItem = NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "")
+
+        [cutItem, copyItem, pasteItem, selectAllItem].forEach { item in
+            item.target = hiddenInputView
+        }
+
+        menu.addItem(cutItem)
+        menu.addItem(copyItem)
+        menu.addItem(pasteItem)
+        menu.addItem(.separator())
+        menu.addItem(selectAllItem)
+
+        return menu
     }
 
     /// Set syntax highlighter
@@ -382,7 +450,7 @@ public final class VVMetalEditorContainerView: NSView {
 
     /// Set git hunks for gutter display
     public func setGitHunks(_ hunks: [MetalGutterView.GitHunk]) {
-        gutterView.setGitHunks(hunks)
+        metalTextView.setGitHunks(hunks)
     }
 
     // MARK: - Cursor and Selection
@@ -486,7 +554,7 @@ public final class VVMetalEditorContainerView: NSView {
         normalizeSelections()
         selectionRanges = selections.map { $0.range }
         metalTextView.setSelection(selectionRanges)
-        gutterView.setSelectedLineRanges(selectionLineRanges(from: selectionRanges))
+        metalTextView.setSelectedLineRanges(selectionLineRanges(from: selectionRanges))
 
         let cursorPositions = selections.map { selection -> (line: Int, column: Int) in
             lineMapPosition(forOffset: selection.cursor)
@@ -498,12 +566,13 @@ public final class VVMetalEditorContainerView: NSView {
             cursorLine = primaryPos.line
             cursorColumn = primaryPos.column
             metalTextView.setCursors(cursorPositions, primaryIndex: primary)
-            gutterView.currentLine = primaryPos.line
+            metalTextView.setCurrentLineNumber(primaryPos.line)
             delegate?.editorDidChangeCursorPosition(VVTextPosition(line: primaryPos.line, character: primaryPos.column))
         }
         updateBracketHighlight()
         updateActiveIndentGuides()
         updateStatusBar()
+        updateSearchOverlay()
     }
 
     private func applySelection(_ range: NSRange, updateAnchor: Bool = true) {
@@ -889,37 +958,125 @@ public final class VVMetalEditorContainerView: NSView {
 
     private func applySearch(query: String, forward: Bool, extendSelection: Bool) {
         guard !query.isEmpty else { return }
-        let nsText = textStorage as NSString
-        let length = nsText.length
-        if length == 0 { return }
+        let matches = searchMatches(for: query, options: searchOptions)
+        metalTextView?.setSearchMatchRanges(matches)
+        guard !matches.isEmpty else {
+            metalTextView?.setActiveSearchMatch(nil)
+            NSSound.beep()
+            return
+        }
 
         let sorted = selections.enumerated().map { ($0.offset, $0.element) }
         var updated: [Selection] = selections
 
         for (index, selection) in sorted {
-            if forward {
-                let start = min(selection.cursor + 1, length)
-                let range = NSRange(location: start, length: length - start)
-                let found = nsText.range(of: query, options: [], range: range)
-                if found.location != NSNotFound {
-                    let cursor = found.location + found.length
-                    let anchor = extendSelection ? selection.anchor : found.location
-                    updated[index] = Selection(anchor: anchor, cursor: cursor)
-                }
-            } else {
-                let start = max(0, min(selection.cursor - 1, length - 1))
-                let range = NSRange(location: 0, length: start + 1)
-                let found = nsText.range(of: query, options: [.backwards], range: range)
-                if found.location != NSNotFound {
-                    let cursor = found.location + found.length
-                    let anchor = extendSelection ? selection.anchor : found.location
-                    updated[index] = Selection(anchor: anchor, cursor: cursor)
-                }
+            let match = nextMatch(
+                from: selection.cursor,
+                forward: forward,
+                matches: matches
+            ) ?? matches.first
+
+            guard let found = match else { continue }
+            let cursor = found.location + found.length
+            let anchor = extendSelection ? selection.anchor : found.location
+            updated[index] = Selection(anchor: anchor, cursor: cursor)
+
+            if index == primarySelectionIndex {
+                metalTextView?.setActiveSearchMatch(found)
             }
         }
 
         selections = updated
         updateSelectionsDisplay()
+    }
+
+    private func beginSearchOverlay(scope: SearchScope, forward: Bool) {
+        searchOverlayActive = true
+        searchScope = scope
+        if searchQuery.isEmpty {
+            searchQuery = lastSearchQuery
+        }
+        lastSearchForward = forward
+        updateSearchHighlightsForOverlay()
+        updateSearchOverlay()
+        window?.makeFirstResponder(hiddenInputView)
+    }
+
+    private func endSearchOverlay() {
+        searchOverlayActive = false
+        searchQuery = ""
+        searchScope = .currentFile
+        clearSearchHighlights()
+        updateSearchOverlay()
+    }
+
+    private func updateSearchHighlightsForOverlay() {
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            clearSearchHighlights()
+            return
+        }
+        if searchScope == .currentFile {
+            _ = setSearchHighlights(query: trimmed)
+        } else {
+            clearSearchHighlights()
+        }
+    }
+
+    private func performOverlaySearch(forward: Bool) {
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        lastSearchQuery = trimmed
+        lastSearchForward = forward
+
+        if searchScope == .openDocuments {
+            onSearchOpenDocuments?(trimmed)
+            if onSearchOpenDocuments == nil {
+                applySearch(query: trimmed, forward: forward, extendSelection: false)
+            }
+        } else {
+            applySearch(query: trimmed, forward: forward, extendSelection: false)
+        }
+
+        updateSearchOverlay()
+    }
+
+    private func handleSearchOverlayKeyDown(_ event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) {
+            return false
+        }
+
+        if event.keyCode == 53 { // Esc
+            endSearchOverlay()
+            return true
+        }
+
+        if event.keyCode == 36 { // Return
+            let forward = !event.modifierFlags.contains(.shift)
+            performOverlaySearch(forward: forward)
+            return true
+        }
+
+        if event.keyCode == 51 { // Backspace
+            if !searchQuery.isEmpty {
+                searchQuery.removeLast()
+                updateSearchHighlightsForOverlay()
+                updateSearchOverlay()
+            }
+            return true
+        }
+
+        if let chars = event.characters, !chars.isEmpty {
+            searchQuery.append(chars)
+            updateSearchHighlightsForOverlay()
+            updateSearchOverlay()
+            return true
+        }
+
+        return true
     }
 
     private func selectionRangesForOperation(expandEmptyToChar: Bool) -> [(range: NSRange, index: Int)] {
@@ -940,6 +1097,85 @@ public final class VVMetalEditorContainerView: NSView {
             }
         }
 
+        return result
+    }
+
+    private func searchMatches(for query: String, options: SearchEngine.Options) -> [NSRange] {
+        if let cache = searchCache,
+           cache.query == query,
+           cache.caseSensitive == options.caseSensitive,
+           cache.token == textRevision {
+            return cache.matches
+        }
+
+        let matches = SearchEngine.findAllMatches(
+            in: textStorage,
+            query: query,
+            options: options,
+            limit: searchMatchLimit
+        )
+        searchCache = (query: query, caseSensitive: options.caseSensitive, token: textRevision, matches: matches)
+        return matches
+    }
+
+    private func nextMatch(from cursor: Int, forward: Bool, matches: [NSRange]) -> NSRange? {
+        guard !matches.isEmpty else { return nil }
+        if forward {
+            let target = cursor + 1
+            if let idx = firstMatchIndex(atOrAfter: target, matches: matches) {
+                return matches[idx]
+            }
+            return matches.first
+        } else {
+            let target = cursor - 1
+            if let idx = lastMatchIndex(atOrBefore: target, matches: matches) {
+                return matches[idx]
+            }
+            return matches.last
+        }
+    }
+
+    private func firstMatchIndex(atOrAfter offset: Int, matches: [NSRange]) -> Int? {
+        var low = 0
+        var high = matches.count - 1
+        var result: Int? = nil
+        while low <= high {
+            let mid = (low + high) / 2
+            if matches[mid].location >= offset {
+                result = mid
+                high = mid - 1
+            } else {
+                low = mid + 1
+            }
+        }
+        return result
+    }
+
+    private func matchIndex(for offset: Int, matches: [NSRange]) -> Int? {
+        guard !matches.isEmpty else { return nil }
+        if let idx = firstMatchIndex(atOrAfter: offset, matches: matches) {
+            let match = matches[idx]
+            if offset >= match.location && offset <= match.location + match.length {
+                return idx
+            }
+            return idx
+        }
+        return matches.indices.last
+    }
+
+    private func lastMatchIndex(atOrBefore offset: Int, matches: [NSRange]) -> Int? {
+        var low = 0
+        var high = matches.count - 1
+        var result: Int? = nil
+        while low <= high {
+            let mid = (low + high) / 2
+            if matches[mid].location <= offset {
+                result = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
         return result
     }
 
@@ -998,8 +1234,11 @@ public final class VVMetalEditorContainerView: NSView {
 
         let newText = nsText as String
         textStorage = newText
+        textRevision &+= 1
+        searchCache = nil
+        metalTextView?.setSearchMatchRanges([])
+        metalTextView?.setActiveSearchMatch(nil)
         lineMap = LineMap(text: textStorage)
-        gutterView.setLineCount(lineMap?.lineCount ?? 0)
 
         if ranges.count == 1 {
             metalTextView.applyEdit(range: ranges[0].range, replacement: normalized)
@@ -1124,7 +1363,6 @@ public final class VVMetalEditorContainerView: NSView {
         let newText = nsText as String
         textStorage = newText
         lineMap = LineMap(text: textStorage)
-        gutterView.setLineCount(lineMap?.lineCount ?? 0)
 
         if sorted.count == 1 {
             metalTextView.applyEdit(range: sorted[0].range, replacement: "")
@@ -1199,7 +1437,6 @@ public final class VVMetalEditorContainerView: NSView {
         let newText = nsText as String
         textStorage = newText
         lineMap = LineMap(text: textStorage)
-        gutterView.setLineCount(lineMap?.lineCount ?? 0)
 
         if sorted.count == 1 {
             metalTextView.applyEdit(range: sorted[0].range, replacement: "")
@@ -1291,7 +1528,6 @@ public final class VVMetalEditorContainerView: NSView {
         let newText = nsText as String
         textStorage = newText
         lineMap = LineMap(text: textStorage)
-        gutterView.setLineCount(lineMap?.lineCount ?? 0)
 
         if sorted.count == 1 {
             metalTextView.applyEdit(range: sorted[0].range, replacement: yankRegister.values.first ?? "")
@@ -1315,8 +1551,7 @@ public final class VVMetalEditorContainerView: NSView {
     // MARK: - Scroll Handling
 
     private func handleScroll() {
-        let visibleRect = updateMetalViewport()
-        gutterView.scrollOffset = visibleRect.origin.y
+        _ = updateMetalViewport()
 
         // Trigger visible-range-only highlighting
         scheduleScrollHighlight()
@@ -1325,40 +1560,32 @@ public final class VVMetalEditorContainerView: NSView {
     // MARK: - Configuration
 
     private func applyConfiguration() {
-        metalTextView?.setTextInsets(NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 4))
+        metalTextView?.setTextInsets(NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4))
+        metalTextView?.setGutterInsets(NSEdgeInsets(top: 4, left: 12, bottom: 4, right: 16))
         metalTextView?.updateFont(_configuration.font, lineHeightMultiplier: _configuration.lineHeight)
-        gutterView?.setFont(_configuration.font)
-        gutterView?.minimumWidth = _configuration.minimumGutterWidth
-        gutterView?.setLineHeight(metalTextView.lineHeight, ascent: metalTextView.layoutEngine.calculatedBaselineOffset)
-        statusBar?.setFont(_configuration.font)
-        renderer?.updateFont(_configuration.font)
+        metalTextView?.setMinimumGutterWidth(_configuration.minimumGutterWidth)
+        metalTextView?.setShowsGutter(_configuration.showGutter)
+        metalTextView?.setShowsLineNumbers(_configuration.showLineNumbers)
+        metalTextView?.setShowsGitGutter(_configuration.showGitGutter)
+        metalTextView?.setStatusBarHeight(statusBarHeight)
         setHelixModeEnabled(_configuration.helixModeEnabled)
-        syncGutterInsets()
 
         // Update content size after font change
         updateContentSize()
         recomputeFolding()
     }
 
-    private func syncGutterInsets() {
-        guard let metalTextView = metalTextView else { return }
-        var insets = gutterView.textInsets
-        insets.top = metalTextView.textInsets.top
-        insets.bottom = metalTextView.textInsets.bottom
-        gutterView.textInsets = insets
-        gutterView.verticalOffset = 0
-    }
-
     private func updateModeIndicator() {
         updateCursorStyle()
         updateStatusBar()
+        updateSearchOverlay()
     }
 
     private func updateHelixUI() {
-        statusBar.isHidden = !helixModeEnabled
+        metalTextView?.setStatusBarEnabled(helixModeEnabled)
+        metalTextView?.setStatusBarHeight(statusBarHeight)
         updateModeIndicator()
-        needsLayout = true
-        layoutSubtreeIfNeeded()
+        updateContentSize()
     }
 
     private func updateCursorStyle() {
@@ -1375,7 +1602,6 @@ public final class VVMetalEditorContainerView: NSView {
     }
 
     private func setupStatusBar() {
-        statusBar.setFont(_configuration.font)
         updateStatusBar()
     }
 
@@ -1388,9 +1614,13 @@ public final class VVMetalEditorContainerView: NSView {
         case .select:
             return "SELECT"
         case .searchForward:
-            return searchQuery.isEmpty ? "SEARCH /" : "SEARCH / \(searchQuery)"
+            let prefix = searchScope == .openDocuments ? "SEARCH ALL /" : "SEARCH /"
+            if searchQuery.isEmpty { return prefix }
+            return "\(prefix) \(searchQuery)\(searchStatusSuffix())"
         case .searchBackward:
-            return searchQuery.isEmpty ? "SEARCH ?" : "SEARCH ? \(searchQuery)"
+            let prefix = searchScope == .openDocuments ? "SEARCH ALL ?" : "SEARCH ?"
+            if searchQuery.isEmpty { return prefix }
+            return "\(prefix) \(searchQuery)\(searchStatusSuffix())"
         case .replaceCharacter:
             return "REPLACE"
         }
@@ -1398,7 +1628,7 @@ public final class VVMetalEditorContainerView: NSView {
 
     private func updateStatusBar() {
         guard helixModeEnabled else {
-            statusBar?.setText(left: "", right: "")
+            metalTextView?.setStatusBarText(left: "", right: "")
             return
         }
         let mode = modeLabelText()
@@ -1406,13 +1636,56 @@ public final class VVMetalEditorContainerView: NSView {
         let column = cursorColumn + 1
         let selectionInfo = selections.count > 1 ? "\(selections.count) selections" : "1 selection"
         let info = "Ln \(line), Col \(column)  •  \(selectionInfo)"
+        let caseIndicator = searchOptions.caseSensitive ? "Aa" : "aA"
         applyStatusBarModeStyle()
-        statusBar.setText(left: mode, right: info)
-        layoutStatusBar()
+        metalTextView?.setStatusBarText(left: mode, right: info, rightBadge: caseIndicator)
+    }
+
+    private var isSearchOverlayVisible: Bool {
+        searchOverlayActive || helixMode == .searchForward || helixMode == .searchBackward
+    }
+
+    private func updateSearchOverlay() {
+        guard let metalTextView = metalTextView else { return }
+
+        let visible = isSearchOverlayVisible
+        let active = searchOverlayActive || helixMode == .searchForward || helixMode == .searchBackward
+        let scopeValue: MetalTextView.SearchOverlayScope = (searchScope == .openDocuments) ? .openDocuments : .currentFile
+        let matchInfo = searchMatchInfo(query: searchQuery, scope: searchScope)
+
+        metalTextView.setSearchOverlayState(
+            visible: visible,
+            active: active,
+            query: searchQuery,
+            scope: scopeValue,
+            caseSensitive: searchOptions.caseSensitive,
+            matchIndex: matchInfo?.index,
+            matchCount: matchInfo?.count
+        )
+    }
+
+    private func searchMatchInfo(query: String, scope: SearchScope) -> (index: Int, count: Int)? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard scope == .currentFile else { return nil }
+        let matches = searchMatches(for: trimmed, options: searchOptions)
+        guard !matches.isEmpty else { return (0, 0) }
+        let cursor = selections.first?.cursor ?? 0
+        let index = matchIndex(for: cursor, matches: matches) ?? 0
+        return (index + 1, matches.count)
+    }
+
+    private func searchStatusSuffix() -> String {
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let matches = searchMatches(for: trimmed, options: searchOptions)
+        guard !matches.isEmpty else { return " (0/0)" }
+        let cursor = selections.first?.cursor ?? 0
+        let index = matchIndex(for: cursor, matches: matches) ?? 0
+        return " (\(index + 1)/\(matches.count))"
     }
 
     private func applyStatusBarModeStyle() {
-        guard let statusBar = statusBar else { return }
         let background: NSColor
         let text: NSColor
         switch helixMode {
@@ -1432,23 +1705,14 @@ public final class VVMetalEditorContainerView: NSView {
             background = _theme.gitDeletedColor
             text = _theme.textColor
         }
-        statusBar.modeBackgroundColor = background
-        statusBar.modeTextColor = text
-    }
-
-    private func layoutStatusBar() {
-        guard helixModeEnabled else { return }
-        statusBar.frame = NSRect(x: 0, y: statusBarBottomInset, width: bounds.width, height: statusBarHeight)
+        metalTextView?.statusBarModeBackgroundColor = background
+        metalTextView?.statusBarModeTextColor = text
     }
 
     private func updateContentSize() {
         guard let metalTextView = metalTextView else { return }
 
-        let gutterWidth = gutterView?.requiredWidth ?? 0
         let contentSize = metalTextView.contentSize
-        gutterView?.setLineHeight(metalTextView.lineHeight, ascent: metalTextView.layoutEngine.calculatedBaselineOffset)
-        gutterView?.verticalOffset = 0
-        let availableHeight = max(0, bounds.height - statusBarTotalHeight)
         let viewportWidth = max(0, scrollView.contentView.bounds.width)
         let viewportHeight = max(0, scrollView.contentView.bounds.height)
         let documentSize = CGSize(
@@ -1459,16 +1723,6 @@ public final class VVMetalEditorContainerView: NSView {
         // Update document view size for scrollbars
         documentView.frame = CGRect(origin: .zero, size: documentSize)
 
-        // Update gutter height
-        if let gutterView = gutterView {
-            gutterView.frame = NSRect(
-                x: 0,
-                y: statusBarTotalHeight,
-                width: gutterWidth,
-                height: availableHeight
-            )
-        }
-
         updateMetalViewport()
     }
 
@@ -1478,15 +1732,34 @@ public final class VVMetalEditorContainerView: NSView {
         let viewportSize = scrollView.contentView.bounds.size
         let viewportOrigin = scrollView.contentView.frame.origin
         metalTextView.scrollOffset = visibleRect.origin
-        gutterView.scrollOffset = visibleRect.origin.y
         metalTextView.frame = CGRect(origin: viewportOrigin, size: viewportSize)
         return visibleRect
+    }
+
+    private func scrollToRange(_ range: NSRange) {
+        guard let metalTextView = metalTextView else { return }
+        let pos = lineMapPosition(forOffset: range.location)
+        let lineHeight = metalTextView.lineHeight
+        let viewportHeight = scrollView.contentView.bounds.height
+        let docHeight = documentView.bounds.height
+
+        guard lineHeight > 0, viewportHeight > 0 else { return }
+
+        let targetLineY = CGFloat(pos.line) * lineHeight
+        let centeredY = targetLineY - (viewportHeight - lineHeight) * 0.5
+        let maxY = max(0, docHeight - viewportHeight)
+        let clampedY = max(0, min(centeredY, maxY))
+
+        let currentX = scrollView.documentVisibleRect.origin.x
+        scrollView.contentView.scroll(to: NSPoint(x: currentX, y: clampedY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        updateMetalViewport()
     }
 
     private func ensureGlyphPreloadIfNeeded(with text: String) {
         guard !didPreloadGlyphs else { return }
         guard !text.isEmpty else { return }
-        renderer?.glyphAtlas.preloadASCII()
+        metalTextView?.renderer?.glyphAtlas.preloadASCII()
         didPreloadGlyphs = true
     }
 
@@ -1495,6 +1768,8 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView?.setDefaultTextColor(_theme.textColor)
         metalTextView?.selectionColor = _theme.selectionColor
         metalTextView?.cursorColor = _theme.cursorColor
+        metalTextView?.searchHighlightColor = _theme.selectionColor.withAlphaComponent(0.2)
+        metalTextView?.activeSearchHighlightColor = _theme.selectionColor.withAlphaComponent(0.4)
         metalTextView?.indentGuideColor = _theme.gutterSeparatorColor.withAlphaComponent(0.22)
         metalTextView?.indentGuideLinePadding = 0
         metalTextView?.indentGuideLineWidth = 1
@@ -1502,19 +1777,39 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView?.activeIndentGuideLineWidth = 1.5
         metalTextView?.bracketHighlightColor = _theme.selectionColor.withAlphaComponent(0.35)
         metalTextView?.foldPlaceholderColor = _theme.gutterTextColor.withAlphaComponent(0.8)
+        metalTextView?.markedTextUnderlineColor = _theme.selectionColor.withAlphaComponent(0.9)
 
-        gutterView?.setBackgroundColor(_theme.backgroundColor)
-        gutterView?.lineNumberColor = _theme.gutterTextColor
-        gutterView?.currentLineNumberColor = _theme.textColor
-        gutterView?.selectedLineNumberColor = _theme.gutterActiveTextColor
-        gutterView?.foldMarkerColor = _theme.gutterTextColor.withAlphaComponent(0.8)
-        gutterView?.foldMarkerActiveColor = _theme.textColor
-        gutterView?.foldMarkerHoverBackgroundColor = _theme.gutterSeparatorColor.withAlphaComponent(0.25)
+        metalTextView?.gutterBackgroundColor = _theme.gutterBackgroundColor
+        metalTextView?.gutterSeparatorColor = _theme.gutterSeparatorColor
+        metalTextView?.lineNumberColor = _theme.gutterTextColor
+        metalTextView?.currentLineNumberColor = _theme.textColor
+        metalTextView?.selectedLineNumberColor = _theme.gutterActiveTextColor
+        metalTextView?.foldMarkerColor = _theme.gutterTextColor.withAlphaComponent(0.8)
+        metalTextView?.foldMarkerActiveColor = _theme.textColor
+        metalTextView?.foldMarkerHoverBackgroundColor = _theme.gutterSeparatorColor.withAlphaComponent(0.25)
+        metalTextView?.gitAddedColor = _theme.gitAddedColor
+        metalTextView?.gitModifiedColor = _theme.gitModifiedColor
+        metalTextView?.gitDeletedColor = _theme.gitDeletedColor
 
-        statusBar?.backgroundColor = _theme.gutterBackgroundColor
-        statusBar?.borderColor = _theme.gutterSeparatorColor
-        statusBar?.textColor = _theme.textColor
-        statusBar?.secondaryTextColor = _theme.gutterTextColor
+        metalTextView?.statusBarBackgroundColor = _theme.gutterBackgroundColor
+        metalTextView?.statusBarBorderColor = _theme.gutterSeparatorColor
+        metalTextView?.statusBarTextColor = _theme.textColor
+        metalTextView?.statusBarSecondaryTextColor = _theme.gutterTextColor
+        metalTextView?.statusBarBadgeBackgroundColor = _theme.selectionColor.withAlphaComponent(0.25)
+        metalTextView?.statusBarBadgeTextColor = _theme.textColor
+
+        metalTextView?.searchOverlayBackgroundColor = _theme.gutterBackgroundColor.withAlphaComponent(0.95)
+        metalTextView?.searchOverlayBorderColor = _theme.gutterSeparatorColor.withAlphaComponent(0.65)
+        metalTextView?.searchOverlayFieldBackgroundColor = _theme.backgroundColor.withAlphaComponent(0.9)
+        metalTextView?.searchOverlayFieldBorderColor = _theme.gutterSeparatorColor.withAlphaComponent(0.45)
+        metalTextView?.searchOverlayFieldActiveBorderColor = _theme.selectionColor.withAlphaComponent(0.9)
+        metalTextView?.searchOverlayTextColor = _theme.textColor
+        metalTextView?.searchOverlayPlaceholderColor = _theme.gutterTextColor.withAlphaComponent(0.7)
+        metalTextView?.searchOverlayButtonBackgroundColor = _theme.gutterSeparatorColor.withAlphaComponent(0.35)
+        metalTextView?.searchOverlayButtonHoverBackgroundColor = _theme.gutterSeparatorColor.withAlphaComponent(0.55)
+        metalTextView?.searchOverlayButtonActiveBackgroundColor = _theme.selectionColor.withAlphaComponent(0.6)
+        metalTextView?.searchOverlayButtonTextColor = _theme.textColor.withAlphaComponent(0.85)
+        metalTextView?.searchOverlayButtonActiveTextColor = _theme.textColor
         applyStatusBarModeStyle()
 
         // Update highlight theme based on background brightness
@@ -1559,7 +1854,7 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView?.setIndentGuideSegments([])
         metalTextView?.setActiveIndentGuideSegments([])
         metalTextView?.setFoldedLineRanges([])
-        gutterView?.setFoldRanges([], foldedStartLines: [])
+        metalTextView?.setFoldRanges([], foldedStartLines: [])
     }
 
     private func applyFoldingRanges(_ ranges: [VVHighlighting.FoldingRange]) {
@@ -1607,7 +1902,7 @@ public final class VVMetalEditorContainerView: NSView {
         foldedRanges = folded
         metalTextView?.setFoldedLineRanges(folded)
         let gutterRanges = foldableRanges.map { MetalGutterView.FoldRange(startLine: $0.startLine, endLine: $0.endLine) }
-        gutterView?.setFoldRanges(gutterRanges, foldedStartLines: foldedStartLines)
+        metalTextView?.setFoldRanges(gutterRanges, foldedStartLines: foldedStartLines)
         updateContentSize()
         ensureSelectionsVisibleAfterFolding()
     }
@@ -1823,7 +2118,7 @@ public final class VVMetalEditorContainerView: NSView {
                 status: status
             )
         }
-        gutterView.setGitHunks(metalHunks)
+        metalTextView.setGitHunks(metalHunks)
     }
 
     /// Set blame info (stub - not implemented for Metal yet)
@@ -2216,6 +2511,49 @@ public final class VVMetalEditorContainerView: NSView {
         onTextChange?(textStorage)
     }
 
+    private func clampRangeToDocument(_ range: NSRange) -> NSRange {
+        let length = currentTextLengthUTF16()
+        let safeLocation = max(0, min(range.location, length))
+        let maxLength = max(0, length - safeLocation)
+        let safeLength = max(0, min(range.length, maxLength))
+        return NSRange(location: safeLocation, length: safeLength)
+    }
+
+    private func resolvedReplacementRange(_ replacementRange: NSRange) -> NSRange? {
+        if replacementRange.location != NSNotFound {
+            return clampRangeToDocument(replacementRange)
+        }
+        if let marked = markedTextRange {
+            return clampRangeToDocument(marked)
+        }
+        if let selection = selectionRanges.first {
+            return clampRangeToDocument(selection)
+        }
+        return nil
+    }
+
+    private func resolvedMarkedTextTargetRange(replacementRange: NSRange) -> NSRange {
+        if let resolved = resolvedReplacementRange(replacementRange) {
+            return resolved
+        }
+        return NSRange(location: currentTextLengthUTF16(), length: 0)
+    }
+
+    private func replaceRange(_ range: NSRange, with text: String, updateMarkedRange: Bool) {
+        let clamped = clampRangeToDocument(range)
+        selections = [Selection(anchor: clamped.location, cursor: clamped.location + clamped.length)]
+        primarySelectionIndex = 0
+        replaceSelections(with: text, expandEmptyToChar: false)
+        if updateMarkedRange {
+            let length = (text as NSString).length
+            markedTextRange = NSRange(location: clamped.location, length: length)
+            metalTextView?.setMarkedTextRange(markedTextRange)
+        } else {
+            markedTextRange = nil
+            metalTextView?.setMarkedTextRange(nil)
+        }
+    }
+
     /// Convert 0-indexed line to LineMap 1-indexed
     private func lineMapOffset(forLine line: Int) -> Int {
         lineMap?.offset(forLine: line + 1) ?? 0
@@ -2250,6 +2588,13 @@ private final class MetalDocumentView: NSView {
 extension VVMetalEditorContainerView: HiddenInputViewDelegate {
 
     public func hiddenInputView(_ view: HiddenInputView, didInsertText text: String, replacementRange: NSRange) {
+        if let range = resolvedReplacementRange(replacementRange), isComposingMarkedText || markedTextRange != nil || replacementRange.location != NSNotFound {
+            replaceRange(range, with: text, updateMarkedRange: false)
+            isComposingMarkedText = false
+            markedTextRange = nil
+            metalTextView?.setMarkedTextRange(nil)
+            return
+        }
         replaceSelections(with: text, expandEmptyToChar: false)
     }
 
@@ -2381,7 +2726,38 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
         replaceSelections(with: pasteString, expandEmptyToChar: false)
     }
 
+    public func hiddenInputView(_ view: HiddenInputView, didSetMarkedText text: String, selectedRange: NSRange, replacementRange: NSRange) {
+        if text.isEmpty {
+            if let range = markedTextRange {
+                replaceRange(range, with: "", updateMarkedRange: false)
+            } else if replacementRange.location != NSNotFound {
+                let clamped = clampRangeToDocument(replacementRange)
+                if clamped.length > 0 {
+                    replaceRange(clamped, with: "", updateMarkedRange: false)
+                }
+            }
+            isComposingMarkedText = false
+            markedTextRange = nil
+            metalTextView?.setMarkedTextRange(nil)
+            return
+        }
+
+        isComposingMarkedText = true
+        let targetRange = resolvedMarkedTextTargetRange(replacementRange: replacementRange)
+        replaceRange(targetRange, with: text, updateMarkedRange: true)
+    }
+
+    public func hiddenInputViewDidUnmarkText(_ view: HiddenInputView) {
+        markedTextRange = nil
+        metalTextView?.setMarkedTextRange(nil)
+        isComposingMarkedText = false
+    }
+
     public func hiddenInputView(_ view: HiddenInputView, shouldHandleKeyDown event: NSEvent) -> Bool {
+        if searchOverlayActive && helixMode != .searchForward && helixMode != .searchBackward {
+            return handleSearchOverlayKeyDown(event)
+        }
+
         guard helixModeEnabled else {
             return false
         }
@@ -2427,6 +2803,9 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
                 helixMode = .normal
                 searchQuery = ""
                 searchReturnMode = nil
+                searchScope = .currentFile
+                clearSearchHighlights()
+                updateSearchOverlay()
                 return true
             }
             if event.keyCode == 36 { // Return
@@ -2435,21 +2814,37 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
                 helixMode = .normal
                 lastSearchQuery = searchQuery
                 lastSearchForward = forward
-                applySearch(query: searchQuery, forward: forward, extendSelection: wasSelect)
+                if searchScope == .openDocuments {
+                    onSearchOpenDocuments?(searchQuery)
+                    if onSearchOpenDocuments == nil {
+                        applySearch(query: searchQuery, forward: forward, extendSelection: wasSelect)
+                    }
+                } else {
+                    applySearch(query: searchQuery, forward: forward, extendSelection: wasSelect)
+                }
                 searchQuery = ""
                 searchReturnMode = nil
+                searchScope = .currentFile
+                updateSearchOverlay()
                 return true
             }
             if event.keyCode == 51 { // Backspace
                 if !searchQuery.isEmpty {
                     searchQuery.removeLast()
                     updateStatusBar()
+                    _ = setSearchHighlights(query: searchQuery)
+                    if searchQuery.isEmpty {
+                        clearSearchHighlights()
+                    }
+                    updateSearchOverlay()
                 }
                 return true
             }
             if let chars = event.characters, !chars.isEmpty {
                 searchQuery.append(chars)
                 updateStatusBar()
+                _ = setSearchHighlights(query: searchQuery)
+                updateSearchOverlay()
                 return true
             }
         }
@@ -2541,10 +2936,12 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
             searchReturnMode = helixMode
             helixMode = .searchForward
             searchQuery = ""
+            searchScope = .currentFile
         case "?":
             searchReturnMode = helixMode
             helixMode = .searchBackward
             searchQuery = ""
+            searchScope = .currentFile
         case "n":
             let forward = lastSearchForward
             applySearch(query: lastSearchQuery, forward: forward, extendSelection: extendSelection)
@@ -2619,6 +3016,38 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
         }
 
         return true
+    }
+
+    public func hiddenInputViewDidRequestSearch(_ view: HiddenInputView, forward: Bool, scope: HiddenInputView.SearchScope) {
+        let scopeValue: SearchScope = (scope == .openDocuments) ? .openDocuments : .currentFile
+        beginSearchOverlay(scope: scopeValue, forward: forward)
+    }
+
+    public func hiddenInputViewDidRequestRepeatSearch(_ view: HiddenInputView, forward: Bool) {
+        let query = searchQuery.isEmpty ? lastSearchQuery : searchQuery
+        guard !query.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        if helixModeEnabled && (helixMode == .select || helixMode == .normal) && !searchOverlayActive {
+            let extendSelection = helixMode == .select
+            applySearch(query: query, forward: forward, extendSelection: extendSelection)
+            return
+        }
+
+        if searchScope == .openDocuments {
+            onSearchOpenDocuments?(query)
+            if onSearchOpenDocuments == nil {
+                applySearch(query: query, forward: forward, extendSelection: false)
+            }
+        } else {
+            applySearch(query: query, forward: forward, extendSelection: false)
+        }
+
+        lastSearchQuery = query
+        lastSearchForward = forward
+        updateSearchOverlay()
     }
 }
 
@@ -2721,5 +3150,33 @@ extension VVMetalEditorContainerView: MetalTextViewDelegate {
                 updateSelection(toLine: line, column: column)
             }
         }
+    }
+
+    public func metalTextViewDidActivateSearchOverlay(_ view: MetalTextView) {
+        if !isSearchOverlayVisible {
+            beginSearchOverlay(scope: searchScope, forward: true)
+        } else {
+            window?.makeFirstResponder(hiddenInputView)
+        }
+    }
+
+    public func metalTextViewDidRequestSearchPrev(_ view: MetalTextView) {
+        performOverlaySearch(forward: false)
+    }
+
+    public func metalTextViewDidRequestSearchNext(_ view: MetalTextView) {
+        performOverlaySearch(forward: true)
+    }
+
+    public func metalTextView(_ view: MetalTextView, didToggleSearchCase isCaseSensitive: Bool) {
+        setSearchOptions(.init(caseSensitive: isCaseSensitive))
+        updateSearchHighlightsForOverlay()
+        updateSearchOverlay()
+    }
+
+    public func metalTextView(_ view: MetalTextView, didSetSearchScope scope: MetalTextView.SearchOverlayScope) {
+        searchScope = (scope == .openDocuments) ? .openDocuments : .currentFile
+        updateSearchHighlightsForOverlay()
+        updateSearchOverlay()
     }
 }

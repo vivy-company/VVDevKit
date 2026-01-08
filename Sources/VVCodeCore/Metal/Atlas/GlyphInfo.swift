@@ -103,52 +103,76 @@ public enum FontVariant: UInt32, Hashable {
     }
 }
 
+/// Key for identifying a specific font face/size
+public struct FontKey: Hashable {
+    public let postScriptName: String
+    public let size: CGFloat
+    public let traits: UInt32
+
+    public init(postScriptName: String, size: CGFloat, traits: UInt32) {
+        self.postScriptName = postScriptName
+        self.size = size
+        self.traits = traits
+    }
+
+    public init(_ font: CTFont) {
+        self.postScriptName = CTFontCopyPostScriptName(font) as String
+        self.size = CTFontGetSize(font)
+        self.traits = CTFontGetSymbolicTraits(font).rawValue
+    }
+
+    public static let custom = FontKey(postScriptName: "__custom__", size: 0, traits: 0)
+}
+
 /// Cached glyph information for rendering
 public struct CachedGlyph: Hashable {
     public let glyphID: CGGlyph
-    public let fontVariant: FontVariant
+    public let fontKey: FontKey
     public let atlasIndex: Int
     public let uvRect: CGRect              // UV coordinates in atlas (0-1 range)
     public let size: CGSize                // Glyph size in points
     public let bearing: CGPoint            // Horizontal/vertical bearing
     public let advance: CGFloat            // Horizontal advance width
+    public let isColor: Bool               // True for color/emoji glyphs
 
     public init(
         glyphID: CGGlyph,
-        fontVariant: FontVariant,
+        fontKey: FontKey,
         atlasIndex: Int,
         uvRect: CGRect,
         size: CGSize,
         bearing: CGPoint,
-        advance: CGFloat
+        advance: CGFloat,
+        isColor: Bool = false
     ) {
         self.glyphID = glyphID
-        self.fontVariant = fontVariant
+        self.fontKey = fontKey
         self.atlasIndex = atlasIndex
         self.uvRect = uvRect
         self.size = size
         self.bearing = bearing
         self.advance = advance
+        self.isColor = isColor
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(glyphID)
-        hasher.combine(fontVariant)
+        hasher.combine(fontKey)
     }
 
     public static func == (lhs: CachedGlyph, rhs: CachedGlyph) -> Bool {
-        lhs.glyphID == rhs.glyphID && lhs.fontVariant == rhs.fontVariant
+        lhs.glyphID == rhs.glyphID && lhs.fontKey == rhs.fontKey
     }
 }
 
 /// Key for looking up glyphs in the atlas
 public struct GlyphKey: Hashable {
     public let glyphID: CGGlyph
-    public let fontVariant: FontVariant
+    public let fontKey: FontKey
 
-    public init(glyphID: CGGlyph, fontVariant: FontVariant) {
+    public init(glyphID: CGGlyph, fontKey: FontKey) {
         self.glyphID = glyphID
-        self.fontVariant = fontVariant
+        self.fontKey = fontKey
     }
 }
 
@@ -159,6 +183,7 @@ public struct ShapedGlyph {
     public let glyphID: CGGlyph
     public let position: CGPoint           // Position relative to line start
     public let advance: CGFloat
+    public let font: CTFont
     public let characterIndex: Int         // Index in original string
     public let characterCount: Int         // Number of characters this glyph represents (for ligatures)
 
@@ -166,12 +191,14 @@ public struct ShapedGlyph {
         glyphID: CGGlyph,
         position: CGPoint,
         advance: CGFloat,
+        font: CTFont,
         characterIndex: Int,
         characterCount: Int = 1
     ) {
         self.glyphID = glyphID
         self.position = position
         self.advance = advance
+        self.font = font
         self.characterIndex = characterIndex
         self.characterCount = characterCount
     }

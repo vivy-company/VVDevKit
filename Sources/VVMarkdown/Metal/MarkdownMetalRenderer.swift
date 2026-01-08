@@ -181,6 +181,28 @@ public struct ImageRenderInstance {
     }
 }
 
+public struct PieSliceInstance {
+    public var center: SIMD2<Float>
+    public var radius: Float
+    public var startAngle: Float
+    public var endAngle: Float
+    public var padding0: Float
+    public var padding1: Float
+    public var padding2: Float
+    public var color: SIMD4<Float>
+
+    public init(center: SIMD2<Float>, radius: Float, startAngle: Float, endAngle: Float, color: SIMD4<Float>) {
+        self.center = center
+        self.radius = radius
+        self.startAngle = startAngle
+        self.endAngle = endAngle
+        self.padding0 = 0
+        self.padding1 = 0
+        self.padding2 = 0
+        self.color = color
+    }
+}
+
 // MARK: - Markdown Metal Renderer
 
 /// Metal renderer for markdown content
@@ -194,6 +216,7 @@ public final class MarkdownMetalRenderer {
 
     // Pipeline states
     private var glyphPipeline: MTLRenderPipelineState!
+    private var colorGlyphPipeline: MTLRenderPipelineState!
     private var quadPipeline: MTLRenderPipelineState!
     private var roundedQuadPipeline: MTLRenderPipelineState!
     private var bulletPipeline: MTLRenderPipelineState!
@@ -204,6 +227,7 @@ public final class MarkdownMetalRenderer {
     private var linkUnderlinePipeline: MTLRenderPipelineState!
     private var strikethroughPipeline: MTLRenderPipelineState!
     private var imagePipeline: MTLRenderPipelineState!
+    private var pieSlicePipeline: MTLRenderPipelineState!
 
     // Image sampler
     private var imageSamplerState: MTLSamplerState!
@@ -254,6 +278,7 @@ public final class MarkdownMetalRenderer {
         }
 
         glyphPipeline = try createPipeline(library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownGlyphFragmentShader", label: "Markdown Glyph")
+        colorGlyphPipeline = try createPipeline(library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownColorGlyphFragmentShader", label: "Markdown Color Glyph")
         quadPipeline = try createPipeline(library: library, vertex: "markdownQuadVertexShader", fragment: "markdownQuadFragmentShader", label: "Markdown Quad")
         roundedQuadPipeline = try createPipeline(library: library, vertex: "markdownQuadVertexShader", fragment: "markdownRoundedQuadFragmentShader", label: "Markdown Rounded Quad")
         bulletPipeline = try createPipeline(library: library, vertex: "bulletVertexShader", fragment: "bulletFragmentShader", label: "Bullet")
@@ -264,6 +289,8 @@ public final class MarkdownMetalRenderer {
         linkUnderlinePipeline = try createPipeline(library: library, vertex: "linkUnderlineVertexShader", fragment: "linkUnderlineFragmentShader", label: "Link Underline")
         strikethroughPipeline = try createPipeline(library: library, vertex: "strikethroughVertexShader", fragment: "strikethroughFragmentShader", label: "Strikethrough")
         imagePipeline = try createPipeline(library: library, vertex: "imageVertexShader", fragment: "imageFragmentShader", label: "Image")
+
+        pieSlicePipeline = try createPipeline(library: library, vertex: "pieSliceVertexShader", fragment: "pieSliceFragmentShader", label: "Pie Slice")
     }
 
     private static func loadShaderSource() -> String? {
@@ -368,12 +395,34 @@ public final class MarkdownMetalRenderer {
     // MARK: - Rendering
 
     public func renderGlyphs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
-        guard instanceCount > 0, let atlasTexture = glyphAtlas.atlasTexture else { return }
+        guard let atlasTexture = glyphAtlas.atlasTexture else { return }
+        renderGlyphs(encoder: encoder, instances: instances, instanceCount: instanceCount, texture: atlasTexture)
+    }
+
+    public func renderGlyphs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int, texture: MTLTexture) {
+        guard instanceCount > 0 else { return }
 
         encoder.setRenderPipelineState(glyphPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
-        encoder.setFragmentTexture(atlasTexture, index: 0)
+        encoder.setFragmentTexture(texture, index: 0)
+        encoder.setFragmentSamplerState(samplerState, index: 0)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+    }
+
+    public func renderColorGlyphs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
+        guard let atlasTexture = glyphAtlas.colorAtlasTexture else { return }
+        renderColorGlyphs(encoder: encoder, instances: instances, instanceCount: instanceCount, texture: atlasTexture)
+    }
+
+    public func renderColorGlyphs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int, texture: MTLTexture) {
+        guard instanceCount > 0 else { return }
+
+        encoder.setRenderPipelineState(colorGlyphPipeline)
+        encoder.setVertexBuffer(instances, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setFragmentTexture(texture, index: 0)
         encoder.setFragmentSamplerState(samplerState, index: 0)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
@@ -474,6 +523,18 @@ public final class MarkdownMetalRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
     }
 
+    public func renderPieSlices(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
+        guard instanceCount > 0 else { return }
+
+        encoder.setRenderPipelineState(pieSlicePipeline)
+        encoder.setVertexBuffer(instances, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setFragmentBuffer(instances, offset: 0, index: 0)
+        encoder.setFragmentBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+    }
+
     // MARK: - Buffer Creation
 
     public func makeBuffer<T>(for instances: [T]) -> MTLBuffer? {
@@ -497,4 +558,3 @@ public enum MarkdownRendererError: Error {
     case failedToCreateShaderFunction(String)
     case failedToCreatePipelineState
 }
-

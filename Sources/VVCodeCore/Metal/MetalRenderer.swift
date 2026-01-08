@@ -14,6 +14,8 @@ public final class MetalRenderer {
 
     // Pipeline states
     private var glyphPipelineState: MTLRenderPipelineState!
+    private var colorGlyphPipelineState: MTLRenderPipelineState!
+    private var gutterColorGlyphPipelineState: MTLRenderPipelineState!
     private var selectionPipelineState: MTLRenderPipelineState!
     private var cursorPipelineState: MTLRenderPipelineState!
     private var gutterPipelineState: MTLRenderPipelineState!
@@ -50,15 +52,15 @@ public final class MetalRenderer {
     // MARK: - Pipeline Setup
 
     private func setupPipelines() throws {
-        // Try loading shader source from bundle (pure SPM builds)
-        if let source = MetalRenderer.loadShaderSource(),
-           let library = try? device.makeLibrary(source: source, options: nil) {
+        // Try loading compiled metallib from package bundle (SPM with .process())
+        if let library = MetalRenderer.loadMetalLibrary(device: device) {
             try setupPipelinesWithLibrary(library)
             return
         }
 
-        // Try loading pre-compiled metallib from package bundle (Xcode builds SPM packages this way)
-        if let library = MetalRenderer.loadMetalLibrary(device: device) {
+        // Try loading shader source from bundle (SPM with .copy())
+        if let source = MetalRenderer.loadShaderSource(),
+           let library = try? device.makeLibrary(source: source, options: nil) {
             try setupPipelinesWithLibrary(library)
             return
         }
@@ -79,6 +81,14 @@ public final class MetalRenderer {
             vertexFunction: "glyphVertexShader",
             fragmentFunction: "msdfFragmentShader",
             label: "Glyph Pipeline"
+        )
+
+        // Color glyph pipeline (emoji/color fonts)
+        colorGlyphPipelineState = try createPipeline(
+            library: library,
+            vertexFunction: "glyphVertexShader",
+            fragmentFunction: "colorGlyphFragmentShader",
+            label: "Color Glyph Pipeline"
         )
 
         // Selection pipeline
@@ -103,6 +113,14 @@ public final class MetalRenderer {
             vertexFunction: "gutterVertexShader",
             fragmentFunction: "msdfFragmentShader",
             label: "Gutter Pipeline"
+        )
+
+        // Gutter color glyph pipeline (emoji/color fonts)
+        gutterColorGlyphPipelineState = try createPipeline(
+            library: library,
+            vertexFunction: "gutterVertexShader",
+            fragmentFunction: "colorGlyphFragmentShader",
+            label: "Gutter Color Glyph Pipeline"
         )
 
         // Underline pipeline
@@ -233,6 +251,24 @@ public final class MetalRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
     }
 
+    /// Render color glyphs (emoji/color fonts)
+    public func renderColorGlyphs(
+        encoder: MTLRenderCommandEncoder,
+        instances: MTLBuffer,
+        instanceCount: Int
+    ) {
+        guard instanceCount > 0, let atlasTexture = glyphAtlas.colorAtlasTexture else { return }
+
+        encoder.setRenderPipelineState(colorGlyphPipelineState)
+        encoder.setVertexBuffer(instances, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setFragmentBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setFragmentTexture(atlasTexture, index: 0)
+        encoder.setFragmentSamplerState(samplerState, index: 0)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+    }
+
     /// Render gutter (line numbers)
     public func renderGutter(
         encoder: MTLRenderCommandEncoder,
@@ -242,6 +278,24 @@ public final class MetalRenderer {
         guard instanceCount > 0, let atlasTexture = glyphAtlas.atlasTexture else { return }
 
         encoder.setRenderPipelineState(gutterPipelineState)
+        encoder.setVertexBuffer(instances, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setFragmentBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setFragmentTexture(atlasTexture, index: 0)
+        encoder.setFragmentSamplerState(samplerState, index: 0)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+    }
+
+    /// Render color glyphs in gutter (emoji/color fonts)
+    public func renderGutterColorGlyphs(
+        encoder: MTLRenderCommandEncoder,
+        instances: MTLBuffer,
+        instanceCount: Int
+    ) {
+        guard instanceCount > 0, let atlasTexture = glyphAtlas.colorAtlasTexture else { return }
+
+        encoder.setRenderPipelineState(gutterColorGlyphPipelineState)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
         encoder.setFragmentBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
@@ -326,4 +380,3 @@ public enum MetalRendererError: Error {
     case failedToCreateShaderFunction(String)
     case failedToCreatePipelineState
 }
-

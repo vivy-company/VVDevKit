@@ -19,7 +19,7 @@
 //
 // Layout:
 //   - MarkdownLayout, LayoutBlock, LayoutBlockType
-//   - LayoutContent, LayoutTextRun, TextRunStyle
+//   - LayoutContent, LayoutTextRun, LayoutInlineImage, TextRunStyle
 //   - LayoutGlyph, FontVariant
 //   - LayoutListItem, BulletType
 //   - LayoutTableRow, LayoutTableCell

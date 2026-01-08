@@ -104,6 +104,22 @@ fragment float4 msdfFragmentShader(
     return float4(in.color.rgb, in.color.a * alpha);
 }
 
+// Color glyph fragment shader (emoji/color fonts)
+fragment float4 colorGlyphFragmentShader(
+    GlyphVertexOut in [[stage_in]],
+    texture2d<float> atlas [[texture(0)]],
+    constant TextUniforms& uniforms [[buffer(1)]]
+) {
+    constexpr sampler textureSampler(
+        coord::pixel,
+        address::clamp_to_edge,
+        filter::nearest
+    );
+
+    float4 rgba = atlas.sample(textureSampler, in.texCoord);
+    return float4(rgba.rgb * in.color.rgb, rgba.a * in.color.a);
+}
+
 // MARK: - Selection/Background Rendering
 
 struct QuadVertexOut {

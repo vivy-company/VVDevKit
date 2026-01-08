@@ -2,11 +2,18 @@ import AppKit
 
 /// Hidden NSTextView that handles keyboard input, IME, and clipboard for the Metal text view
 public final class HiddenInputView: NSTextView {
+    public enum SearchScope {
+        case currentFile
+        case openDocuments
+    }
 
     // MARK: - Properties
 
     public weak var metalTextView: MetalTextView?
     public weak var inputDelegate: HiddenInputViewDelegate?
+    public var textProvider: (() -> String)?
+    public var selectedRangeProvider: (() -> NSRange)?
+    public var markedRangeProvider: (() -> NSRange?)?
 
     // Text storage for input handling
     private var pendingText: String = ""
@@ -67,6 +74,7 @@ public final class HiddenInputView: NSTextView {
     // MARK: - Text Input
 
     override public func insertText(_ insertString: Any, replacementRange: NSRange) {
+        super.insertText(insertString, replacementRange: replacementRange)
         let text: String
         if let str = insertString as? String {
             text = str
@@ -137,7 +145,71 @@ public final class HiddenInputView: NSTextView {
     }
 
     override public func hasMarkedText() -> Bool {
+        if let range = markedRangeProvider?() {
+            return range.length > 0 && range.location != NSNotFound
+        }
         return super.hasMarkedText()
+    }
+
+    override public func markedRange() -> NSRange {
+        if let range = markedRangeProvider?() {
+            return clampRange(range)
+        }
+        return super.markedRange()
+    }
+
+    override public var selectedRange: NSRange {
+        get {
+            if let range = selectedRangeProvider?() {
+                return clampRange(range)
+            }
+            return super.selectedRange
+        }
+        set {
+            super.selectedRange = newValue
+        }
+    }
+
+    override public func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        let text = textProvider?() ?? super.string
+        let clamped = clampRange(range, maxLength: (text as NSString).length)
+        actualRange?.pointee = clamped
+        if clamped.location == NSNotFound || clamped.length == 0 {
+            return nil
+        }
+        let substring = (text as NSString).substring(with: clamped)
+        return NSAttributedString(string: substring)
+    }
+
+    override public func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        return []
+    }
+
+    private func clampRange(_ range: NSRange, maxLength: Int? = nil) -> NSRange {
+        let length = maxLength ?? (textProvider?() as NSString?)?.length ?? super.string.count
+        if range.location == NSNotFound {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+        let safeLocation = max(0, min(range.location, length))
+        let maxLen = max(0, length - safeLocation)
+        let safeLength = max(0, min(range.length, maxLen))
+        return NSRange(location: safeLocation, length: safeLength)
+    }
+
+    override public func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        if let rect = metalTextView?.insertionRect() {
+            let rectInWindow = metalTextView?.convert(rect, to: nil) ?? rect
+            let rectOnScreen = metalTextView?.window?.convertToScreen(rectInWindow) ?? rectInWindow
+            return rectOnScreen
+        }
+        return super.firstRect(forCharacterRange: range, actualRange: actualRange)
+    }
+
+    override public func characterIndexForInsertion(at point: NSPoint) -> Int {
+        if let offset = metalTextView?.insertionOffset() {
+            return offset
+        }
+        return super.characterIndexForInsertion(at: point)
     }
 
     // MARK: - Movement
@@ -242,6 +314,18 @@ public final class HiddenInputView: NSTextView {
         inputDelegate?.hiddenInputViewDidPaste(self)
     }
 
+    override public func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(copy(_:)),
+             #selector(cut(_:)),
+             #selector(paste(_:)),
+             #selector(selectAll(_:)):
+            return true
+        default:
+            return super.validateUserInterfaceItem(item)
+        }
+    }
+
     // MARK: - Undo/Redo
 
     @objc public func performUndo(_ sender: Any?) {
@@ -267,6 +351,27 @@ public final class HiddenInputView: NSTextView {
 
         // Default handling
         interpretKeyEvents([event])
+    }
+
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command),
+           let chars = event.charactersIgnoringModifiers?.lowercased(),
+           let ch = chars.first {
+            switch ch {
+            case "f":
+                let scope: SearchScope = event.modifierFlags.contains(.shift) ? .openDocuments : .currentFile
+                inputDelegate?.hiddenInputViewDidRequestSearch(self, forward: true, scope: scope)
+                return true
+            case "g":
+                let forward = !event.modifierFlags.contains(.shift)
+                inputDelegate?.hiddenInputViewDidRequestRepeatSearch(self, forward: forward)
+                return true
+            default:
+                break
+            }
+        }
+
+        return super.performKeyEquivalent(with: event)
     }
 
     // MARK: - Mouse Events (forward to Metal view)
@@ -347,6 +452,10 @@ public protocol HiddenInputViewDelegate: AnyObject {
 
     // Key handling
     func hiddenInputView(_ view: HiddenInputView, shouldHandleKeyDown event: NSEvent) -> Bool
+
+    // Search
+    func hiddenInputViewDidRequestSearch(_ view: HiddenInputView, forward: Bool, scope: HiddenInputView.SearchScope)
+    func hiddenInputViewDidRequestRepeatSearch(_ view: HiddenInputView, forward: Bool)
 }
 
 // MARK: - Default Implementations
@@ -378,4 +487,6 @@ public extension HiddenInputViewDelegate {
     func hiddenInputViewDidUndo(_ view: HiddenInputView) {}
     func hiddenInputViewDidRedo(_ view: HiddenInputView) {}
     func hiddenInputView(_ view: HiddenInputView, shouldHandleKeyDown event: NSEvent) -> Bool { false }
+    func hiddenInputViewDidRequestSearch(_ view: HiddenInputView, forward: Bool, scope: HiddenInputView.SearchScope) {}
+    func hiddenInputViewDidRequestRepeatSearch(_ view: HiddenInputView, forward: Bool) {}
 }

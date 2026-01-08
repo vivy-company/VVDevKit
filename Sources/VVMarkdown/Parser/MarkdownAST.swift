@@ -48,8 +48,14 @@ public struct MarkdownBlock: Identifiable, Equatable, Sendable {
             return "list-\(ordered)-\(index)-\(items.count)"
         case .blockQuote(let blocks):
             return "quote-\(index)-\(blocks.count)"
+        case .alert(let kind, let blocks):
+            return "alert-\(kind.rawValue)-\(index)-\(blocks.count)"
         case .table(let rows, _):
             return "table-\(index)-\(rows.count)"
+        case .definitionList(let items):
+            return "deflist-\(index)-\(items.count)"
+        case .abbreviationList(let items):
+            return "abbrev-\(index)-\(items.count)"
         case .image(let url, _):
             return "img-\(index)-\(url.hashValue)"
         case .thematicBreak:
@@ -58,6 +64,8 @@ public struct MarkdownBlock: Identifiable, Equatable, Sendable {
             return "html-\(index)-\(html.prefix(50).hashValue)"
         case .mathBlock(let content):
             return "math-\(index)-\(content.hashValue)"
+        case .mermaid(let code):
+            return "mermaid-\(index)-\(code.prefix(50).hashValue)"
         case .footnoteReference(let id):
             return "fnref-\(index)-\(id)"
         case .footnoteDefinition(let id, _):
@@ -72,17 +80,39 @@ public struct MarkdownBlock: Identifiable, Equatable, Sendable {
 
 // MARK: - Markdown Block Type
 
+public enum MarkdownAlertKind: String, Equatable, Sendable {
+    case note
+    case tip
+    case important
+    case warning
+    case caution
+
+    public var title: String {
+        switch self {
+        case .note: return "Note"
+        case .tip: return "Tip"
+        case .important: return "Important"
+        case .warning: return "Warning"
+        case .caution: return "Caution"
+        }
+    }
+}
+
 public enum MarkdownBlockType: Equatable, Sendable {
     case paragraph(MarkdownInlineContent)
     case heading(MarkdownInlineContent, level: Int)
     case codeBlock(code: String, language: String?, isStreaming: Bool)
     case list(items: [MarkdownListItem], ordered: Bool, startIndex: Int)
     case blockQuote(blocks: [MarkdownBlock])
+    case alert(kind: MarkdownAlertKind, blocks: [MarkdownBlock])
     case table(rows: [MarkdownTableRow], alignments: [ColumnAlignment])
+    case definitionList(items: [MarkdownDefinitionItem])
+    case abbreviationList(items: [MarkdownAbbreviationItem])
     case image(url: String, alt: String?)
     case thematicBreak
     case htmlBlock(String)
     case mathBlock(String)
+    case mermaid(String)
     case footnoteReference(id: String)
     case footnoteDefinition(id: String, blocks: [MarkdownBlock])
 
@@ -94,12 +124,19 @@ public enum MarkdownBlockType: Equatable, Sendable {
         case (.thematicBreak, .thematicBreak): return true
         case (.htmlBlock(let l), .htmlBlock(let r)): return l == r
         case (.mathBlock(let l), .mathBlock(let r)): return l == r
+        case (.mermaid(let l), .mermaid(let r)): return l == r
         case (.footnoteReference(let l), .footnoteReference(let r)): return l == r
         case (.image(let lu, let la), .image(let ru, let ra)): return lu == ru && la == ra
         case (.list(let li, let lo, let ls), .list(let ri, let ro, let rs)):
             return li == ri && lo == ro && ls == rs
         case (.blockQuote(let l), .blockQuote(let r)): return l == r
+        case (.alert(let lk, let lb), .alert(let rk, let rb)):
+            return lk == rk && lb == rb
         case (.table(let lr, let la), .table(let rr, let ra)): return lr == rr && la == ra
+        case (.definitionList(let li), .definitionList(let ri)):
+            return li == ri
+        case (.abbreviationList(let li), .abbreviationList(let ri)):
+            return li == ri
         case (.footnoteDefinition(let li, let lb), .footnoteDefinition(let ri, let rb)):
             return li == ri && lb == rb
         default: return false
@@ -165,6 +202,28 @@ public struct MarkdownTableRow: Identifiable, Equatable, Sendable {
         self.cells = cells
         self.isHeader = isHeader
         self.id = "row-\(isHeader ? "h" : "b")-\(index)"
+    }
+}
+
+// MARK: - Definition List / Abbreviations
+
+public struct MarkdownDefinitionItem: Equatable, Sendable {
+    public let term: MarkdownInlineContent
+    public let definitions: [MarkdownInlineContent]
+
+    public init(term: MarkdownInlineContent, definitions: [MarkdownInlineContent]) {
+        self.term = term
+        self.definitions = definitions
+    }
+}
+
+public struct MarkdownAbbreviationItem: Equatable, Sendable {
+    public let abbreviation: String
+    public let expansion: String
+
+    public init(abbreviation: String, expansion: String) {
+        self.abbreviation = abbreviation
+        self.expansion = expansion
     }
 }
 

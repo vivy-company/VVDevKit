@@ -17,19 +17,26 @@ public final class GlyphAtlasManager {
     // MARK: - Properties
 
     private let device: MTLDevice
-    private var atlasPages: [MTLTexture] = []
+    private var alphaAtlasPages: [MTLTexture] = []
+    private var colorAtlasPages: [MTLTexture] = []
     private var glyphCache: [GlyphKey: CachedGlyph] = [:]
     private var customGlyphCache: [CustomGlyphKey: CachedGlyph] = [:]
     private var fonts: [FontVariant: CTFont] = [:]
+    private var scaledFontCache: [FontKey: CTFont] = [:]
 
     // Scale factor for Retina displays
     private var scaleFactor: CGFloat = 2.0  // Default to 2x for Retina
 
     // Atlas packing state
-    private var currentAtlasIndex = 0
-    private var packingX = 0
-    private var packingY = 0
-    private var rowHeight = 0
+    private var alphaAtlasIndex = 0
+    private var alphaPackingX = 0
+    private var alphaPackingY = 0
+    private var alphaRowHeight = 0
+
+    private var colorAtlasIndex = 0
+    private var colorPackingX = 0
+    private var colorPackingY = 0
+    private var colorRowHeight = 0
 
     private let queue = DispatchQueue(label: "com.vvcode.glyphatlas")
 
@@ -39,28 +46,26 @@ public final class GlyphAtlasManager {
         self.device = device
         self.scaleFactor = scaleFactor
         setupFontVariants(baseFont: baseFont)
-        createNewAtlasPage()
+        createNewAlphaAtlasPage()
     }
 
     private func setupFontVariants(baseFont: NSFont) {
         let ctFont = baseFont as CTFont
         let baseSize = CTFontGetSize(ctFont)
-        // Scale font size for Retina rendering
-        let scaledSize = baseSize * scaleFactor
 
-        // Create scaled fonts for high-quality rendering
-        fonts[.regular] = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(ctFont), scaledSize, nil)
+        // Create fonts at base size (scale is applied during rasterization)
+        fonts[.regular] = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(ctFont), baseSize, nil)
 
         // Bold
         if let boldDesc = CTFontCopyFontDescriptor(ctFont).withSymbolicTraits(.boldTrait, .boldTrait) {
-            fonts[.bold] = CTFontCreateWithFontDescriptor(boldDesc, scaledSize, nil)
+            fonts[.bold] = CTFontCreateWithFontDescriptor(boldDesc, baseSize, nil)
         } else {
             fonts[.bold] = fonts[.regular]
         }
 
         // Italic
         if let italicDesc = CTFontCopyFontDescriptor(ctFont).withSymbolicTraits(.italicTrait, .italicTrait) {
-            fonts[.italic] = CTFontCreateWithFontDescriptor(italicDesc, scaledSize, nil)
+            fonts[.italic] = CTFontCreateWithFontDescriptor(italicDesc, baseSize, nil)
         } else {
             fonts[.italic] = fonts[.regular]
         }
@@ -68,7 +73,7 @@ public final class GlyphAtlasManager {
         // Bold Italic
         let boldItalicTraits: CTFontSymbolicTraits = [.boldTrait, .italicTrait]
         if let boldItalicDesc = CTFontCopyFontDescriptor(ctFont).withSymbolicTraits(boldItalicTraits, boldItalicTraits) {
-            fonts[.boldItalic] = CTFontCreateWithFontDescriptor(boldItalicDesc, scaledSize, nil)
+            fonts[.boldItalic] = CTFontCreateWithFontDescriptor(boldItalicDesc, baseSize, nil)
         } else {
             fonts[.boldItalic] = fonts[.bold]
         }
@@ -78,28 +83,34 @@ public final class GlyphAtlasManager {
 
     /// Get or create a cached glyph for rendering
     public func glyph(for glyphID: CGGlyph, variant: FontVariant) -> CachedGlyph? {
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant)
+        guard let font = fonts[variant] else { return nil }
+        return glyph(for: glyphID, font: font)
+    }
+
+    /// Get or create a cached glyph for rendering with a specific font
+    public func glyph(for glyphID: CGGlyph, font: CTFont) -> CachedGlyph? {
+        let fontKey = FontKey(font)
+        let key = GlyphKey(glyphID: glyphID, fontKey: fontKey)
 
         if let cached = glyphCache[key] {
             return cached
         }
 
         return queue.sync {
-            glyphUnsafe(for: glyphID, variant: variant)
+            glyphUnsafe(for: glyphID, font: font, fontKey: fontKey)
         }
     }
 
     /// Internal glyph lookup - must be called from queue
-    private func glyphUnsafe(for glyphID: CGGlyph, variant: FontVariant) -> CachedGlyph? {
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant)
+    private func glyphUnsafe(for glyphID: CGGlyph, font: CTFont, fontKey: FontKey) -> CachedGlyph? {
+        let key = GlyphKey(glyphID: glyphID, fontKey: fontKey)
 
         // Double-check after acquiring lock
         if let cached = glyphCache[key] {
             return cached
         }
 
-        guard let font = fonts[variant] else { return nil }
-        return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant)
+        return rasterizeGlyph(glyphID: glyphID, font: font, fontKey: fontKey)
     }
 
     /// Get glyph for a character (convenience)
@@ -124,14 +135,23 @@ public final class GlyphAtlasManager {
     private func glyphUnsafe(for character: Character, variant: FontVariant) -> CachedGlyph? {
         guard let font = fonts[variant] else { return nil }
 
-        var unichars = Array(String(character).utf16)
+        let text = String(character)
+        var unichars = Array(text.utf16)
         var glyphs = [CGGlyph](repeating: 0, count: unichars.count)
 
-        guard CTFontGetGlyphsForCharacters(font, &unichars, &glyphs, unichars.count) else {
+        if CTFontGetGlyphsForCharacters(font, &unichars, &glyphs, unichars.count) {
+            let fontKey = FontKey(font)
+            return glyphUnsafe(for: glyphs[0], font: font, fontKey: fontKey)
+        }
+
+        let fallback = CTFontCreateForString(font, text as CFString, CFRangeMake(0, unichars.count))
+        var fallbackGlyphs = [CGGlyph](repeating: 0, count: unichars.count)
+        guard CTFontGetGlyphsForCharacters(fallback, &unichars, &fallbackGlyphs, unichars.count) else {
             return nil
         }
 
-        return glyphUnsafe(for: glyphs[0], variant: variant)
+        let fontKey = FontKey(fallback)
+        return glyphUnsafe(for: fallbackGlyphs[0], font: fallback, fontKey: fontKey)
     }
 
     private func customGlyphUnsafe(
@@ -172,22 +192,22 @@ public final class GlyphAtlasManager {
             return nil
         }
 
-        if packingX + glyphWidth + Self.glyphPadding > Self.atlasSize {
-            packingX = Self.glyphPadding
-            packingY += rowHeight + Self.glyphPadding
-            rowHeight = 0
+        if alphaPackingX + glyphWidth + Self.glyphPadding > Self.atlasSize {
+            alphaPackingX = Self.glyphPadding
+            alphaPackingY += alphaRowHeight + Self.glyphPadding
+            alphaRowHeight = 0
         }
 
-        if packingY + glyphHeight + Self.glyphPadding > Self.atlasSize {
-            createNewAtlasPage()
+        if alphaPackingY + glyphHeight + Self.glyphPadding > Self.atlasSize {
+            createNewAlphaAtlasPage()
         }
 
         let region = MTLRegion(
-            origin: MTLOrigin(x: packingX, y: packingY, z: 0),
+            origin: MTLOrigin(x: alphaPackingX, y: alphaPackingY, z: 0),
             size: MTLSize(width: glyphWidth, height: glyphHeight, depth: 1)
         )
 
-        atlasPages[currentAtlasIndex].replace(
+        alphaAtlasPages[alphaAtlasIndex].replace(
             region: region,
             mipmapLevel: 0,
             withBytes: alphaData,
@@ -195,8 +215,8 @@ public final class GlyphAtlasManager {
         )
 
         let uvRect = CGRect(
-            x: CGFloat(packingX),
-            y: CGFloat(packingY),
+            x: CGFloat(alphaPackingX),
+            y: CGFloat(alphaPackingY),
             width: CGFloat(glyphWidth),
             height: CGFloat(glyphHeight)
         )
@@ -205,16 +225,16 @@ public final class GlyphAtlasManager {
         let screenHeight = CGFloat(pixelHeight) / scaleFactor
         let cached = CachedGlyph(
             glyphID: key.glyphID,
-            fontVariant: .regular,
-            atlasIndex: currentAtlasIndex,
+            fontKey: .custom,
+            atlasIndex: alphaAtlasIndex,
             uvRect: uvRect,
             size: CGSize(width: screenWidth, height: screenHeight),
             bearing: .zero,
             advance: screenWidth
         )
 
-        packingX += glyphWidth + Self.glyphPadding
-        rowHeight = max(rowHeight, glyphHeight)
+        alphaPackingX += glyphWidth + Self.glyphPadding
+        alphaRowHeight = max(alphaRowHeight, glyphHeight)
 
         customGlyphCache[key] = cached
 
@@ -238,17 +258,27 @@ public final class GlyphAtlasManager {
 
     /// Get the current atlas texture
     public var atlasTexture: MTLTexture? {
-        atlasPages.first
+        alphaAtlasPages.first
     }
 
     /// Get all atlas pages
     public var allAtlasTextures: [MTLTexture] {
-        atlasPages
+        alphaAtlasPages
+    }
+
+    /// Get the current color atlas texture
+    public var colorAtlasTexture: MTLTexture? {
+        colorAtlasPages.first
+    }
+
+    /// Get all color atlas pages
+    public var allColorAtlasTextures: [MTLTexture] {
+        colorAtlasPages
     }
 
     // MARK: - Private Methods
 
-    private func createNewAtlasPage() {
+    private func createNewAlphaAtlasPage() {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm,  // Grayscale alpha mask only
             width: Self.atlasSize,
@@ -262,21 +292,59 @@ public final class GlyphAtlasManager {
             fatalError("Failed to create atlas texture")
         }
 
-        atlasPages.append(texture)
-        currentAtlasIndex = atlasPages.count - 1
-        packingX = Self.glyphPadding
-        packingY = Self.glyphPadding
-        rowHeight = 0
+        alphaAtlasPages.append(texture)
+        alphaAtlasIndex = alphaAtlasPages.count - 1
+        alphaPackingX = Self.glyphPadding
+        alphaPackingY = Self.glyphPadding
+        alphaRowHeight = 0
     }
 
-    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: FontVariant) -> CachedGlyph? {
+    private func createNewColorAtlasPage() {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: Self.atlasSize,
+            height: Self.atlasSize,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = device.hasUnifiedMemory ? .shared : .managed
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            fatalError("Failed to create color atlas texture")
+        }
+
+        colorAtlasPages.append(texture)
+        colorAtlasIndex = colorAtlasPages.count - 1
+        colorPackingX = Self.glyphPadding
+        colorPackingY = Self.glyphPadding
+        colorRowHeight = 0
+    }
+
+    private func scaledFont(for fontKey: FontKey, font: CTFont) -> CTFont {
+        if let cached = scaledFontCache[fontKey] {
+            return cached
+        }
+
+        let scaledSize = CTFontGetSize(font) * scaleFactor
+        let scaledFont = CTFontCreateCopyWithAttributes(font, scaledSize, nil, nil)
+        scaledFontCache[fontKey] = scaledFont
+        return scaledFont
+    }
+
+    private func isColorGlyph(_ glyphID: CGGlyph, font: CTFont) -> Bool {
+        return CTFontCreatePathForGlyph(font, glyphID, nil) == nil
+    }
+
+    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, fontKey: FontKey) -> CachedGlyph? {
+        let scaledFont = scaledFont(for: fontKey, font: font)
+
         // Get glyph metrics
         var glyph = glyphID
         var boundingRect = CGRect.zero
-        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &boundingRect, 1)
+        CTFontGetBoundingRectsForGlyphs(scaledFont, .horizontal, &glyph, &boundingRect, 1)
 
         var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+        CTFontGetAdvancesForGlyphs(scaledFont, .horizontal, &glyph, &advance, 1)
 
         // Calculate rasterization size with padding
         let padding = CGFloat(Self.glyphPadding)
@@ -287,8 +355,8 @@ public final class GlyphAtlasManager {
             // Empty glyph (space, etc.) - advance still needs to be scaled
             return CachedGlyph(
                 glyphID: glyphID,
-                fontVariant: variant,
-                atlasIndex: currentAtlasIndex,
+                fontKey: fontKey,
+                atlasIndex: alphaAtlasIndex,
                 uvRect: .zero,
                 size: .zero,
                 bearing: .zero,
@@ -296,50 +364,113 @@ public final class GlyphAtlasManager {
             )
         }
 
-        // Check if we need to wrap to next row
-        if packingX + glyphWidth + Self.glyphPadding > Self.atlasSize {
-            packingX = Self.glyphPadding
-            packingY += rowHeight + Self.glyphPadding
-            rowHeight = 0
+        let isColor = isColorGlyph(glyphID, font: font)
+
+        let region: MTLRegion
+        let uvRect: CGRect
+        let atlasIndex: Int
+
+        if isColor {
+            if colorAtlasPages.isEmpty {
+                createNewColorAtlasPage()
+            }
+
+            if colorPackingX + glyphWidth + Self.glyphPadding > Self.atlasSize {
+                colorPackingX = Self.glyphPadding
+                colorPackingY += colorRowHeight + Self.glyphPadding
+                colorRowHeight = 0
+            }
+
+            if colorPackingY + glyphHeight + Self.glyphPadding > Self.atlasSize {
+                createNewColorAtlasPage()
+            }
+
+            guard let colorData = rasterizeGlyphToRGBA(
+                glyph: glyphID,
+                font: scaledFont,
+                boundingRect: boundingRect,
+                width: glyphWidth,
+                height: glyphHeight,
+                padding: padding
+            ) else {
+                return nil
+            }
+
+            region = MTLRegion(
+                origin: MTLOrigin(x: colorPackingX, y: colorPackingY, z: 0),
+                size: MTLSize(width: glyphWidth, height: glyphHeight, depth: 1)
+            )
+
+            colorAtlasPages[colorAtlasIndex].replace(
+                region: region,
+                mipmapLevel: 0,
+                withBytes: colorData,
+                bytesPerRow: glyphWidth * 4
+            )
+
+            uvRect = CGRect(
+                x: CGFloat(colorPackingX),
+                y: CGFloat(colorPackingY),
+                width: CGFloat(glyphWidth),
+                height: CGFloat(glyphHeight)
+            )
+
+            atlasIndex = colorAtlasIndex
+
+            colorPackingX += glyphWidth + Self.glyphPadding
+            colorRowHeight = max(colorRowHeight, glyphHeight)
+        } else {
+            // Check if we need to wrap to next row
+            if alphaPackingX + glyphWidth + Self.glyphPadding > Self.atlasSize {
+                alphaPackingX = Self.glyphPadding
+                alphaPackingY += alphaRowHeight + Self.glyphPadding
+                alphaRowHeight = 0
+            }
+
+            // Check if we need a new atlas page
+            if alphaPackingY + glyphHeight + Self.glyphPadding > Self.atlasSize {
+                createNewAlphaAtlasPage()
+            }
+
+            // Rasterize glyph to grayscale alpha texture
+            guard let alphaData = rasterizeGlyphToAlpha(
+                glyph: glyphID,
+                font: scaledFont,
+                boundingRect: boundingRect,
+                width: glyphWidth,
+                height: glyphHeight,
+                padding: padding
+            ) else {
+                return nil
+            }
+
+            // Upload to atlas (grayscale r8Unorm - 1 byte per pixel)
+            region = MTLRegion(
+                origin: MTLOrigin(x: alphaPackingX, y: alphaPackingY, z: 0),
+                size: MTLSize(width: glyphWidth, height: glyphHeight, depth: 1)
+            )
+
+            alphaAtlasPages[alphaAtlasIndex].replace(
+                region: region,
+                mipmapLevel: 0,
+                withBytes: alphaData,
+                bytesPerRow: glyphWidth  // 1 byte per pixel for r8Unorm
+            )
+
+            // Store UV in pixel coordinates (not normalized) for pixel-perfect sampling
+            uvRect = CGRect(
+                x: CGFloat(alphaPackingX),
+                y: CGFloat(alphaPackingY),
+                width: CGFloat(glyphWidth),
+                height: CGFloat(glyphHeight)
+            )
+
+            atlasIndex = alphaAtlasIndex
+
+            // Update packing position
+            alphaPackingX += glyphWidth + Self.glyphPadding
+            alphaRowHeight = max(alphaRowHeight, glyphHeight)
         }
-
-        // Check if we need a new atlas page
-        if packingY + glyphHeight + Self.glyphPadding > Self.atlasSize {
-            createNewAtlasPage()
-        }
-
-        // Rasterize glyph to grayscale alpha texture
-        guard let alphaData = rasterizeGlyphToAlpha(
-            glyph: glyphID,
-            font: font,
-            boundingRect: boundingRect,
-            width: glyphWidth,
-            height: glyphHeight,
-            padding: padding
-        ) else {
-            return nil
-        }
-
-        // Upload to atlas (grayscale r8Unorm - 1 byte per pixel)
-        let region = MTLRegion(
-            origin: MTLOrigin(x: packingX, y: packingY, z: 0),
-            size: MTLSize(width: glyphWidth, height: glyphHeight, depth: 1)
-        )
-
-        atlasPages[currentAtlasIndex].replace(
-            region: region,
-            mipmapLevel: 0,
-            withBytes: alphaData,
-            bytesPerRow: glyphWidth  // 1 byte per pixel for r8Unorm
-        )
-
-        // Store UV in pixel coordinates (not normalized) for pixel-perfect sampling
-        let uvRect = CGRect(
-            x: CGFloat(packingX),
-            y: CGFloat(packingY),
-            width: CGFloat(glyphWidth),
-            height: CGFloat(glyphHeight)
-        )
 
         // Calculate bearing for positioning (in screen coordinates)
         // bearing.x: offset from pen position to left edge of glyph quad
@@ -361,20 +492,17 @@ public final class GlyphAtlasManager {
 
         let cached = CachedGlyph(
             glyphID: glyphID,
-            fontVariant: variant,
-            atlasIndex: currentAtlasIndex,
+            fontKey: fontKey,
+            atlasIndex: atlasIndex,
             uvRect: uvRect,
             size: CGSize(width: screenWidth, height: screenHeight),
             bearing: CGPoint(x: bearingX, y: bearingY),
-            advance: advance.width / scaleFactor
+            advance: advance.width / scaleFactor,
+            isColor: isColor
         )
 
-        // Update packing position
-        packingX += glyphWidth + Self.glyphPadding
-        rowHeight = max(rowHeight, glyphHeight)
-
         // Cache the glyph
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant)
+        let key = GlyphKey(glyphID: glyphID, fontKey: fontKey)
         glyphCache[key] = cached
 
         return cached
@@ -432,6 +560,49 @@ public final class GlyphAtlasManager {
         return alphaData
     }
 
+    private func rasterizeGlyphToRGBA(
+        glyph: CGGlyph,
+        font: CTFont,
+        boundingRect: CGRect,
+        width: Int,
+        height: Int,
+        padding: CGFloat
+    ) -> [UInt8]? {
+        let bitsPerComponent = 8
+        let bytesPerRow = width * 4
+        var colorData = [UInt8](repeating: 0, count: width * height * 4)
+
+        guard let context = CGContext(
+            data: &colorData,
+            width: width,
+            height: height,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.setAllowsAntialiasing(true)
+        context.setShouldAntialias(true)
+        context.setAllowsFontSmoothing(true)
+        context.setShouldSmoothFonts(true)
+        context.setShouldSubpixelPositionFonts(true)
+        context.setShouldSubpixelQuantizeFonts(false)
+
+        context.setFillColor(red: 0, green: 0, blue: 0, alpha: 0)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        context.translateBy(x: padding, y: padding)
+
+        var glyphID = glyph
+        var position = CGPoint(x: -boundingRect.origin.x, y: -boundingRect.origin.y)
+        CTFontDrawGlyphs(font, &glyphID, &position, 1, context)
+
+        return colorData
+    }
+
     private func rasterizeCustomGlyphToAlpha(
         kind: CustomGlyphKind,
         glyphWidth: Int,
@@ -478,32 +649,32 @@ public final class GlyphAtlasManager {
             context.setFillColor(gray: 1, alpha: 1)
             context.fillPath()
         case .foldChevronClosed, .foldChevronOpen:
-            let inset = max(0, lineWidth * 0.5)
-            let strokeRect = rect.insetBy(dx: inset, dy: inset)
-            let minX = strokeRect.minX
-            let maxX = strokeRect.maxX
-            let minY = strokeRect.minY
-            let maxY = strokeRect.maxY
-            let midX = strokeRect.midX
-            let midY = strokeRect.midY
+            let inset = max(0, lineWidth)
+            let triangleRect = rect.insetBy(dx: inset, dy: inset)
+            let minX = triangleRect.minX
+            let maxX = triangleRect.maxX
+            let minY = triangleRect.minY
+            let maxY = triangleRect.maxY
+            let midX = triangleRect.midX
+            let midY = triangleRect.midY
 
             let path = CGMutablePath()
             if kind == .foldChevronClosed {
+                // Right-pointing filled triangle
                 path.move(to: CGPoint(x: minX, y: minY))
                 path.addLine(to: CGPoint(x: maxX, y: midY))
                 path.addLine(to: CGPoint(x: minX, y: maxY))
             } else {
+                // Down-pointing filled triangle
                 path.move(to: CGPoint(x: minX, y: minY))
-                path.addLine(to: CGPoint(x: midX, y: maxY))
                 path.addLine(to: CGPoint(x: maxX, y: minY))
+                path.addLine(to: CGPoint(x: midX, y: maxY))
             }
 
+            path.closeSubpath()
             context.addPath(path)
-            context.setStrokeColor(gray: 1, alpha: 1)
-            context.setLineWidth(lineWidth)
-            context.setLineCap(.round)
-            context.setLineJoin(.round)
-            context.strokePath()
+            context.setFillColor(gray: 1, alpha: 1)
+            context.fillPath()
         }
 
         return alphaData
@@ -517,9 +688,11 @@ public final class GlyphAtlasManager {
             }
             glyphCache.removeAll()
             customGlyphCache.removeAll()
-            atlasPages.removeAll()
+            scaledFontCache.removeAll()
+            alphaAtlasPages.removeAll()
+            colorAtlasPages.removeAll()
             setupFontVariants(baseFont: font)
-            createNewAtlasPage()
+            createNewAlphaAtlasPage()
         }
     }
 }

@@ -12,6 +12,7 @@ public final class MetalGutterView: MTKView {
 
     private let renderer: MetalRenderer
     private var glyphBatch: GlyphBatch
+    private var colorGlyphBatch: GlyphBatch
     private var quadBatch: QuadBatch
 
     private var redrawScheduled = false
@@ -165,6 +166,7 @@ public final class MetalGutterView: MTKView {
     public init(frame: CGRect, renderer: MetalRenderer) {
         self.renderer = renderer
         self.glyphBatch = GlyphBatch(device: renderer.device)
+        self.colorGlyphBatch = GlyphBatch(device: renderer.device)
         self.quadBatch = QuadBatch(device: renderer.device)
         super.init(frame: frame, device: renderer.device)
         commonInit()
@@ -317,6 +319,9 @@ public final class MetalGutterView: MTKView {
         if let (buffer, count) = glyphBatch.prepareBuffer() {
             renderer.renderGutter(encoder: encoder, instances: buffer, instanceCount: count)
         }
+        if let (buffer, count) = colorGlyphBatch.prepareBuffer() {
+            renderer.renderGutterColorGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
+        }
 
         encoder.endEncoding()
 
@@ -377,6 +382,7 @@ public final class MetalGutterView: MTKView {
 
     private func prepareGlyphBatch() {
         glyphBatch.clear()
+        colorGlyphBatch.clear()
 
         let visibleRange = visibleLineRange()
         if visibleRange.first > visibleRange.last { return }
@@ -490,12 +496,22 @@ public final class MetalGutterView: MTKView {
 
         var penX = startX
         let colorSimd = color.simdColor
+        let colorGlyph = SIMD4<Float>(1, 1, 1, colorSimd.w)
         for cached in glyphs {
-            glyphBatch.addGlyph(
-                cached: cached,
-                screenPosition: CGPoint(x: penX, y: baselineY),
-                color: colorSimd
-            )
+            let position = CGPoint(x: penX, y: baselineY)
+            if cached.isColor {
+                colorGlyphBatch.addGlyph(
+                    cached: cached,
+                    screenPosition: position,
+                    color: colorGlyph
+                )
+            } else {
+                glyphBatch.addGlyph(
+                    cached: cached,
+                    screenPosition: position,
+                    color: colorSimd
+                )
+            }
             penX += cached.advance
         }
     }
@@ -533,22 +549,42 @@ public final class MetalGutterView: MTKView {
 
         var penX = x
         let colorSimd = color.simdColor
+        let colorGlyph = SIMD4<Float>(1, 1, 1, colorSimd.w)
         for cached in glyphs {
-            glyphBatch.addGlyph(
-                cached: cached,
-                screenPosition: CGPoint(x: penX, y: baselineY),
-                color: colorSimd
-            )
+            let position = CGPoint(x: penX, y: baselineY)
+            if cached.isColor {
+                colorGlyphBatch.addGlyph(
+                    cached: cached,
+                    screenPosition: position,
+                    color: colorGlyph
+                )
+            } else {
+                glyphBatch.addGlyph(
+                    cached: cached,
+                    screenPosition: position,
+                    color: colorSimd
+                )
+            }
             penX += cached.advance
         }
     }
 
     private func addGutterGlyph(_ glyph: CachedGlyph, topLeft: CGPoint, color: NSColor) {
-        glyphBatch.addGlyph(
-            cached: glyph,
-            screenPosition: topLeft,
-            color: color.simdColor
-        )
+        let colorSimd = color.simdColor
+        let tint = SIMD4<Float>(1, 1, 1, colorSimd.w)
+        if glyph.isColor {
+            colorGlyphBatch.addGlyph(
+                cached: glyph,
+                screenPosition: topLeft,
+                color: tint
+            )
+        } else {
+            glyphBatch.addGlyph(
+                cached: glyph,
+                screenPosition: topLeft,
+                color: colorSimd
+            )
+        }
     }
 
     private struct FoldIconMetrics {

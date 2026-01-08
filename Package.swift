@@ -17,8 +17,16 @@ let package = Package(
             targets: ["VVCodeCore"]
         ),
         .library(
+            name: "VVMetalPrimitives",
+            targets: ["VVMetalPrimitives"]
+        ),
+        .library(
             name: "VVMarkdown",
             targets: ["VVMarkdown"]
+        ),
+        .executable(
+            name: "VVMarkdownDump",
+            targets: ["VVMarkdownDump"]
         ),
         // Individual dynamic grammar libraries - load on demand via DynamicGrammarLoader
         .library(name: "TreeSitterSwift", type: .dynamic, targets: ["TreeSitterSwift"]),
@@ -2096,14 +2104,31 @@ let package = Package(
 
         // Markdown rendering with Metal
         .target(
+            name: "VVMetalPrimitives",
+            dependencies: []
+        ),
+
+        // Markdown rendering with Metal
+        .target(
             name: "VVMarkdown",
             dependencies: [
                 .product(name: "Markdown", package: "swift-markdown"),
+                "VVMetalPrimitives",
                 "VVHighlighting",
+            ],
+            exclude: [
+                "Docs"
             ],
             resources: [
                 .process("Metal/MarkdownShaders.metal")
             ]
+        ),
+        .executableTarget(
+            name: "VVMarkdownDump",
+            dependencies: [
+                "VVMarkdown"
+            ],
+            path: "Sources/VVMarkdownDump"
         ),
 
         // Tests

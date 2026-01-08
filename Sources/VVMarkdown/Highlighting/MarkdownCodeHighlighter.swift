@@ -74,6 +74,10 @@ public struct HighlightedCodeBlock: Sendable {
                 }
             }
 
+            if !lineTokens.isEmpty {
+                lineTokens = normalizeLineTokens(lineTokens, line: lineString)
+            }
+
             lines.append(HighlightedCodeLine(
                 lineNumber: lineIndex + 1,
                 text: lineString,
@@ -84,6 +88,41 @@ public struct HighlightedCodeBlock: Sendable {
         }
 
         return lines
+    }
+
+    private static func normalizeLineTokens(_ tokens: [HighlightedCodeToken], line: String) -> [HighlightedCodeToken] {
+        let sorted = tokens.sorted { $0.range.location < $1.range.location }
+        var result: [HighlightedCodeToken] = []
+        var lastEnd = 0
+
+        for token in sorted {
+            var start = token.range.location
+            var length = token.range.length
+
+            if start < lastEnd {
+                let overlap = lastEnd - start
+                if overlap >= length {
+                    continue
+                }
+                start += overlap
+                length -= overlap
+            }
+
+            let trimmedRange = NSRange(location: start, length: length)
+            if let range = Range(trimmedRange, in: line) {
+                let tokenText = String(line[range])
+                result.append(HighlightedCodeToken(
+                    text: tokenText,
+                    range: trimmedRange,
+                    color: token.color,
+                    isBold: token.isBold,
+                    isItalic: token.isItalic
+                ))
+                lastEnd = trimmedRange.location + trimmedRange.length
+            }
+        }
+
+        return result
     }
 }
 

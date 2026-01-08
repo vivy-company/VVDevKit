@@ -81,6 +81,20 @@ fragment float4 markdownGlyphFragmentShader(
     return float4(in.color.rgb, in.color.a * alpha);
 }
 
+fragment float4 markdownColorGlyphFragmentShader(
+    GlyphVertexOut in [[stage_in]],
+    texture2d<float> atlas [[texture(0)]]
+) {
+    constexpr sampler textureSampler(
+        coord::pixel,
+        address::clamp_to_edge,
+        filter::nearest
+    );
+
+    float4 rgba = atlas.sample(textureSampler, in.texCoord);
+    return float4(rgba.rgb * in.color.rgb, rgba.a * in.color.a);
+}
+
 // MARK: - Quad Rendering (backgrounds, borders)
 
 struct QuadVertexOut {
@@ -146,6 +160,84 @@ fragment float4 markdownRoundedQuadFragmentShader(
     float alpha = 1.0 - smoothstep(-1.0, 1.0, dist);
 
     return float4(in.color.rgb, in.color.a * alpha);
+}
+
+// MARK: - Pie Slice Rendering
+
+struct PieSliceInstance {
+    float2 center;
+    float radius;
+    float startAngle;
+    float endAngle;
+    float padding0;
+    float padding1;
+    float padding2;
+    float4 color;
+};
+
+struct PieSliceVertexOut {
+    float4 position [[position]];
+    float4 color;
+    float2 localPos;
+    float radius;
+    float startAngle;
+    float endAngle;
+};
+
+vertex PieSliceVertexOut pieSliceVertexShader(
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]],
+    constant PieSliceInstance* slices [[buffer(0)]],
+    constant MarkdownUniforms& uniforms [[buffer(1)]]
+) {
+    const float2 quadPositions[6] = {
+        float2(0, 0), float2(1, 0), float2(0, 1),
+        float2(1, 0), float2(1, 1), float2(0, 1)
+    };
+
+    PieSliceInstance slice = slices[instanceID];
+    float2 quadPos = quadPositions[vertexID];
+    float2 local = (quadPos - 0.5) * 2.0 * slice.radius;
+    float2 worldPos = slice.center + local;
+
+    float2 scrolledPos = worldPos - uniforms.scrollOffset;
+    float4 clipPos = uniforms.projectionMatrix * float4(scrolledPos, 0.0, 1.0);
+
+    PieSliceVertexOut out;
+    out.position = clipPos;
+    out.color = slice.color;
+    out.localPos = local;
+    out.radius = slice.radius;
+    out.startAngle = slice.startAngle;
+    out.endAngle = slice.endAngle;
+    return out;
+}
+
+fragment float4 pieSliceFragmentShader(PieSliceVertexOut in [[stage_in]]) {
+    float dist = length(in.localPos);
+    if (dist > in.radius) {
+        discard_fragment();
+    }
+
+    float angle = atan2(in.localPos.y, in.localPos.x);
+    if (angle < 0.0) {
+        angle += 6.2831853;
+    }
+    float start = in.startAngle;
+    float end = in.endAngle;
+    if (end < start) {
+        end += 6.2831853;
+    }
+    float cmpAngle = angle;
+    if (cmpAngle < start) {
+        cmpAngle += 6.2831853;
+    }
+    if (cmpAngle < start || cmpAngle > end) {
+        discard_fragment();
+    }
+
+    float edge = smoothstep(in.radius - 1.0, in.radius, dist);
+    return float4(in.color.rgb, in.color.a * (1.0 - edge));
 }
 
 // MARK: - Block Quote Border

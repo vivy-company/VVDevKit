@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import MetalKit
+import CoreText
 
 /// Metal-rendered helix status bar.
 public final class MetalStatusBarView: MTKView {
@@ -9,6 +10,7 @@ public final class MetalStatusBarView: MTKView {
 
     private let renderer: MetalRenderer
     private var glyphBatch: GlyphBatch
+    private var colorGlyphBatch: GlyphBatch
     private var quadBatch: QuadBatch
 
     private var redrawScheduled = false
@@ -50,6 +52,7 @@ public final class MetalStatusBarView: MTKView {
     public init(frame: CGRect, renderer: MetalRenderer, font: NSFont) {
         self.renderer = renderer
         self.glyphBatch = GlyphBatch(device: renderer.device)
+        self.colorGlyphBatch = GlyphBatch(device: renderer.device)
         self.quadBatch = QuadBatch(device: renderer.device)
         self.font = font
         super.init(frame: frame, device: renderer.device)
@@ -173,6 +176,9 @@ public final class MetalStatusBarView: MTKView {
         if let (buffer, count) = glyphBatch.prepareBuffer() {
             renderer.renderGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
         }
+        if let (buffer, count) = colorGlyphBatch.prepareBuffer() {
+            renderer.renderColorGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
+        }
 
         encoder.endEncoding()
 
@@ -217,6 +223,7 @@ public final class MetalStatusBarView: MTKView {
 
     private func prepareGlyphBatch() {
         glyphBatch.clear()
+        colorGlyphBatch.clear()
 
         guard bounds.width > 0 else { return }
 
@@ -236,25 +243,102 @@ public final class MetalStatusBarView: MTKView {
     }
 
     private func addText(_ text: String, x: CGFloat, baselineY: CGFloat, color: SIMD4<Float>) {
-        var penX = x
-        for ch in text {
-            guard let cached = renderer.glyphAtlas.glyph(for: ch, variant: .regular) else { continue }
-            glyphBatch.addGlyph(
-                cached: cached,
-                screenPosition: CGPoint(x: penX, y: baselineY),
-                color: color
-            )
-            penX += cached.advance
+        let shaped = cachedOverlayGlyphs(text)
+        guard !shaped.isEmpty else { return }
+        let bounds = overlayBounds(for: shaped)
+        let startX = x - bounds.minX
+        for (glyph, cached) in shaped {
+            let position = CGPoint(x: startX + glyph.position.x, y: baselineY)
+            if cached.isColor {
+                let colorGlyph = SIMD4<Float>(1, 1, 1, color.w)
+                colorGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorGlyph)
+            } else {
+                glyphBatch.addGlyph(cached: cached, screenPosition: position, color: color)
+            }
         }
     }
 
     private func textWidth(_ text: String) -> CGFloat {
-        var width: CGFloat = 0
-        for ch in text {
-            if let cached = renderer.glyphAtlas.glyph(for: ch, variant: .regular) {
-                width += cached.advance
+        let shaped = cachedOverlayGlyphs(text)
+        guard !shaped.isEmpty else { return 0 }
+        return overlayBounds(for: shaped).width
+    }
+
+    private func cachedOverlayGlyphs(_ text: String) -> [(glyph: ShapedGlyph, cached: CachedGlyph)] {
+        let shapedGlyphs = shapeOverlayText(text)
+        guard !shapedGlyphs.isEmpty else { return [] }
+        var results: [(ShapedGlyph, CachedGlyph)] = []
+        results.reserveCapacity(shapedGlyphs.count)
+        for glyph in shapedGlyphs {
+            if let cached = renderer.glyphAtlas.glyph(for: glyph.glyphID, font: glyph.font) {
+                results.append((glyph, cached))
             }
         }
-        return width
+        return results
+    }
+
+    private func overlayBounds(for glyphs: [(glyph: ShapedGlyph, cached: CachedGlyph)]) -> (minX: CGFloat, maxX: CGFloat, width: CGFloat) {
+        var minX = CGFloat.greatestFiniteMagnitude
+        var maxX = CGFloat.leastNormalMagnitude
+        for (glyph, cached) in glyphs {
+            let glyphMinX = glyph.position.x + cached.bearing.x
+            let glyphMaxX = glyphMinX + cached.size.width
+            minX = min(minX, glyphMinX)
+            maxX = max(maxX, glyphMaxX)
+        }
+        if minX == CGFloat.greatestFiniteMagnitude { return (0, 0, 0) }
+        return (minX, maxX, max(0, maxX - minX))
+    }
+
+    private func shapeOverlayText(_ text: String) -> [ShapedGlyph] {
+        guard !text.isEmpty else { return [] }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .ligature: 1
+        ]
+        let attrString = NSAttributedString(string: text, attributes: attributes)
+        let line = CTLineCreateWithAttributedString(attrString)
+        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
+
+        var result: [ShapedGlyph] = []
+        let utf16Length = (text as NSString).length
+
+        for run in runs {
+            let glyphCount = CTRunGetGlyphCount(run)
+            guard glyphCount > 0 else { continue }
+
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            let runFont = attributes[kCTFontAttributeName] as! CTFont
+
+            var glyphs = [CGGlyph](repeating: 0, count: glyphCount)
+            CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
+
+            var positions = [CGPoint](repeating: .zero, count: glyphCount)
+            CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
+
+            var advances = [CGSize](repeating: .zero, count: glyphCount)
+            CTRunGetAdvances(run, CFRangeMake(0, glyphCount), &advances)
+
+            var indices = [CFIndex](repeating: 0, count: glyphCount)
+            CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &indices)
+
+            for i in 0..<glyphCount {
+                let charIndex = Int(indices[i])
+                let nextCharIndex = (i + 1 < glyphCount) ? Int(indices[i + 1]) : utf16Length
+                let charCount = nextCharIndex - charIndex
+
+                result.append(ShapedGlyph(
+                    glyphID: glyphs[i],
+                    position: positions[i],
+                    advance: advances[i].width,
+                    font: runFont,
+                    characterIndex: charIndex,
+                    characterCount: max(1, charCount)
+                ))
+            }
+        }
+
+        return result
     }
 }
