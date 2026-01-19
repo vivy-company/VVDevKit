@@ -8,7 +8,7 @@ Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
 > **Note:** VVKit is experimental and under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
 
-The primary editor module is `VVCode`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown. Planned modules include `VVBook` for ebook workflows.
+The primary primitives module is `VVMetalPrimitives`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown. Planned modules include `VVBook` for ebook workflows.
 
 ## Features
 
