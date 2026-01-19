@@ -2,13 +2,13 @@
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-vivy--company-ea4aaa?logo=github)](https://github.com/sponsors/vivy-company)
 
-VVKit is a kit of Metal-based, reusable components and Swift code for building editor- and document-centric apps on macOS and iOS. It includes the VVCode editor, markdown rendering, Metal primitives, highlighting, Git integration, and LSP support.
+VVKit is a kit of Metal-based, reusable components, renderers, and document utilities for building macOS and iOS apps. It includes the VVCode editor, markdown rendering, Metal primitives, highlighting, Git integration, and LSP support.
 
 Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
 > **Note:** VVKit is experimental and under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
 
-The primary editor module is `VVCode`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown.
+The primary editor module is `VVCode`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown. Planned modules include `VVBook` for ebook workflows.
 
 ## Features
 
