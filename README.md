@@ -2,7 +2,7 @@
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-vivy--company-ea4aaa?logo=github)](https://github.com/sponsors/vivy-company)
 
-VVKit is a kit of Metal-based, reusable components and Swift code for building editor- and document-centric apps on macOS and iOS. It includes the VVCode editor, markdown rendering, highlighting, Git integration, and LSP support.
+VVKit is a kit of Metal-based, reusable components and Swift code for building editor- and document-centric apps on macOS and iOS. It includes the VVCode editor, markdown rendering, Metal primitives, highlighting, Git integration, and LSP support.
 
 Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
@@ -12,11 +12,12 @@ The primary editor module is `VVCode`, with supporting modules for rendering, hi
 
 ## Features
 
-- **Syntax Highlighting** - Tree-sitter based highlighting with 150+ language grammars
-- **LSP Support** - Language Server Protocol integration for code intelligence
-- **Git Integration** - Built-in git status and diff support
-- **Metal Rendering** - GPU-accelerated text rendering
-- **Markdown** - Metal-rendered markdown view
+- **Metal Primitives** - Reusable Metal-backed nodes and layout components (`VVMetalPrimitives`)
+- **VVCode Editor** - Metal-accelerated text rendering and editing
+- **Syntax Highlighting** - Tree-sitter based highlighting with a large grammar set
+- **Markdown Rendering** - Markdown layout and rendering on top of Metal primitives
+- **LSP + Git** - Language Server Protocol integration and git status/diff support
+- **Tooling** - `VVMarkdownDump` CLI for debugging markdown output
 
 ## Requirements
 
@@ -33,12 +34,12 @@ dependencies: [
 ]
 ```
 
-Then add the dependency to your target:
+Then add the dependency to your target (the package name is still `VVCode`):
 
 ```swift
 .target(
     name: "YourApp",
-    dependencies: ["VVCode"]
+    dependencies: ["VVCode", "VVMetalPrimitives", "VVMarkdown"]
 )
 ```
 
@@ -46,12 +47,14 @@ Then add the dependency to your target:
 
 | Module | Description |
 |--------|-------------|
-| `VVCode` | Main public API (includes all modules) |
-| `VVCodeCore` | Core text view and Metal rendering |
+| `VVCode` | Editor public API and SwiftUI wrapper |
+| `VVCodeCore` | Core text view, layout, and Metal rendering |
+| `VVMetalPrimitives` | Metal-backed primitive scene graph and layout components |
 | `VVHighlighting` | Tree-sitter syntax highlighting |
 | `VVGit` | Git integration |
 | `VVLSP` | Language Server Protocol support |
 | `VVMarkdown` | Markdown rendering |
+| `VVMarkdownDump` | CLI tool for markdown debugging |
 
 ## Dynamic Grammar Loading
 
