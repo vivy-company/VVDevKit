@@ -25,7 +25,7 @@ swift build --product TreeSitterPython
 
 ## Architecture
 
-VVCode is a Swift code editor library with Metal-accelerated rendering. It uses a modular architecture:
+VVKit is a Metal-based kit of reusable components and Swift code. The VVCode module provides the editor layer, with supporting modules for rendering, highlighting, Git, LSP, and Markdown:
 
 ### Module Hierarchy
 

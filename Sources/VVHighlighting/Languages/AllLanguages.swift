@@ -55,16 +55,16 @@ public final class DynamicGrammarLoader {
             searchPaths.append("\(pluginsPath)/Grammars/\(dylibName)")
         }
 
-        // 3. VVCode package build directory (for development)
+        // 3. VVKit package build directory (for development)
         // Find VVHighlighting module location and navigate to .build folder
         #if SWIFT_PACKAGE
         let moduleBundle = Bundle.module
         if let modulePath = moduleBundle.bundlePath.components(separatedBy: ".build").first {
-            // We're in: /path/to/VVCode/.build/...
-            // Navigate to: /path/to/VVCode/.build/debug/ or release/
-            let vvcodePath = modulePath.hasSuffix("/") ? String(modulePath.dropLast()) : modulePath
-            searchPaths.append("\(vvcodePath)/.build/debug/\(dylibName)")
-            searchPaths.append("\(vvcodePath)/.build/release/\(dylibName)")
+            // We're in: /path/to/VVKit/.build/...
+            // Navigate to: /path/to/VVKit/.build/debug/ or release/
+            let vvkitPath = modulePath.hasSuffix("/") ? String(modulePath.dropLast()) : modulePath
+            searchPaths.append("\(vvkitPath)/.build/debug/\(dylibName)")
+            searchPaths.append("\(vvkitPath)/.build/release/\(dylibName)")
         }
         #endif
 
@@ -74,8 +74,8 @@ public final class DynamicGrammarLoader {
 
         // 5. Common development paths
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-        searchPaths.append("\(homeDir)/vivy/experiments/swift-code-editor/VVCode/.build/debug/\(dylibName)")
-        searchPaths.append("\(homeDir)/vivy/experiments/swift-code-editor/VVCode/.build/release/\(dylibName)")
+        searchPaths.append("\(homeDir)/vivy/experiments/swift-code-editor/VVKit/.build/debug/\(dylibName)")
+        searchPaths.append("\(homeDir)/vivy/experiments/swift-code-editor/VVKit/.build/release/\(dylibName)")
 
         // 6. Current working directory
         searchPaths.append("./\(dylibName)")

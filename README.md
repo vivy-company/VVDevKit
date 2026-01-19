@@ -1,12 +1,14 @@
-# VVCode
+# VVKit
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-vivy--company-ea4aaa?logo=github)](https://github.com/sponsors/vivy-company)
 
-A Swift code editor library for macOS and iOS with syntax highlighting, LSP support, and Metal-accelerated rendering.
+VVKit is a kit of Metal-based, reusable components and Swift code for building editor- and document-centric apps on macOS and iOS. It includes the VVCode editor, markdown rendering, highlighting, Git integration, and LSP support.
 
 Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
 > **Note:** This library is under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
+
+The primary editor module is `VVCode`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown.
 
 ## Features
 
@@ -27,7 +29,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/vivy-company/VVCode", from: "0.1.0")
+    .package(url: "https://github.com/vivy-company/VVKit", from: "0.1.0")
 ]
 ```
 
