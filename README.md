@@ -6,7 +6,7 @@ VVKit is a kit of Metal-based, reusable components and Swift code for building e
 
 Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
-> **Note:** This library is under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
+> **Note:** VVKit is experimental and under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
 
 The primary editor module is `VVCode`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown.
 
