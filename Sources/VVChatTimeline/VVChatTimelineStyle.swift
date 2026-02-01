@@ -22,6 +22,7 @@ public struct VVChatTimelineStyle {
     public var userBubbleColor: SIMD4<Float>
     public var userBubbleCornerRadius: CGFloat
     public var userBubbleInsets: VVInsets
+    public var userBubbleMaxWidth: CGFloat
     public var headerSpacing: CGFloat
     public var footerSpacing: CGFloat
     public var loadingIndicatorText: String
@@ -48,6 +49,7 @@ public struct VVChatTimelineStyle {
         userBubbleColor: SIMD4<Float> = SIMD4(0.18, 0.2, 0.24, 1),
         userBubbleCornerRadius: CGFloat = 14,
         userBubbleInsets: VVInsets = .init(top: 10, left: 12, bottom: 10, right: 12),
+        userBubbleMaxWidth: CGFloat = 420,
         headerSpacing: CGFloat = 6,
         footerSpacing: CGFloat = 6,
         loadingIndicatorText: String = "Typing…",
@@ -81,6 +83,7 @@ public struct VVChatTimelineStyle {
         self.userBubbleColor = userBubbleColor
         self.userBubbleCornerRadius = userBubbleCornerRadius
         self.userBubbleInsets = userBubbleInsets
+        self.userBubbleMaxWidth = userBubbleMaxWidth
         self.headerSpacing = headerSpacing
         self.footerSpacing = footerSpacing
         self.loadingIndicatorText = loadingIndicatorText

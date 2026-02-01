@@ -171,82 +171,91 @@ public final class VVChatMessageRenderer {
         let usesBubble = message.role == .user
         let bubbleInsets = usesBubble ? style.userBubbleInsets : VVInsets()
         let availableWidth = max(0, contentWidth - insets.left - insets.right)
-        let innerWidth = max(0, availableWidth - bubbleInsets.left - bubbleInsets.right)
-        let widthKey = Self.widthKey(for: innerWidth)
+        let maxContentWidth = usesBubble ? min(availableWidth - bubbleInsets.left - bubbleInsets.right, style.userBubbleMaxWidth) : availableWidth
+        let messageContentWidth = max(0, maxContentWidth)
+        let widthKey = Self.widthKey(for: messageContentWidth)
         let isDraft = message.state == .draft
         let key = CacheKey(id: message.id, revision: message.revision, widthKey: widthKey, isDraft: isDraft)
         if let cached = cache.value(for: key) {
             return cached
         }
 
-        let document = isDraft ? makeDraftDocument(text: message.content) : parser.parse(message.content)
+        let document = isDraft ? makeStreamingDocument(text: message.content) : parser.parse(message.content)
         let (layoutEngine, pipeline) = isDraft ? (draftLayoutEngine, draftPipeline) : (finalLayoutEngine, finalPipeline)
 
         layoutEngine.updateImageSizeProvider { [weak self] url in
             self?.imageSizes[url]
         }
-        layoutEngine.updateContentWidth(innerWidth)
+        layoutEngine.updateContentWidth(messageContentWidth)
         var layout = layoutEngine.layout(document)
         layoutEngine.adjustParagraphImageSpacing(in: &layout)
 
         let contentScene = pipeline.buildScene(from: layout)
         let imageURLs = Array(collectImageURLs(from: layout))
+        let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
+        let bubbleContentWidth = usesBubble ? max(0, min(messageContentWidth, measuredWidth ?? messageContentWidth)) : messageContentWidth
+        let metaWidth = usesBubble ? max(bubbleContentWidth, 1) : messageContentWidth
         let headerText = headerTitle(for: message.role)
-        let headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: innerWidth)
+        let headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: metaWidth)
         let footerRender: (layout: MarkdownLayout, scene: VVScene)
         if isDraft && message.role == .assistant {
-            footerRender = renderMeta(text: style.loadingIndicatorText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: innerWidth)
+            footerRender = renderMeta(text: style.loadingIndicatorText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
         } else {
-            footerRender = renderMeta(text: timestampLabel(for: message), layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: innerWidth)
+            footerRender = renderMeta(text: timestampLabel(for: message), layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
         }
 
         let headerHeight = headerRender.layout.totalHeight
         let contentHeight = layout.totalHeight
         let footerHeight = footerRender.layout.totalHeight
-        let bubbleHeight = bubbleInsets.top
-            + headerHeight
-            + style.headerSpacing
-            + contentHeight
-            + style.footerSpacing
-            + footerHeight
-            + bubbleInsets.bottom
-        let height = bubbleHeight + insets.top + insets.bottom
+        let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
+        let footerBlockHeight = footerHeight > 0 ? style.footerSpacing + footerHeight : 0
+        let contentBlockHeight = usesBubble
+            ? (bubbleInsets.top + contentHeight + bubbleInsets.bottom)
+            : contentHeight
+        let bubbleWidth = usesBubble ? (bubbleContentWidth + bubbleInsets.left + bubbleInsets.right) : 0
+        let messageHeight = headerBlockHeight + contentBlockHeight + footerBlockHeight
+        let height = messageHeight + insets.top + insets.bottom
 
         var builder = VVSceneBuilder()
+        var currentY: CGFloat = 0
+        if headerHeight > 0 {
+            builder.add(node: VVNode.fromScene(headerRender.scene))
+            currentY += headerHeight + style.headerSpacing
+        }
+
         if usesBubble {
             let bubble = VVQuadPrimitive(
-                frame: CGRect(x: 0, y: 0, width: availableWidth, height: bubbleHeight),
+                frame: CGRect(x: 0, y: currentY, width: bubbleWidth, height: contentBlockHeight),
                 color: style.userBubbleColor,
                 cornerRadius: style.userBubbleCornerRadius
             )
             builder.add(kind: .quad(bubble), zIndex: -1)
-        }
-
-        let innerOrigin = CGPoint(x: bubbleInsets.left, y: bubbleInsets.top)
-        builder.withOffset(innerOrigin) { builder in
-            if headerHeight > 0 {
-                builder.add(node: VVNode.fromScene(headerRender.scene))
-            }
-            let contentOffsetY = headerHeight + style.headerSpacing
-            builder.withOffset(CGPoint(x: 0, y: contentOffsetY)) { builder in
+            builder.withOffset(CGPoint(x: bubbleInsets.left, y: currentY + bubbleInsets.top)) { builder in
                 builder.add(node: VVNode.fromScene(contentScene))
             }
-            let timestampOffsetY = contentOffsetY + contentHeight + style.footerSpacing
-            if footerHeight > 0 {
-                builder.withOffset(CGPoint(x: 0, y: timestampOffsetY)) { builder in
-                    builder.add(node: VVNode.fromScene(footerRender.scene))
-                }
+        } else {
+            builder.withOffset(CGPoint(x: 0, y: currentY)) { builder in
+                builder.add(node: VVNode.fromScene(contentScene))
+            }
+        }
+
+        currentY += contentBlockHeight
+        if footerHeight > 0 {
+            currentY += style.footerSpacing
+            builder.withOffset(CGPoint(x: 0, y: currentY)) { builder in
+                builder.add(node: VVNode.fromScene(footerRender.scene))
             }
         }
 
         let scene = builder.scene
+        let bubbleOffsetX = usesBubble ? max(0, availableWidth - bubbleWidth) : 0
         let rendered = VVChatRenderedMessage(
             id: message.id,
             revision: message.revision,
             layout: layout,
             scene: scene,
             height: height,
-            contentOffset: CGPoint(x: insets.left, y: insets.top),
+            contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top),
             isDraft: isDraft,
             imageURLs: imageURLs
         )
@@ -258,6 +267,21 @@ public final class VVChatMessageRenderer {
         let content = MarkdownInlineContent(text: text)
         let block = MarkdownBlock(.paragraph(content), index: 0)
         return ParsedMarkdownDocument(blocks: [block], footnotes: [:], isComplete: false, streamingBuffer: text)
+    }
+
+    private func makeStreamingDocument(text: String) -> ParsedMarkdownDocument {
+        let parsed = parser.parseStreaming(text, isComplete: false)
+        guard !parsed.streamingBuffer.isEmpty else { return parsed }
+
+        var blocks = parsed.blocks
+        let bufferContent = MarkdownInlineContent(text: parsed.streamingBuffer)
+        blocks.append(MarkdownBlock(.paragraph(bufferContent), index: blocks.count))
+        return ParsedMarkdownDocument(
+            blocks: blocks,
+            footnotes: parsed.footnotes,
+            isComplete: false,
+            streamingBuffer: parsed.streamingBuffer
+        )
     }
 
     private func renderMeta(
@@ -314,6 +338,149 @@ public final class VVChatMessageRenderer {
         theme.contentPadding = 0
         theme.paragraphSpacing = 2
         return theme
+    }
+
+    private func measuredContentWidth(for layout: MarkdownLayout) -> CGFloat? {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for block in layout.blocks {
+            let (blockMaxX, blockHasValue) = measuredMaxX(for: block)
+            if blockHasValue {
+                maxX = max(maxX, blockMaxX)
+                hasValue = true
+            }
+        }
+        return hasValue ? maxX : nil
+    }
+
+    private func measuredMaxX(for block: LayoutBlock) -> (CGFloat, Bool) {
+        switch block.content {
+        case .text(let runs):
+            return measuredMaxX(for: runs, images: [])
+        case .inline(let runs, let images):
+            return measuredMaxX(for: runs, images: images)
+        case .listItems(let items):
+            return measuredMaxX(for: items)
+        case .quoteBlocks(let blocks):
+            return measuredMaxX(for: blocks)
+        case .definitionList(let items):
+            return measuredMaxX(for: items)
+        case .abbreviationList(let items):
+            return measuredMaxX(for: items)
+        case .imageRow(let images):
+            return measuredMaxX(for: images)
+        case .tableRows(let rows):
+            if let rowMax = rows.map({ $0.frame.maxX }).max() {
+                return (rowMax, rowMax > 0)
+            }
+            return (block.frame.maxX, block.frame.maxX > 0)
+        case .mermaid(let diagram):
+            return (diagram.frame.maxX, diagram.frame.maxX > 0)
+        case .image, .code, .thematicBreak, .math:
+            return (block.frame.maxX, block.frame.maxX > 0)
+        }
+    }
+
+    private func measuredMaxX(for blocks: [LayoutBlock]) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for block in blocks {
+            let (blockMaxX, blockHasValue) = measuredMaxX(for: block)
+            if blockHasValue {
+                maxX = max(maxX, blockMaxX)
+                hasValue = true
+            }
+        }
+        return (maxX, hasValue)
+    }
+
+    private func measuredMaxX(for items: [LayoutListItem]) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for item in items {
+            let (itemMaxX, itemHasValue) = measuredMaxX(for: item)
+            if itemHasValue {
+                maxX = max(maxX, itemMaxX)
+                hasValue = true
+            }
+        }
+        return (maxX, hasValue)
+    }
+
+    private func measuredMaxX(for item: LayoutListItem) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        let (contentMaxX, contentHasValue) = measuredMaxX(for: item.contentRuns, images: item.inlineImages)
+        if contentHasValue {
+            maxX = max(maxX, contentMaxX)
+            hasValue = true
+        }
+        let (childMaxX, childHasValue) = measuredMaxX(for: item.children)
+        if childHasValue {
+            maxX = max(maxX, childMaxX)
+            hasValue = true
+        }
+        return (maxX, hasValue)
+    }
+
+    private func measuredMaxX(for items: [LayoutDefinitionItem]) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for item in items {
+            let (termMaxX, termHasValue) = measuredMaxX(for: item.termRuns, images: item.termImages)
+            if termHasValue {
+                maxX = max(maxX, termMaxX)
+                hasValue = true
+            }
+            for (index, runs) in item.definitionRuns.enumerated() {
+                let images = index < item.definitionImages.count ? item.definitionImages[index] : []
+                let (defMaxX, defHasValue) = measuredMaxX(for: runs, images: images)
+                if defHasValue {
+                    maxX = max(maxX, defMaxX)
+                    hasValue = true
+                }
+            }
+        }
+        return (maxX, hasValue)
+    }
+
+    private func measuredMaxX(for items: [LayoutAbbreviationItem]) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for item in items {
+            let (itemMaxX, itemHasValue) = measuredMaxX(for: item.runs, images: item.images)
+            if itemHasValue {
+                maxX = max(maxX, itemMaxX)
+                hasValue = true
+            }
+        }
+        return (maxX, hasValue)
+    }
+
+    private func measuredMaxX(for runs: [LayoutTextRun], images: [LayoutInlineImage]) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for run in runs {
+            for glyph in run.glyphs {
+                maxX = max(maxX, glyph.position.x + glyph.size.width)
+                hasValue = true
+            }
+        }
+        for image in images {
+            maxX = max(maxX, image.frame.maxX)
+            hasValue = true
+        }
+        return (maxX, hasValue)
+    }
+
+    private func measuredMaxX(for images: [LayoutInlineImage]) -> (CGFloat, Bool) {
+        var maxX: CGFloat = 0
+        var hasValue = false
+        for image in images {
+            maxX = max(maxX, image.frame.maxX)
+            hasValue = true
+        }
+        return (maxX, hasValue)
     }
 
     private func collectImageURLs(from layout: MarkdownLayout) -> Set<String> {

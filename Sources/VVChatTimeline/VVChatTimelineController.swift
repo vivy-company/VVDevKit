@@ -197,6 +197,7 @@ public final class VVChatTimelineController {
 
     private func updateMessageLayout(at index: Int, shouldScrollToBottom: Bool, markUnread: Bool) {
         let message = messages[index]
+        let shouldFollow = shouldScrollToBottom || (message.state == .draft && state.isPinnedToBottom)
         let renderedMessage = renderer.renderedMessage(for: message)
         updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
         let oldHeight = layouts[index].frame.height
@@ -212,7 +213,7 @@ public final class VVChatTimelineController {
         }
         totalHeight = (layouts.last?.frame.maxY ?? style.timelineInsets.top) + style.timelineInsets.bottom
 
-        if markUnread && !shouldScrollToBottom {
+        if markUnread && !shouldFollow {
             state.hasUnreadNewContent = true
         }
 
@@ -221,7 +222,7 @@ public final class VVChatTimelineController {
             totalHeight: totalHeight,
             heightDelta: delta,
             changedIndex: index,
-            shouldScrollToBottom: shouldScrollToBottom,
+            shouldScrollToBottom: shouldFollow,
             hasUnreadNewContent: state.hasUnreadNewContent
         )
         onUpdate?(update)
