@@ -30,8 +30,7 @@ VVKit is a Metal-based kit of reusable components and Swift code. The VVCode mod
 ### Module Hierarchy
 
 ```
-VVCode (public API)
-├── VVCodeCore (text view, Metal rendering, editing)
+VVCode (public API + core text view / Metal rendering)
 ├── VVHighlighting (Tree-sitter syntax highlighting)
 ├── VVGit (git status/diff parsing)
 ├── VVLSP (Language Server Protocol)
@@ -45,7 +44,7 @@ VVCode (public API)
 - Uses `VVMetalEditorContainerView` when Metal available, falls back to AppKit
 - Manages LSP server lifecycle automatically
 
-**MetalTextView** (`Sources/VVCodeCore/Metal/MetalTextView.swift`)
+**MetalTextView** (`Sources/VVCode/Core/Metal/MetalTextView.swift`)
 - GPU-accelerated text rendering using Metal
 - Batched rendering: glyphs, selections, cursors, indent guides, gutter
 - Uses `TextLayoutEngine` for line layout with glyph caching
@@ -83,6 +82,6 @@ VVCode (public API)
 ## Conventions
 
 - Platform: macOS 13+ / iOS 13+ (Swift 5.9+)
-- Metal shaders in `Sources/VVCodeCore/Metal/Shaders.metal`
+- Metal shaders in `Sources/VVCode/Core/Metal/Shaders.metal`
 - Tree-sitter queries in `Sources/VVHighlighting/Resources/queries/`
 - Each grammar is a separate target with C sources in `src/` and headers in `include/`

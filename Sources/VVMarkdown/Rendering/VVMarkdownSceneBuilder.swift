@@ -417,6 +417,17 @@ struct VVMarkdownSceneBuilder {
             let headerRadius = min(cornerRadius, headerFrame.height)
             let headerQuad = VVQuadPrimitive(frame: headerFrame, color: theme.codeHeaderBackgroundColor, cornerRadius: headerRadius)
             builder.add(kind: .quad(headerQuad))
+            if headerRadius > 0 {
+                let squareHeight = min(headerRadius, headerFrame.height)
+                let squareFrame = CGRect(
+                    x: headerFrame.minX,
+                    y: headerFrame.maxY - squareHeight,
+                    width: headerFrame.width,
+                    height: squareHeight
+                )
+                let squareQuad = VVQuadPrimitive(frame: squareFrame, color: theme.codeHeaderBackgroundColor, cornerRadius: 0)
+                builder.add(kind: .quad(squareQuad))
+            }
 
             let dividerHeight = max(1, CGFloat(theme.codeHeaderDividerHeight))
             let divider = VVLinePrimitive(
@@ -429,10 +440,10 @@ struct VVMarkdownSceneBuilder {
         }
 
         let highlightedLines = highlightedCodeBlocks[blockId]?.lines
-        let lineCount = highlightedLines?.count ?? lines.count
         let maxLineNumber = max(highlightedLines?.map(\.lineNumber).max() ?? 0,
                                 lines.map(\.lineNumber).max() ?? 0,
-                                lineCount)
+                                lines.count)
+        let lineCount = maxLineNumber
         let gutterWidth = codeGutterWidth(for: maxLineNumber)
 
         let bottomInset = max(0, cornerRadius - borderWidth)
@@ -500,28 +511,35 @@ struct VVMarkdownSceneBuilder {
             clipFrame.size.height = max(0, clipFrame.height - bottomInset)
         }
 
+        let availableWidth = max(24, innerFrame.width - padding * 2 - gutterWidth)
+        let charWidth = max(1, layoutEngine.measureTextWidth("8", variant: .monospace))
+        let maxChars = max(6, Int(floor(availableWidth / charWidth)))
+
         if let highlighted = highlightedCodeBlocks[blockId] {
+            var visualIndex = 0
             for line in highlighted.lines {
-                let lineY = contentOriginY + padding + headerHeight + baselineOffset + CGFloat(line.lineNumber - 1) * baseLineHeight
-                let startX = contentOriginX + padding + gutterWidth
-                appendCodeLineNumberPrimitive(line.lineNumber, at: CGPoint(x: contentOriginX, y: lineY), gutterWidth: gutterWidth, clipRect: clipFrame, to: &builder)
-                var x = startX
-                let tokens = line.tokens.isEmpty
-                    ? [HighlightedCodeToken(text: line.text, range: NSRange(location: 0, length: line.text.utf16.count), color: theme.codeColor)]
-                    : line.tokens
-                for token in tokens {
-                    let tokenWidth = layoutEngine.measureTextWidth(token.text, variant: .monospace)
-                    let glyphs = layoutEngine.layoutCodeGlyphs(token.text, at: CGPoint(x: x, y: lineY), color: token.color)
-                    if !glyphs.isEmpty {
-                        let run = VVTextRunPrimitive(
-                            glyphs: glyphs.map { toVVTextGlyph($0) },
-                            style: VVTextRunStyle(color: token.color),
-                            position: CGPoint(x: x, y: lineY),
-                            fontSize: glyphs.first?.fontSize ?? layoutEngine.baseFontSize
-                        )
-                        builder.add(VVPrimitive(kind: .textRun(run), clipRect: clipFrame))
+                let wrapped = wrapHighlightedLine(line, maxChars: maxChars)
+                for (wrapIndex, segment) in wrapped.enumerated() {
+                    let lineY = contentOriginY + padding + headerHeight + baselineOffset + CGFloat(visualIndex) * baseLineHeight
+                    let startX = contentOriginX + padding + gutterWidth
+                    let lineNumber = wrapIndex == 0 ? line.lineNumber : 0
+                    appendCodeLineNumberPrimitive(lineNumber, at: CGPoint(x: contentOriginX, y: lineY), gutterWidth: gutterWidth, clipRect: clipFrame, to: &builder)
+                    var x = startX
+                    for token in segment {
+                        let tokenWidth = layoutEngine.measureTextWidth(token.text, variant: .monospace)
+                        let glyphs = layoutEngine.layoutCodeGlyphs(token.text, at: CGPoint(x: x, y: lineY), color: token.color)
+                        if !glyphs.isEmpty {
+                            let run = VVTextRunPrimitive(
+                                glyphs: glyphs.map { toVVTextGlyph($0) },
+                                style: VVTextRunStyle(color: token.color),
+                                position: CGPoint(x: x, y: lineY),
+                                fontSize: glyphs.first?.fontSize ?? layoutEngine.baseFontSize
+                            )
+                            builder.add(VVPrimitive(kind: .textRun(run), clipRect: clipFrame))
+                        }
+                        x += tokenWidth
                     }
-                    x += tokenWidth
+                    visualIndex += 1
                 }
             }
         } else {
@@ -546,6 +564,67 @@ struct VVMarkdownSceneBuilder {
                 }
             }
         }
+    }
+
+    private func wrapHighlightedLine(_ line: HighlightedCodeLine, maxChars: Int) -> [[HighlightedCodeToken]] {
+        guard maxChars > 0 else {
+            let tokens = line.tokens.isEmpty
+                ? [HighlightedCodeToken(text: line.text, range: NSRange(location: 0, length: line.text.utf16.count), color: theme.codeColor)]
+                : line.tokens
+            return [tokens]
+        }
+
+        let sourceTokens = line.tokens.isEmpty
+            ? [HighlightedCodeToken(text: line.text, range: NSRange(location: 0, length: line.text.utf16.count), color: theme.codeColor)]
+            : line.tokens
+
+        var wrapped: [[HighlightedCodeToken]] = []
+        var current: [HighlightedCodeToken] = []
+        var remaining = maxChars
+
+        func flush() {
+            wrapped.append(current)
+            current = []
+            remaining = maxChars
+        }
+
+        for token in sourceTokens {
+            let nsText = token.text as NSString
+            let length = nsText.length
+            if length == 0 {
+                if current.isEmpty {
+                    current.append(token)
+                }
+                continue
+            }
+            var offset = 0
+            while offset < length {
+                if remaining == 0 {
+                    flush()
+                }
+                let take = min(remaining, length - offset)
+                let partText = nsText.substring(with: NSRange(location: offset, length: take))
+                let partToken = HighlightedCodeToken(
+                    text: partText,
+                    range: NSRange(location: 0, length: take),
+                    color: token.color,
+                    isBold: token.isBold,
+                    isItalic: token.isItalic
+                )
+                current.append(partToken)
+                remaining -= take
+                offset += take
+                if remaining == 0 {
+                    flush()
+                }
+            }
+        }
+
+        if !current.isEmpty || wrapped.isEmpty {
+            wrapped.append(current)
+        }
+
+        return wrapped
     }
 
     private func appendCodeCopyButtonPrimitives(frame: CGRect, headerHeight: CGFloat, blockId: String, to builder: inout VVSceneBuilder) {
@@ -589,6 +668,7 @@ struct VVMarkdownSceneBuilder {
     }
 
     private func appendCodeLineNumberPrimitive(_ lineNumber: Int, at position: CGPoint, gutterWidth: CGFloat, clipRect: CGRect, to builder: inout VVSceneBuilder) {
+        guard lineNumber > 0 else { return }
         let text = "\(lineNumber)"
         let textWidth = layoutEngine.measureTextWidth(text, variant: .monospace)
         let x = position.x + gutterWidth - textWidth - 8

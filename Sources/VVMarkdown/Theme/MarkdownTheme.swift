@@ -77,15 +77,15 @@ public struct MarkdownTheme: Sendable {
 
     // MARK: - Spacing
 
-    public var paragraphSpacing: Float = 6
-    public var headingSpacing: Float = 4
+    public var paragraphSpacing: Float = 12
+    public var headingSpacing: Float = 16
     public var listIndent: Float = 16
     public var blockQuoteIndent: Float = 12
     public var blockQuoteBorderWidth: Float = 3
     public var codeBlockPadding: Float = 12
     public var tableRowPadding: Float = 6
     public var tableCellPadding: Float = 10
-    public var contentPadding: Float = 16
+    public var contentPadding: Float = 20
 
     // MARK: - Initialization
 

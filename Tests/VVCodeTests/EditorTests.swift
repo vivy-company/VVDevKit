@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 @testable import VVCode
-@testable import VVCodeCore
+@testable import VVCode
 
 @MainActor
 final class EditorTests: XCTestCase {

@@ -3,6 +3,10 @@ import MetalKit
 import AppKit
 import QuartzCore
 import CoreText
+import VVMetalPrimitives
+import VVMarkdown
+import VVGit
+import VVLSP
 
 /// Metal-based text view for code rendering
 public final class MetalTextView: MTKView {
@@ -17,29 +21,9 @@ public final class MetalTextView: MTKView {
 
     // MARK: - Properties
 
-    public private(set) var renderer: MetalRenderer!
+    public private(set) var renderer: MarkdownMetalRenderer!
     public private(set) var layoutEngine: TextLayoutEngine!
 
-    private var glyphBatch: GlyphBatch!
-    private var colorGlyphBatch: GlyphBatch!
-    private var selectionBatch: QuadBatch!
-    private var cursorBatch: QuadBatch!
-    private var lineHighlightBatch: QuadBatch!
-    private var indentGuideBatch: QuadBatch!
-    private var activeIndentGuideBatch: QuadBatch!
-    private var bracketMatchBatch: QuadBatch!
-    private var searchMatchBatch: QuadBatch!
-    private var activeSearchMatchBatch: QuadBatch!
-    private var markedTextBatch: QuadBatch!
-    private var gutterGlyphBatch: GlyphBatch!
-    private var gutterColorGlyphBatch: GlyphBatch!
-    private var gutterQuadBatch: QuadBatch!
-    private var statusBarGlyphBatch: GlyphBatch!
-    private var statusBarColorGlyphBatch: GlyphBatch!
-    private var statusBarQuadBatch: QuadBatch!
-    private var searchOverlayGlyphBatch: GlyphBatch!
-    private var searchOverlayColorGlyphBatch: GlyphBatch!
-    private var searchOverlayQuadBatch: QuadBatch!
 
     // Text content
     private var lines: [String] = []
@@ -76,16 +60,17 @@ public final class MetalTextView: MTKView {
     private var showsLineNumbers: Bool = true
     private var showsGitGutter: Bool = true
     private var gutterFont: NSFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-    private var gutterInsets: NSEdgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+    private var gutterInsets: NSEdgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 4, right: 14)
     private var gutterMinimumWidth: CGFloat = 0
-    private var foldMarkerAreaWidth: CGFloat = 10
-    private var foldMarkerSpacing: CGFloat = 4
+    private var foldMarkerAreaWidth: CGFloat = 16
+    private var foldMarkerSpacing: CGFloat = 6
     private let gutterIndicatorWidth: CGFloat = 2
     private let gutterSeparatorWidth: CGFloat = 0
-    private var foldRanges: [MetalGutterView.FoldRange] = []
-    private var foldRangeByStartLine: [Int: MetalGutterView.FoldRange] = [:]
+    private var reserveFoldMarkerSpace: Bool = true
+    private var foldRanges: [MetalGutterFoldRange] = []
+    private var foldRangeByStartLine: [Int: MetalGutterFoldRange] = [:]
     private var foldedStartLines: Set<Int> = []
-    private var gitHunks: [MetalGutterView.GitHunk] = []
+    private var gitHunks: [MetalGutterGitHunk] = []
     private var selectedLineRanges: [ClosedRange<Int>] = []
     private var hoveredFoldLine: Int? {
         didSet {
@@ -97,10 +82,10 @@ public final class MetalTextView: MTKView {
     private var currentLineNumber: Int = 0
     private var gutterWidth: CGFloat = 0
 
-    private var foldMarkerIconScale: CGFloat = 0.55
-    private var foldMarkerIconLineWidth: CGFloat = 1.4
-    private var foldMarkerHoverPadding: CGFloat = 3
-    private var foldMarkerHoverCornerRadius: CGFloat = 3
+    private var foldMarkerIconScale: CGFloat = 0.5
+    private var foldMarkerIconLineWidth: CGFloat = 1.3
+    private var foldMarkerHoverPadding: CGFloat = 5
+    private var foldMarkerHoverCornerRadius: CGFloat = 4
     private var gutterTrackingArea: NSTrackingArea?
 
     // Selection state
@@ -120,6 +105,28 @@ public final class MetalTextView: MTKView {
 
     // Render coalescing - prevents excessive IOSurface allocations
     private var redrawScheduled = false
+
+    // Scene buffers (primitive-based rendering)
+    private var contentTextRuns: [VVTextRunPrimitive] = []
+    private var gutterTextRuns: [VVTextRunPrimitive] = []
+    private var statusBarTextRuns: [VVTextRunPrimitive] = []
+    private var searchOverlayTextRuns: [VVTextRunPrimitive] = []
+    private var completionTextRuns: [VVTextRunPrimitive] = []
+    private var blameTextRuns: [VVTextRunPrimitive] = []
+
+    private var gutterQuads: [VVQuadPrimitive] = []
+    private var lineHighlightQuads: [VVQuadPrimitive] = []
+    private var indentGuideQuads: [VVQuadPrimitive] = []
+    private var activeIndentGuideQuads: [VVQuadPrimitive] = []
+    private var searchMatchQuads: [VVQuadPrimitive] = []
+    private var activeSearchMatchQuads: [VVQuadPrimitive] = []
+    private var selectionQuads: [VVQuadPrimitive] = []
+    private var bracketMatchQuads: [VVQuadPrimitive] = []
+    private var markedTextQuads: [VVQuadPrimitive] = []
+    private var cursorQuads: [VVQuadPrimitive] = []
+    private var statusBarQuads: [VVQuadPrimitive] = []
+    private var searchOverlayQuads: [VVQuadPrimitive] = []
+    private var completionQuads: [VVQuadPrimitive] = []
 
     // Configuration
     private var baseTextInsets: NSEdgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
@@ -332,6 +339,21 @@ public final class MetalTextView: MTKView {
     private let searchOverlayFieldPadding: CGFloat = 8
     private let searchOverlayButtonPadding: CGFloat = 8
 
+    // Completion overlay
+    private var completionVisible: Bool = false
+    private var completionItems: [VVCompletionItem] = []
+    private var completionSelectedIndex: Int = 0
+    private var completionAnchorOffset: Int = 0
+    private var completionCursorOffset: Int = 0
+    private let completionMaxVisibleItems: Int = 8
+
+    // Blame overlay
+    private var blameByLine: [Int: VVBlameInfo] = [:]
+    private var showInlineBlame: Bool = false
+    private var blameDelay: TimeInterval = 0.5
+    private var blameVisibleLine: Int?
+    private var blameTimer: Timer?
+
     // Delegates
     public weak var textDelegate: MetalTextViewDelegate?
     public var onToggleFold: ((Int) -> Void)?
@@ -365,15 +387,19 @@ public final class MetalTextView: MTKView {
         isPaused = true
         preferredFramesPerSecond = 60
         framebufferOnly = true
+        let layerScale = (layer as? CAMetalLayer)?.contentsScale
+            ?? window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 1.0
         if let metalLayer = layer as? CAMetalLayer {
             metalLayer.maximumDrawableCount = 2
         }
 
-        // Initialize renderer
+        // Initialize primitive renderer
         do {
-            renderer = try MetalRenderer(device: device, baseFont: font)
+            renderer = try MarkdownMetalRenderer(device: device, baseFont: font, scaleFactor: layerScale)
         } catch {
-            print("Failed to initialize MetalRenderer: \(error)")
+            print("Failed to initialize MarkdownMetalRenderer: \(error)")
             return
         }
 
@@ -384,28 +410,6 @@ public final class MetalTextView: MTKView {
 
         gutterFont = font
         updateStatusBarMetrics()
-
-        // Initialize batches
-        glyphBatch = GlyphBatch(device: device)
-        colorGlyphBatch = GlyphBatch(device: device)
-        selectionBatch = QuadBatch(device: device)
-        cursorBatch = QuadBatch(device: device)
-        lineHighlightBatch = QuadBatch(device: device)
-        indentGuideBatch = QuadBatch(device: device)
-        activeIndentGuideBatch = QuadBatch(device: device)
-        bracketMatchBatch = QuadBatch(device: device)
-        searchMatchBatch = QuadBatch(device: device)
-        activeSearchMatchBatch = QuadBatch(device: device)
-        markedTextBatch = QuadBatch(device: device)
-        gutterGlyphBatch = GlyphBatch(device: device)
-        gutterColorGlyphBatch = GlyphBatch(device: device)
-        gutterQuadBatch = QuadBatch(device: device)
-        statusBarGlyphBatch = GlyphBatch(device: device)
-        statusBarColorGlyphBatch = GlyphBatch(device: device)
-        statusBarQuadBatch = QuadBatch(device: device)
-        searchOverlayGlyphBatch = GlyphBatch(device: device)
-        searchOverlayColorGlyphBatch = GlyphBatch(device: device)
-        searchOverlayQuadBatch = QuadBatch(device: device)
 
         updateBackingScaleFactor()
         updateDrawableSize()
@@ -421,6 +425,28 @@ public final class MetalTextView: MTKView {
             guard let self = self else { return }
             self.redrawScheduled = false
             self.setNeedsDisplay(self.bounds)
+        }
+    }
+
+    private func scheduleBlameForCurrentLine() {
+        blameTimer?.invalidate()
+        blameTimer = nil
+        blameVisibleLine = nil
+
+        guard showInlineBlame else { return }
+        let line = cursorLine
+        guard blameByLine[line + 1] != nil else { return }
+
+        if blameDelay <= 0 {
+            blameVisibleLine = line
+            scheduleRedraw()
+            return
+        }
+
+        blameTimer = Timer.scheduledTimer(withTimeInterval: blameDelay, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.blameVisibleLine = line
+            self.scheduleRedraw()
         }
     }
 
@@ -487,9 +513,9 @@ public final class MetalTextView: MTKView {
         updateGutterMetrics()
     }
 
-    public func setFoldRanges(_ ranges: [MetalGutterView.FoldRange], foldedStartLines: Set<Int>) {
+    public func setFoldRanges(_ ranges: [MetalGutterFoldRange], foldedStartLines: Set<Int>) {
         foldRanges = ranges
-        var map: [Int: MetalGutterView.FoldRange] = [:]
+        var map: [Int: MetalGutterFoldRange] = [:]
         for range in ranges where map[range.startLine] == nil {
             map[range.startLine] = range
         }
@@ -499,7 +525,7 @@ public final class MetalTextView: MTKView {
         scheduleRedraw()
     }
 
-    public func setGitHunks(_ hunks: [MetalGutterView.GitHunk]) {
+    public func setGitHunks(_ hunks: [MetalGutterGitHunk]) {
         gitHunks = hunks
         scheduleRedraw()
     }
@@ -531,6 +557,63 @@ public final class MetalTextView: MTKView {
         statusBarLeftText = left
         statusBarRightText = right
         statusBarRightBadgeText = rightBadge
+        scheduleRedraw()
+    }
+
+    // MARK: - Completion Overlay
+
+    public func setCompletionItems(_ items: [VVCompletionItem], anchorOffset: Int, cursorOffset: Int) {
+        completionItems = items
+        completionAnchorOffset = anchorOffset
+        completionCursorOffset = cursorOffset
+        completionSelectedIndex = max(0, min(completionSelectedIndex, max(0, items.count - 1)))
+        completionVisible = !items.isEmpty
+        scheduleRedraw()
+    }
+
+    public func updateCompletionSelection(_ index: Int) {
+        completionSelectedIndex = max(0, min(index, max(0, completionItems.count - 1)))
+        scheduleRedraw()
+    }
+
+    public func clearCompletions() {
+        completionItems.removeAll()
+        completionVisible = false
+        completionSelectedIndex = 0
+        scheduleRedraw()
+    }
+
+    public var isCompletionVisible: Bool {
+        completionVisible
+    }
+
+    public func selectedCompletionItem() -> VVCompletionItem? {
+        guard completionVisible, !completionItems.isEmpty else { return nil }
+        let index = max(0, min(completionSelectedIndex, completionItems.count - 1))
+        return completionItems[index]
+    }
+
+    public func completionAnchorRange() -> (anchor: Int, cursor: Int) {
+        (completionAnchorOffset, completionCursorOffset)
+    }
+
+    // MARK: - Blame Overlay
+
+    public func setBlameInfo(_ blameInfo: [VVBlameInfo], showInline: Bool, delay: TimeInterval) {
+        blameByLine.removeAll()
+        for info in blameInfo {
+            blameByLine[info.lineNumber] = info
+        }
+        showInlineBlame = showInline
+        blameDelay = delay
+        scheduleBlameForCurrentLine()
+    }
+
+    public func clearBlameInfo() {
+        blameByLine.removeAll()
+        blameVisibleLine = nil
+        blameTimer?.invalidate()
+        blameTimer = nil
         scheduleRedraw()
     }
 
@@ -768,6 +851,7 @@ public final class MetalTextView: MTKView {
         cursorPositions = [(line, column)]
         lastCursorMovementTime = CACurrentMediaTime()
         cursorBlinkVisible = true
+        scheduleBlameForCurrentLine()
         scheduleRedraw()
     }
 
@@ -780,6 +864,7 @@ public final class MetalTextView: MTKView {
         }
         lastCursorMovementTime = CACurrentMediaTime()
         cursorBlinkVisible = true
+        scheduleBlameForCurrentLine()
         scheduleRedraw()
     }
 
@@ -788,7 +873,7 @@ public final class MetalTextView: MTKView {
         currentFont = font
         gutterFont = font
         self.lineHeightMultiplier = lineHeightMultiplier
-        renderer.updateFont(font, scaleFactor: backingScaleFactor)
+        rebuildRenderer(for: font)
         layoutEngine.updateFont(font, lineHeightMultiplier: lineHeightMultiplier, scaleFactor: backingScaleFactor)
         updateStatusBarMetrics()
         updateGutterMetrics()
@@ -858,105 +943,8 @@ public final class MetalTextView: MTKView {
         // Begin frame with scroll offset for viewport-sized rendering
         renderer.beginFrame(viewportSize: bounds.size, scrollOffset: scrollOffset)
 
-        // Prepare batches
-        prepareGutterBatches()
-        prepareGlyphBatch()
-        prepareIndentGuideBatch()
-        prepareActiveIndentGuideBatch()
-        prepareSelectionBatch()
-        prepareBracketMatchBatch()
-        prepareSearchMatchBatch()
-        prepareMarkedTextBatch()
-        prepareCursorBatch()
-        prepareLineHighlightBatch()
-        prepareStatusBarBatches()
-        prepareSearchOverlayBatches()
-
-        // Render gutter background and indicators
-        if let (buffer, count) = gutterQuadBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-
-        // Render current line highlight
-        renderCurrentLineHighlight(encoder: encoder)
-
-        // Render indent guides
-        if let (buffer, count) = indentGuideBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-        if let (buffer, count) = activeIndentGuideBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-
-        // Render search matches
-        if let (buffer, count) = searchMatchBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-        if let (buffer, count) = activeSearchMatchBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-
-        // Render selections
-        if let (buffer, count) = selectionBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-
-        // Render bracket match highlights
-        if let (buffer, count) = bracketMatchBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-
-        // Render glyphs
-        if let (buffer, count) = glyphBatch.prepareBuffer() {
-            renderer.renderGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-        if let (buffer, count) = colorGlyphBatch.prepareBuffer() {
-            renderer.renderColorGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-
-        // Render IME marked text underline
-        if let (buffer, count) = markedTextBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-
-        // Render gutter glyphs
-        if let (buffer, count) = gutterGlyphBatch.prepareBuffer() {
-            renderer.renderGutter(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-        if let (buffer, count) = gutterColorGlyphBatch.prepareBuffer() {
-            renderer.renderGutterColorGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-
-        // Render cursor
-        if let (buffer, count) = cursorBatch.prepareBuffer() {
-            if cursorStyle == .block {
-                renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-            } else {
-                renderer.renderCursor(encoder: encoder, quads: buffer, quadCount: count)
-            }
-        }
-
-        // Render status bar overlay
-        if let (buffer, count) = statusBarQuadBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-        if let (buffer, count) = statusBarGlyphBatch.prepareBuffer() {
-            renderer.renderGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-        if let (buffer, count) = statusBarColorGlyphBatch.prepareBuffer() {
-            renderer.renderColorGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-
-        // Render search overlay
-        if let (buffer, count) = searchOverlayQuadBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
-        if let (buffer, count) = searchOverlayGlyphBatch.prepareBuffer() {
-            renderer.renderGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
-        if let (buffer, count) = searchOverlayColorGlyphBatch.prepareBuffer() {
-            renderer.renderColorGlyphs(encoder: encoder, instances: buffer, instanceCount: count)
-        }
+        let scene = buildScene()
+        renderScene(scene, encoder: encoder, renderer: renderer)
 
         encoder.endEncoding()
 
@@ -965,6 +953,372 @@ public final class MetalTextView: MTKView {
         }
 
         commandBuffer.commit()
+    }
+
+    private func buildScene() -> VVScene {
+        prepareGutterBatches()
+        prepareGlyphBatch()
+        prepareIndentGuideBatch()
+        prepareActiveIndentGuideBatch()
+        prepareLineHighlightBatch()
+        prepareSearchMatchBatch()
+        prepareSelectionBatch()
+        prepareBracketMatchBatch()
+        prepareMarkedTextBatch()
+        prepareCursorBatch()
+        prepareStatusBarBatches()
+        prepareSearchOverlayBatches()
+        prepareCompletionOverlay()
+        prepareBlameOverlay()
+
+        var scene = VVScene()
+
+        appendQuads(gutterQuads, to: &scene, zIndex: 1)
+        appendQuads(lineHighlightQuads, to: &scene, zIndex: 2)
+        appendQuads(indentGuideQuads, to: &scene, zIndex: 3)
+        appendQuads(activeIndentGuideQuads, to: &scene, zIndex: 4)
+        appendQuads(searchMatchQuads, to: &scene, zIndex: 5)
+        appendQuads(activeSearchMatchQuads, to: &scene, zIndex: 6)
+        appendQuads(selectionQuads, to: &scene, zIndex: 7)
+        appendQuads(bracketMatchQuads, to: &scene, zIndex: 8)
+
+        appendTextRuns(contentTextRuns, to: &scene, zIndex: 10)
+        appendTextRuns(gutterTextRuns, to: &scene, zIndex: 11)
+        appendTextRuns(blameTextRuns, to: &scene, zIndex: 12)
+
+        appendQuads(markedTextQuads, to: &scene, zIndex: 13)
+        appendQuads(cursorQuads, to: &scene, zIndex: 14)
+
+        appendQuads(statusBarQuads, to: &scene, zIndex: 20)
+        appendTextRuns(statusBarTextRuns, to: &scene, zIndex: 21)
+
+        appendQuads(searchOverlayQuads, to: &scene, zIndex: 30)
+        appendTextRuns(searchOverlayTextRuns, to: &scene, zIndex: 31)
+
+        appendQuads(completionQuads, to: &scene, zIndex: 40)
+        appendTextRuns(completionTextRuns, to: &scene, zIndex: 41)
+
+        return scene
+    }
+
+    private func appendQuads(_ quads: [VVQuadPrimitive], to scene: inout VVScene, zIndex: Int) {
+        for quad in quads {
+            scene.add(kind: .quad(quad), zIndex: zIndex)
+        }
+    }
+
+    private func appendTextRuns(_ runs: [VVTextRunPrimitive], to scene: inout VVScene, zIndex: Int) {
+        for run in runs {
+            scene.add(kind: .textRun(run), zIndex: zIndex)
+        }
+    }
+
+    private func renderScene(_ scene: VVScene, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
+        var currentClip: CGRect? = nil
+        var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
+        var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
+        var underlines: [LineInstance] = []
+        var strikethroughs: [LineInstance] = []
+
+        func flushTextBatches() {
+            if !glyphInstances.isEmpty || !colorGlyphInstances.isEmpty {
+                renderGlyphBatches(glyphInstances, encoder: encoder, renderer: renderer, isColor: false)
+                renderGlyphBatches(colorGlyphInstances, encoder: encoder, renderer: renderer, isColor: true)
+            }
+            if !underlines.isEmpty, let buffer = renderer.makeBuffer(for: underlines) {
+                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: underlines.count)
+            }
+            if !strikethroughs.isEmpty, let buffer = renderer.makeBuffer(for: strikethroughs) {
+                renderer.renderStrikethroughs(encoder: encoder, instances: buffer, instanceCount: strikethroughs.count)
+            }
+            glyphInstances.removeAll(keepingCapacity: true)
+            colorGlyphInstances.removeAll(keepingCapacity: true)
+            underlines.removeAll(keepingCapacity: true)
+            strikethroughs.removeAll(keepingCapacity: true)
+        }
+
+        func updateClip(_ clip: CGRect?) {
+            if clip != currentClip {
+                flushTextBatches()
+                if let clip {
+                    encoder.setScissorRect(scissorRect(for: clip))
+                } else {
+                    encoder.setScissorRect(fullScissorRect())
+                }
+                currentClip = clip
+            }
+        }
+
+        for primitive in scene.orderedPrimitives() {
+            updateClip(primitive.clipRect)
+            switch primitive.kind {
+            case .textRun(let run):
+                appendTextPrimitive(run, renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances, underlines: &underlines, strikethroughs: &strikethroughs)
+            default:
+                flushTextBatches()
+                renderPrimitive(primitive, encoder: encoder, renderer: renderer)
+            }
+        }
+
+        flushTextBatches()
+        updateClip(nil)
+    }
+
+    private func renderPrimitive(_ primitive: VVPrimitive, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
+        switch primitive.kind {
+        case .quad(let quad):
+            let instance = QuadInstance(
+                position: SIMD2<Float>(Float(quad.frame.origin.x), Float(quad.frame.origin.y)),
+                size: SIMD2<Float>(Float(quad.frame.width), Float(quad.frame.height)),
+                color: quad.color,
+                cornerRadius: Float(quad.cornerRadius)
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
+            }
+
+        case .line(let line):
+            let minX = min(line.start.x, line.end.x)
+            let minY = min(line.start.y, line.end.y)
+            let width = abs(line.end.x - line.start.x)
+            let height = abs(line.end.y - line.start.y)
+            let rectWidth = width > 0 ? width : line.thickness
+            let rectHeight = height > 0 ? height : line.thickness
+            let instance = LineInstance(
+                position: SIMD2<Float>(Float(minX), Float(minY)),
+                width: Float(rectWidth),
+                height: Float(rectHeight),
+                color: line.color
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .bullet(let bullet):
+            switch bullet.type {
+            case .disc, .circle, .square:
+                let bulletType: UInt32
+                switch bullet.type {
+                case .disc: bulletType = 0
+                case .circle: bulletType = 1
+                case .square: bulletType = 2
+                default: bulletType = 0
+                }
+                let instance = BulletInstance(
+                    position: SIMD2<Float>(Float(bullet.position.x), Float(bullet.position.y)),
+                    size: SIMD2<Float>(Float(bullet.size), Float(bullet.size)),
+                    color: bullet.color,
+                    bulletType: bulletType
+                )
+                if let buffer = renderer.makeBuffer(for: [instance]) {
+                    renderer.renderBullets(encoder: encoder, instances: buffer, instanceCount: 1)
+                }
+            case .checkbox(let checked):
+                let instance = CheckboxInstance(
+                    position: SIMD2<Float>(Float(bullet.position.x), Float(bullet.position.y)),
+                    size: SIMD2<Float>(Float(bullet.size), Float(bullet.size)),
+                    color: bullet.color,
+                    isChecked: checked
+                )
+                if let buffer = renderer.makeBuffer(for: [instance]) {
+                    renderer.renderCheckboxes(encoder: encoder, instances: buffer, instanceCount: 1)
+                }
+            case .number:
+                break
+            }
+
+        case .image(let image):
+            let borderColor = SIMD4<Float>(0.35, 0.35, 0.35, 1.0)
+            let background = SIMD4<Float>(0.12, 0.12, 0.12, 1.0)
+            let border = QuadInstance(
+                position: SIMD2<Float>(Float(image.frame.origin.x), Float(image.frame.origin.y)),
+                size: SIMD2<Float>(Float(image.frame.width), Float(image.frame.height)),
+                color: borderColor,
+                cornerRadius: Float(image.cornerRadius)
+            )
+            let innerFrame = image.frame.insetBy(dx: 1, dy: 1)
+            let fill = QuadInstance(
+                position: SIMD2<Float>(Float(innerFrame.origin.x), Float(innerFrame.origin.y)),
+                size: SIMD2<Float>(Float(innerFrame.width), Float(innerFrame.height)),
+                color: background,
+                cornerRadius: Float(max(0, image.cornerRadius - 1))
+            )
+            if let buffer = renderer.makeBuffer(for: [border, fill]) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 2, rounded: true)
+            }
+
+        case .blockQuoteBorder(let border):
+            let instance = BlockQuoteBorderInstance(
+                position: SIMD2<Float>(Float(border.frame.origin.x), Float(border.frame.origin.y)),
+                size: SIMD2<Float>(Float(border.frame.width), Float(border.frame.height)),
+                color: border.color,
+                borderWidth: Float(border.borderWidth)
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderBlockQuoteBorders(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .tableLine(let line):
+            let instance = TableGridLineInstance(
+                start: SIMD2<Float>(Float(line.start.x), Float(line.start.y)),
+                end: SIMD2<Float>(Float(line.end.x), Float(line.end.y)),
+                color: line.color,
+                lineWidth: Float(line.lineWidth)
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderTableGrid(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .pieSlice(let slice):
+            let instance = PieSliceInstance(
+                center: SIMD2<Float>(Float(slice.center.x), Float(slice.center.y)),
+                radius: Float(slice.radius),
+                startAngle: Float(slice.startAngle),
+                endAngle: Float(slice.endAngle),
+                color: slice.color
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderPieSlices(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .textRun:
+            break
+        }
+    }
+
+    private func appendTextPrimitive(
+        _ run: VVTextRunPrimitive,
+        renderer: MarkdownMetalRenderer,
+        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
+        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]],
+        underlines: inout [LineInstance],
+        strikethroughs: inout [LineInstance]
+    ) {
+        for glyph in run.glyphs {
+            appendGlyphInstance(glyph, renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances)
+        }
+
+        guard run.style.isLink || run.style.isStrikethrough else { return }
+
+        let baseSize = max(1, currentFont.pointSize)
+        let scale = baseSize > 0 ? run.fontSize / baseSize : 1
+        let ascent = layoutEngine.calculatedBaselineOffset * scale
+        let descent = max(1, (layoutEngine.calculatedLineHeight - layoutEngine.calculatedBaselineOffset) * scale)
+        let glyphMinX = run.glyphs.map { $0.position.x }.min() ?? run.position.x
+        let glyphMaxX = run.glyphs.map { $0.position.x + $0.size.width }.max() ?? run.position.x
+        let fallbackBounds = run.runBounds ?? run.lineBounds
+        let underlineStartX = fallbackBounds?.minX ?? glyphMinX
+        let underlineWidth = max(0, fallbackBounds?.width ?? (glyphMaxX - glyphMinX))
+
+        if run.style.isLink {
+            let underlineY = run.position.y + max(1, descent * 0.6)
+            underlines.append(LineInstance(
+                position: SIMD2<Float>(Float(underlineStartX), Float(underlineY)),
+                width: Float(underlineWidth),
+                height: 1,
+                color: run.style.color
+            ))
+        }
+
+        if run.style.isStrikethrough {
+            let strikeY = run.position.y - max(1, ascent * 0.35)
+            strikethroughs.append(LineInstance(
+                position: SIMD2<Float>(Float(underlineStartX), Float(strikeY)),
+                width: Float(underlineWidth),
+                height: 1,
+                color: run.style.color
+            ))
+        }
+    }
+
+    private func cachedGlyph(for glyph: VVTextGlyph, renderer: MarkdownMetalRenderer) -> MarkdownCachedGlyph? {
+        let layoutVariant = toLayoutFontVariant(glyph.fontVariant)
+        let cgGlyph = CGGlyph(glyph.glyphID)
+        if let fontName = glyph.fontName {
+            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
+        }
+        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize)
+    }
+
+    private func toLayoutFontVariant(_ variant: VVFontVariant) -> VVMarkdown.FontVariant {
+        switch variant {
+        case .regular: return .regular
+        case .semibold: return .semibold
+        case .semiboldItalic: return .semiboldItalic
+        case .bold: return .bold
+        case .italic: return .italic
+        case .boldItalic: return .boldItalic
+        case .monospace: return .monospace
+        case .emoji: return .emoji
+        }
+    }
+
+    private func appendGlyphInstance(
+        _ glyph: VVTextGlyph,
+        renderer: MarkdownMetalRenderer,
+        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
+        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]]
+    ) {
+        guard let cached = cachedGlyph(for: glyph, renderer: renderer) else { return }
+        let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
+        let instance = MarkdownGlyphInstance(
+            position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x), Float(glyph.position.y + cached.bearing.y)),
+            size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
+            uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
+            uvSize: SIMD2<Float>(Float(cached.uvRect.width), Float(cached.uvRect.height)),
+            color: glyphColor,
+            atlasIndex: UInt32(cached.atlasIndex)
+        )
+
+        if cached.isColor {
+            colorGlyphInstances[cached.atlasIndex, default: []].append(instance)
+        } else {
+            glyphInstances[cached.atlasIndex, default: []].append(instance)
+        }
+    }
+
+    private func renderGlyphBatches(
+        _ batches: [Int: [MarkdownGlyphInstance]],
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer,
+        isColor: Bool
+    ) {
+        guard !batches.isEmpty else { return }
+        let textures = isColor ? renderer.glyphAtlas.allColorAtlasTextures : renderer.glyphAtlas.allAtlasTextures
+        for atlasIndex in batches.keys.sorted() {
+            guard atlasIndex >= 0 && atlasIndex < textures.count else { continue }
+            guard let instances = batches[atlasIndex], !instances.isEmpty else { continue }
+            guard let buffer = renderer.makeBuffer(for: instances) else { continue }
+            if isColor {
+                renderer.renderColorGlyphs(encoder: encoder, instances: buffer, instanceCount: instances.count, texture: textures[atlasIndex])
+            } else {
+                renderer.renderGlyphs(encoder: encoder, instances: buffer, instanceCount: instances.count, texture: textures[atlasIndex])
+            }
+        }
+    }
+
+    private func fullScissorRect() -> MTLScissorRect {
+        let width = max(1, Int(drawableSize.width))
+        let height = max(1, Int(drawableSize.height))
+        return MTLScissorRect(x: 0, y: 0, width: width, height: height)
+    }
+
+    private func scissorRect(for frame: CGRect) -> MTLScissorRect {
+        let visibleFrame = frame.offsetBy(dx: -scrollOffset.x, dy: -scrollOffset.y)
+        let viewBounds = CGRect(origin: .zero, size: bounds.size)
+        let clipped = visibleFrame.intersection(viewBounds)
+        if clipped.isNull || clipped.width <= 0 || clipped.height <= 0 {
+            return fullScissorRect()
+        }
+        let scaleX = drawableSize.width / max(1, bounds.width)
+        let scaleY = drawableSize.height / max(1, bounds.height)
+        let x = max(0, Int(floor(clipped.minX * scaleX)))
+        let y = max(0, Int(floor(clipped.minY * scaleY)))
+        let maxWidth = max(1, Int(drawableSize.width) - x)
+        let maxHeight = max(1, Int(drawableSize.height) - y)
+        let width = min(maxWidth, Int(ceil(clipped.width * scaleX)))
+        let height = min(maxHeight, Int(ceil(clipped.height * scaleY)))
+        return MTLScissorRect(x: x, y: y, width: max(1, width), height: max(1, height))
     }
 
     // MARK: - Backing Scale Handling
@@ -987,6 +1341,8 @@ public final class MetalTextView: MTKView {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil {
             stopCursorBlinkTimer()
+            blameTimer?.invalidate()
+            blameTimer = nil
         }
     }
 
@@ -1012,7 +1368,7 @@ public final class MetalTextView: MTKView {
         if abs(scale - backingScaleFactor) < 0.001 { return }
         backingScaleFactor = scale
         layer?.contentsScale = scale
-        renderer.updateFont(currentFont, scaleFactor: scale)
+        rebuildRenderer(for: currentFont)
         layoutEngine.updateFont(currentFont, lineHeightMultiplier: lineHeightMultiplier, scaleFactor: scale)
         updateStatusBarMetrics()
         updateGutterMetrics()
@@ -1020,6 +1376,15 @@ public final class MetalTextView: MTKView {
         updateEstimatedCharWidth()
         onContentSizeChange?()
         scheduleRedraw()
+    }
+
+    private func rebuildRenderer(for font: NSFont) {
+        guard let device = device else { return }
+        do {
+            renderer = try MarkdownMetalRenderer(device: device, baseFont: font, scaleFactor: backingScaleFactor)
+        } catch {
+            print("Failed to rebuild MarkdownMetalRenderer: \(error)")
+        }
     }
 
     private func updateCursorBlinkTimer() {
@@ -1232,11 +1597,8 @@ public final class MetalTextView: MTKView {
     }
 
     private func updateEstimatedCharWidth() {
-        if let glyph = renderer?.glyphAtlas.glyph(for: Character("M"), variant: .regular) {
-            estimatedCharWidth = max(1, glyph.advance)
-        } else {
-            estimatedCharWidth = max(1, currentFont.pointSize * 0.6)
-        }
+        let advance = glyphAdvance(for: Character("M"), fontSize: currentFont.pointSize)
+        estimatedCharWidth = max(1, advance > 0 ? advance : currentFont.pointSize * 0.6)
     }
 
     private func recomputeTextInsets() {
@@ -1269,8 +1631,7 @@ public final class MetalTextView: MTKView {
 
     private func updateMaxLineWidth(from layout: LineLayout) {
         guard let lastGlyph = layout.glyphs.last else { return }
-        let glyphInfo = renderer?.glyphAtlas.glyph(for: lastGlyph.glyphID, font: lastGlyph.font)
-        let width = lastGlyph.position.x + (glyphInfo?.advance ?? 0)
+        let width = lastGlyph.position.x + glyphAdvance(for: lastGlyph.glyphID, font: lastGlyph.font)
         if width > maxLineWidth + 0.5 {
             maxLineWidth = width
             scheduleContentSizeUpdate()
@@ -1344,9 +1705,8 @@ public final class MetalTextView: MTKView {
     // MARK: - Batch Preparation
 
     private func prepareGutterBatches() {
-        gutterQuadBatch.clear()
-        gutterGlyphBatch.clear()
-        gutterColorGlyphBatch.clear()
+        gutterQuads.removeAll(keepingCapacity: true)
+        gutterTextRuns.removeAll(keepingCapacity: true)
 
         guard showsGutter, gutterWidth > 0 else { return }
 
@@ -1356,7 +1716,17 @@ public final class MetalTextView: MTKView {
             width: gutterWidth,
             height: bounds.height
         )
-        gutterQuadBatch.addQuad(rect: backgroundRect, color: gutterBackgroundColor)
+        gutterQuads.append(VVQuadPrimitive(frame: backgroundRect, color: gutterBackgroundColor.simdColor))
+
+        if let highlight = currentLineHighlightInfo() {
+            let highlightRect = CGRect(
+                x: scrollOffset.x,
+                y: scrollOffset.y + highlight.y,
+                width: gutterWidth,
+                height: highlight.height
+            )
+            gutterQuads.append(VVQuadPrimitive(frame: highlightRect, color: currentLineHighlightColor.simdColor))
+        }
 
         if showsGitGutter && !gitHunks.isEmpty {
             let indicatorWidth = gutterIndicatorWidth
@@ -1381,11 +1751,11 @@ public final class MetalTextView: MTKView {
                 let quadY = scrollOffset.y + y
                 if hunk.status == .deleted {
                     let rect = CGRect(x: quadX, y: quadY, width: indicatorWidth, height: layoutEngine.calculatedLineHeight / 2)
-                    gutterQuadBatch.addQuad(rect: rect, color: color)
+                    gutterQuads.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                 } else {
                     let height = CGFloat(hunk.lineCount) * layoutEngine.calculatedLineHeight
                     let rect = CGRect(x: quadX, y: quadY + 2, width: indicatorWidth, height: max(0, height - 4))
-                    gutterQuadBatch.addQuad(rect: rect, color: color)
+                    gutterQuads.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                 }
             }
         }
@@ -1424,35 +1794,19 @@ public final class MetalTextView: MTKView {
             if foldRangeByStartLine[lineIndex] != nil {
                 let isFolded = foldedStartLines.contains(lineIndex)
                 let isHovered = hoveredFoldLine == lineIndex
-                if isHovered,
-                   let bgGlyph = renderer.glyphAtlas.customGlyph(
-                    kind: .foldHoverBackground,
-                    size: foldMetrics.hoverSize,
-                    lineWidth: 1,
-                    cornerRadius: foldMetrics.hoverCornerRadius
-                   ) {
+                if isHovered {
                     let bgX = foldMarkerAreaX + max(0, (foldMarkerAreaWidth - foldMetrics.hoverSize.width) / 2)
                     let bgY = baselineY - layoutEngine.calculatedBaselineOffset + (layoutEngine.calculatedLineHeight - foldMetrics.hoverSize.height) / 2
-                    addGutterGlyph(bgGlyph, topLeft: CGPoint(x: bgX, y: bgY), color: foldMarkerHoverBackgroundColor)
+                    let rect = CGRect(x: bgX, y: bgY, width: foldMetrics.hoverSize.width, height: foldMetrics.hoverSize.height)
+                    gutterQuads.append(VVQuadPrimitive(frame: rect, color: foldMarkerHoverBackgroundColor.simdColor, cornerRadius: foldMetrics.hoverCornerRadius))
                 }
 
-                if let iconGlyph = renderer.glyphAtlas.customGlyph(
-                    kind: isFolded ? .foldChevronClosed : .foldChevronOpen,
-                    size: foldMetrics.iconSize,
-                    lineWidth: foldMetrics.lineWidth
-                ) {
-                    let iconX = foldMarkerAreaX + max(0, (foldMarkerAreaWidth - foldMetrics.iconSize.width) / 2)
-                    let iconY = baselineY - layoutEngine.calculatedBaselineOffset + (layoutEngine.calculatedLineHeight - foldMetrics.iconSize.height) / 2
-                    let iconColor = isHovered || isFolded ? foldMarkerActiveColor : foldMarkerColor
-                    addGutterGlyph(iconGlyph, topLeft: CGPoint(x: iconX, y: iconY), color: iconColor)
-                } else {
-                    let markerChar = foldMarkerCharacter(isFolded: isFolded)
-                    let marker = String(markerChar)
-                    let markerWidth = renderer.glyphAtlas.glyph(for: markerChar, variant: .regular)?.advance ?? 8
-                    let markerX = foldMarkerAreaX + max(0, (foldMarkerAreaWidth - markerWidth) / 2)
-                    let iconColor = isHovered || isFolded ? foldMarkerActiveColor : foldMarkerColor
-                    addGutterSymbol(marker, baselineY: baselineY, x: markerX, color: iconColor)
-                }
+                let markerChar = foldMarkerCharacter(isFolded: isFolded)
+                let marker = String(markerChar)
+                let markerWidth = glyphAdvance(for: markerChar, fontSize: gutterFont.pointSize)
+                let markerX = foldMarkerAreaX + max(0, (foldMarkerAreaWidth - markerWidth) / 2)
+                let iconColor = isFolded ? foldMarkerActiveColor : (isHovered ? foldMarkerColor.withAlphaComponent(0.9) : foldMarkerColor)
+                addGutterText(marker, baselineY: baselineY, color: iconColor, x: markerX)
             }
         }
 
@@ -1465,8 +1819,7 @@ public final class MetalTextView: MTKView {
     }
 
     private func prepareGlyphBatch() {
-        glyphBatch.clear()
-        colorGlyphBatch.clear()
+        contentTextRuns.removeAll(keepingCapacity: true)
 
         let visibleRange = visibleLineRange(scrollOffset: scrollOffset.y, height: effectiveViewportHeight)
         let firstVisibleLine = visibleRange.first
@@ -1476,51 +1829,49 @@ public final class MetalTextView: MTKView {
         for lineIndex in firstVisibleLine...lastVisibleLine {
             guard let layout = layoutForLine(lineIndex) else { continue }
 
-            for glyph in layout.glyphs {
-                guard let cached = renderer.glyphAtlas.glyph(for: glyph.glyphID, font: glyph.font) else {
-                    continue
-                }
+            let baselineY = layout.yOffset + layout.baselineOffset
+            let glyphs = layout.glyphs.compactMap { glyph -> VVTextGlyph? in
+                makeTextGlyph(from: glyph, baselineY: baselineY)
+            }
 
-                // Pass the pen position (baseline) - addGlyph will apply bearing offset
-                let penPosition = CGPoint(
-                    x: textInsets.left + glyph.position.x,
-                    y: layout.yOffset + layout.baselineOffset
+            if !glyphs.isEmpty {
+                let run = VVTextRunPrimitive(
+                    glyphs: glyphs,
+                    style: VVTextRunStyle(color: defaultTextColor),
+                    position: CGPoint(x: textInsets.left, y: baselineY),
+                    fontSize: currentFont.pointSize
                 )
-
-                if cached.isColor {
-                    let color = SIMD4<Float>(1, 1, 1, glyph.color.w)
-                    colorGlyphBatch.addGlyph(cached: cached, screenPosition: penPosition, color: color)
-                } else {
-                    glyphBatch.addGlyph(cached: cached, screenPosition: penPosition, color: glyph.color)
-                }
+                contentTextRuns.append(run)
             }
 
             if foldedRangeByStartLine[lineIndex] != nil {
                 let placeholder = resolvedFoldPlaceholder()
                 let lineLength = lineUTF16Length(lineIndex)
                 let endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: lineLength, in: layout)
-                let spaceWidth = renderer?.glyphAtlas.glyph(for: Character(" "), variant: .regular)?.advance ?? 8
+                let spaceWidth = glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize)
                 let placeholderX = endX + spaceWidth
-                addInlinePlaceholder(
+                if let placeholderRun = makeTextRun(
                     placeholder,
-                    baselineY: layout.yOffset + layout.baselineOffset,
-                    startX: placeholderX
-                )
+                    baselineY: baselineY,
+                    x: placeholderX,
+                    color: foldPlaceholderColor.simdColor,
+                    font: currentFont,
+                    fontVariant: .monospace
+                ) {
+                    contentTextRuns.append(placeholderRun)
+                }
             }
         }
     }
 
     private func prepareIndentGuideBatch() {
-        indentGuideBatch.clear()
+        indentGuideQuads.removeAll(keepingCapacity: true)
         guard !indentGuideSegments.isEmpty else { return }
 
         let lineHeight = layoutEngine.calculatedLineHeight
         guard lineHeight > 0 && lineHeight.isFinite else { return }
 
-        let columnWidth = max(
-            1,
-            renderer?.glyphAtlas.glyph(for: Character(" "), variant: .regular)?.advance ?? estimatedCharWidth
-        )
+        let columnWidth = max(1, glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize))
         let pad = max(0, indentGuideLinePadding)
         let width = max(indentGuideLineWidth, 1.0 / max(1.0, backingScaleFactor))
 
@@ -1532,22 +1883,19 @@ public final class MetalTextView: MTKView {
                 linePadding: pad,
                 lineWidth: width,
                 color: indentGuideColor,
-                batch: indentGuideBatch
+                output: &indentGuideQuads
             )
         }
     }
 
     private func prepareActiveIndentGuideBatch() {
-        activeIndentGuideBatch.clear()
+        activeIndentGuideQuads.removeAll(keepingCapacity: true)
         guard !activeIndentGuideSegments.isEmpty else { return }
 
         let lineHeight = layoutEngine.calculatedLineHeight
         guard lineHeight > 0 && lineHeight.isFinite else { return }
 
-        let columnWidth = max(
-            1,
-            renderer?.glyphAtlas.glyph(for: Character(" "), variant: .regular)?.advance ?? estimatedCharWidth
-        )
+        let columnWidth = max(1, glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize))
         let pad = max(0, indentGuideLinePadding)
         let width = max(activeIndentGuideLineWidth, 1.0 / max(1.0, backingScaleFactor))
 
@@ -1559,7 +1907,7 @@ public final class MetalTextView: MTKView {
                 linePadding: pad,
                 lineWidth: width,
                 color: activeIndentGuideColor,
-                batch: activeIndentGuideBatch
+                output: &activeIndentGuideQuads
             )
         }
     }
@@ -1571,7 +1919,7 @@ public final class MetalTextView: MTKView {
         linePadding: CGFloat,
         lineWidth: CGFloat,
         color: NSColor,
-        batch: QuadBatch
+        output: inout [VVQuadPrimitive]
     ) {
         guard segment.endLine >= segment.startLine else { return }
 
@@ -1589,7 +1937,7 @@ public final class MetalTextView: MTKView {
                     let height = CGFloat(currentEndVisible - start + 1) * lineHeight
                     let y = textInsets.top + CGFloat(start) * lineHeight + pad
                     let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, height - pad * 2))
-                    batch.addQuad(rect: rect, color: color)
+                    output.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                     currentStartVisible = nil
                 }
                 continue
@@ -1602,7 +1950,7 @@ public final class MetalTextView: MTKView {
                     let height = CGFloat(currentEndVisible - start + 1) * lineHeight
                     let y = textInsets.top + CGFloat(start) * lineHeight + pad
                     let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, height - pad * 2))
-                    batch.addQuad(rect: rect, color: color)
+                    output.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                     currentStartVisible = visibleIndex
                     currentEndVisible = visibleIndex
                 }
@@ -1616,25 +1964,7 @@ public final class MetalTextView: MTKView {
             let height = CGFloat(currentEndVisible - start + 1) * lineHeight
             let y = textInsets.top + CGFloat(start) * lineHeight + pad
             let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, height - pad * 2))
-            batch.addQuad(rect: rect, color: color)
-        }
-    }
-
-    private func addInlinePlaceholder(_ text: String, baselineY: CGFloat, startX: CGFloat) {
-        let characters = Array(text)
-        guard !characters.isEmpty else { return }
-
-        var penX = startX
-        let color = foldPlaceholderColor.simdColor
-
-        for ch in characters {
-            guard let cached = renderer.glyphAtlas.glyph(for: ch, variant: .regular) else { continue }
-            glyphBatch.addGlyph(
-                cached: cached,
-                screenPosition: CGPoint(x: penX, y: baselineY),
-                color: color
-            )
-            penX += cached.advance
+            output.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
         }
     }
 
@@ -1647,7 +1977,7 @@ public final class MetalTextView: MTKView {
 
     private func placeholderGlyphsAvailable(_ text: String) -> Bool {
         for ch in text {
-            if renderer.glyphAtlas.glyph(for: ch, variant: .regular) == nil {
+            if glyphAdvance(for: ch, fontSize: currentFont.pointSize) <= 0 {
                 return false
             }
         }
@@ -1655,38 +1985,38 @@ public final class MetalTextView: MTKView {
     }
 
     private func prepareSelectionBatch() {
-        selectionBatch.clear()
+        selectionQuads.removeAll(keepingCapacity: true)
 
         for range in selectionRanges {
             // Convert range to line/column coordinates and create selection rects
             let rects = rectsForRange(range)
             for rect in rects {
-                selectionBatch.addQuad(rect: rect, color: selectionColor)
+                selectionQuads.append(VVQuadPrimitive(frame: rect, color: selectionColor.simdColor))
             }
         }
     }
 
     private func prepareBracketMatchBatch() {
-        bracketMatchBatch.clear()
+        bracketMatchQuads.removeAll(keepingCapacity: true)
         guard !bracketMatchRanges.isEmpty else { return }
 
         for range in bracketMatchRanges {
             let rects = rectsForRange(range)
             for rect in rects {
-                bracketMatchBatch.addQuad(rect: rect, color: bracketHighlightColor)
+                bracketMatchQuads.append(VVQuadPrimitive(frame: rect, color: bracketHighlightColor.simdColor))
             }
         }
     }
 
     private func prepareSearchMatchBatch() {
-        searchMatchBatch.clear()
-        activeSearchMatchBatch.clear()
+        searchMatchQuads.removeAll(keepingCapacity: true)
+        activeSearchMatchQuads.removeAll(keepingCapacity: true)
 
         guard !searchMatchRanges.isEmpty else {
             if let active = activeSearchMatch, active.length > 0 {
                 let rects = rectsForRange(active)
                 for rect in rects {
-                    activeSearchMatchBatch.addQuad(rect: rect, color: activeSearchHighlightColor)
+                    activeSearchMatchQuads.append(VVQuadPrimitive(frame: rect, color: activeSearchHighlightColor.simdColor))
                 }
             }
             return
@@ -1702,20 +2032,20 @@ public final class MetalTextView: MTKView {
             }
             let rects = rectsForRange(range)
             for rect in rects {
-                searchMatchBatch.addQuad(rect: rect, color: searchHighlightColor)
+                searchMatchQuads.append(VVQuadPrimitive(frame: rect, color: searchHighlightColor.simdColor))
             }
         }
 
         if let active = activeSearchMatch, active.length > 0 {
             let rects = rectsForRange(active)
             for rect in rects {
-                activeSearchMatchBatch.addQuad(rect: rect, color: activeSearchHighlightColor)
+                activeSearchMatchQuads.append(VVQuadPrimitive(frame: rect, color: activeSearchHighlightColor.simdColor))
             }
         }
     }
 
     private func prepareMarkedTextBatch() {
-        markedTextBatch.clear()
+        markedTextQuads.removeAll(keepingCapacity: true)
         guard let range = markedTextRange, range.length > 0 else { return }
 
         let lineHeight = layoutEngine.calculatedLineHeight
@@ -1727,12 +2057,12 @@ public final class MetalTextView: MTKView {
             let y = min(rect.minY + lineHeight - underlineThickness - underlineOffset,
                         rect.minY + layoutEngine.calculatedBaselineOffset + underlineOffset)
             let underlineRect = CGRect(x: rect.minX, y: y, width: rect.width, height: underlineThickness)
-            markedTextBatch.addQuad(rect: underlineRect, color: markedTextUnderlineColor)
+            markedTextQuads.append(VVQuadPrimitive(frame: underlineRect, color: markedTextUnderlineColor.simdColor))
         }
     }
 
     private func prepareCursorBatch() {
-        cursorBatch.clear()
+        cursorQuads.removeAll(keepingCapacity: true)
 
         if cursorStyle == .bar && !cursorBlinkVisible {
             return
@@ -1750,53 +2080,50 @@ public final class MetalTextView: MTKView {
             let maxColumn = lineUTF16Length(position.line)
             let nextColumn = min(position.column + 1, maxColumn)
             let xNext = textInsets.left + layoutEngine.xPosition(forCharacterOffset: nextColumn, in: layout)
-            let defaultWidth = renderer?.glyphAtlas.glyph(for: Character(" "), variant: .regular)?.advance ?? 8
+            let defaultWidth = glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize)
             let blockWidth = max(2, (xNext > xPos) ? (xNext - xPos) : defaultWidth)
             let width: CGFloat = (cursorStyle == .block) ? blockWidth : 2
 
-            cursorBatch.addCursor(
-                x: xPos,
-                y: layout.yOffset,
-                height: layoutEngine.calculatedLineHeight,
-                width: width,
-                color: cursorColor
-            )
+            let rect = CGRect(x: xPos, y: layout.yOffset, width: width, height: layoutEngine.calculatedLineHeight)
+            cursorQuads.append(VVQuadPrimitive(frame: rect, color: cursorColor.simdColor))
         }
     }
 
     private func prepareLineHighlightBatch() {
-        lineHighlightBatch.clear()
-        guard cursorLine < lines.count else { return }
-
-        let currentRange = lineRangeUTF16(cursorLine)
-        if currentRange.length > 0 {
-            for selection in selectionRanges where selection.length > 0 {
-                if NSIntersectionRange(selection, currentRange).length > 0 {
-                    return
-                }
-            }
-        }
-
-        guard let layout = layoutForLine(cursorLine) else { return }
-        let screenY = layout.yOffset - scrollOffset.y
-        if screenY > effectiveViewportHeight || (screenY + layoutEngine.calculatedLineHeight) < 0 {
-            return
-        }
+        lineHighlightQuads.removeAll(keepingCapacity: true)
+        guard let highlight = currentLineHighlightInfo() else { return }
         let highlightX = showsGutter ? gutterWidth : 0
         let highlightWidth = max(0, bounds.width - highlightX + scrollOffset.x)
         let rect = CGRect(
             x: highlightX,
-            y: layout.yOffset,
+            y: highlight.y,
             width: highlightWidth,
-            height: layoutEngine.calculatedLineHeight
+            height: highlight.height
         )
-        lineHighlightBatch.addQuad(rect: rect, color: currentLineHighlightColor)
+        lineHighlightQuads.append(VVQuadPrimitive(frame: rect, color: currentLineHighlightColor.simdColor))
+    }
+
+    private func currentLineHighlightInfo() -> (line: Int, y: CGFloat, height: CGFloat)? {
+        guard cursorLine < lines.count else { return nil }
+        let currentRange = lineRangeUTF16(cursorLine)
+        if currentRange.length > 0 {
+            for selection in selectionRanges where selection.length > 0 {
+                if NSIntersectionRange(selection, currentRange).length > 0 {
+                    return nil
+                }
+            }
+        }
+        guard let layout = layoutForLine(cursorLine) else { return nil }
+        let screenY = layout.yOffset - scrollOffset.y
+        if screenY > effectiveViewportHeight || (screenY + layoutEngine.calculatedLineHeight) < 0 {
+            return nil
+        }
+        return (cursorLine, layout.yOffset, layoutEngine.calculatedLineHeight)
     }
 
     private func prepareStatusBarBatches() {
-        statusBarQuadBatch.clear()
-        statusBarGlyphBatch.clear()
-        statusBarColorGlyphBatch.clear()
+        statusBarQuads.removeAll(keepingCapacity: true)
+        statusBarTextRuns.removeAll(keepingCapacity: true)
 
         guard statusBarEnabled, statusBarHeight > 0 else { return }
         let barHeight = statusBarHeight
@@ -1811,7 +2138,7 @@ public final class MetalTextView: MTKView {
             width: bounds.width,
             height: barHeight
         )
-        statusBarQuadBatch.addQuad(rect: bgRect, color: statusBarBackgroundColor)
+        statusBarQuads.append(VVQuadPrimitive(frame: bgRect, color: statusBarBackgroundColor.simdColor))
 
         let borderHeight = max(1.0 / max(1.0, backingScaleFactor), 1.0)
         let borderRect = CGRect(
@@ -1820,7 +2147,7 @@ public final class MetalTextView: MTKView {
             width: bounds.width,
             height: borderHeight
         )
-        statusBarQuadBatch.addQuad(rect: borderRect, color: statusBarBorderColor)
+        statusBarQuads.append(VVQuadPrimitive(frame: borderRect, color: statusBarBorderColor.simdColor))
 
         if !statusBarLeftText.isEmpty {
             let leftWidth = statusBarTextWidth(statusBarLeftText)
@@ -1831,7 +2158,7 @@ public final class MetalTextView: MTKView {
                 width: leftWidth + statusBarModePadding.width * 2,
                 height: rectHeight
             )
-            statusBarQuadBatch.addQuad(rect: rect, color: statusBarModeBackgroundColor)
+            statusBarQuads.append(VVQuadPrimitive(frame: rect, color: statusBarModeBackgroundColor.simdColor))
         }
 
         let baselineY = barY + (barHeight - statusBarLineHeight) / 2 + statusBarBaselineOffset
@@ -1863,7 +2190,7 @@ public final class MetalTextView: MTKView {
             let rectX = scrollOffset.x + max(statusBarTextInsets.left, badgeRightEdge - rectWidth)
             let rectY = scrollOffset.y + barY + statusBarBadgePadding.height
             let rect = CGRect(x: rectX, y: rectY, width: rectWidth, height: rectHeight)
-            statusBarQuadBatch.addQuad(rect: rect, color: statusBarBadgeBackgroundColor)
+            statusBarQuads.append(VVQuadPrimitive(frame: rect, color: statusBarBadgeBackgroundColor.simdColor))
             let badgeTextX = rectX - scrollOffset.x + statusBarBadgePadding.width
             addStatusBarText(
                 statusBarRightBadgeText,
@@ -1884,9 +2211,8 @@ public final class MetalTextView: MTKView {
     }
 
     private func prepareSearchOverlayBatches() {
-        searchOverlayQuadBatch.clear()
-        searchOverlayGlyphBatch.clear()
-        searchOverlayColorGlyphBatch.clear()
+        searchOverlayQuads.removeAll(keepingCapacity: true)
+        searchOverlayTextRuns.removeAll(keepingCapacity: true)
         searchOverlayHitAreas.removeAll()
         searchOverlayRect = nil
 
@@ -1924,17 +2250,17 @@ public final class MetalTextView: MTKView {
         searchOverlayRect = overlayRect
 
         let bgRect = overlayRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y)
-        searchOverlayQuadBatch.addQuad(rect: bgRect, color: searchOverlayBackgroundColor)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: bgRect, color: searchOverlayBackgroundColor.simdColor))
 
         let borderThickness = max(1.0 / max(1.0, backingScaleFactor), 1.0)
         let borderTop = CGRect(x: bgRect.minX, y: bgRect.maxY - borderThickness, width: bgRect.width, height: borderThickness)
         let borderBottom = CGRect(x: bgRect.minX, y: bgRect.minY, width: bgRect.width, height: borderThickness)
         let borderLeft = CGRect(x: bgRect.minX, y: bgRect.minY, width: borderThickness, height: bgRect.height)
         let borderRight = CGRect(x: bgRect.maxX - borderThickness, y: bgRect.minY, width: borderThickness, height: bgRect.height)
-        searchOverlayQuadBatch.addQuad(rect: borderTop, color: searchOverlayBorderColor)
-        searchOverlayQuadBatch.addQuad(rect: borderBottom, color: searchOverlayBorderColor)
-        searchOverlayQuadBatch.addQuad(rect: borderLeft, color: searchOverlayBorderColor)
-        searchOverlayQuadBatch.addQuad(rect: borderRight, color: searchOverlayBorderColor)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: borderTop, color: searchOverlayBorderColor.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: borderBottom, color: searchOverlayBorderColor.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: borderLeft, color: searchOverlayBorderColor.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: borderRight, color: searchOverlayBorderColor.simdColor))
 
         let row1Y = overlayY + overlayHeight - searchOverlayPadding - rowHeight
         let row2Y = overlayY + searchOverlayPadding
@@ -1963,11 +2289,11 @@ public final class MetalTextView: MTKView {
 
         let fieldBorder = searchOverlayActive ? searchOverlayFieldActiveBorderColor : searchOverlayFieldBorderColor
         let fieldBgRect = fieldRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y)
-        searchOverlayQuadBatch.addQuad(rect: fieldBgRect, color: searchOverlayFieldBackgroundColor)
-        searchOverlayQuadBatch.addQuad(rect: CGRect(x: fieldBgRect.minX, y: fieldBgRect.minY, width: fieldBgRect.width, height: borderThickness), color: fieldBorder)
-        searchOverlayQuadBatch.addQuad(rect: CGRect(x: fieldBgRect.minX, y: fieldBgRect.maxY - borderThickness, width: fieldBgRect.width, height: borderThickness), color: fieldBorder)
-        searchOverlayQuadBatch.addQuad(rect: CGRect(x: fieldBgRect.minX, y: fieldBgRect.minY, width: borderThickness, height: fieldBgRect.height), color: fieldBorder)
-        searchOverlayQuadBatch.addQuad(rect: CGRect(x: fieldBgRect.maxX - borderThickness, y: fieldBgRect.minY, width: borderThickness, height: fieldBgRect.height), color: fieldBorder)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: fieldBgRect, color: searchOverlayFieldBackgroundColor.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: CGRect(x: fieldBgRect.minX, y: fieldBgRect.minY, width: fieldBgRect.width, height: borderThickness), color: fieldBorder.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: CGRect(x: fieldBgRect.minX, y: fieldBgRect.maxY - borderThickness, width: fieldBgRect.width, height: borderThickness), color: fieldBorder.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: CGRect(x: fieldBgRect.minX, y: fieldBgRect.minY, width: borderThickness, height: fieldBgRect.height), color: fieldBorder.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: CGRect(x: fieldBgRect.maxX - borderThickness, y: fieldBgRect.minY, width: borderThickness, height: fieldBgRect.height), color: fieldBorder.simdColor))
 
         let row1Baseline = row1Y + (rowHeight - statusBarLineHeight) / 2 + statusBarBaselineOffset
         let row2Baseline = row2Y + (rowHeight - statusBarLineHeight) / 2 + statusBarBaselineOffset
@@ -1991,21 +2317,21 @@ public final class MetalTextView: MTKView {
                 width: max(1.0 / max(1.0, backingScaleFactor), 1.0),
                 height: statusBarLineHeight
             )
-            searchOverlayQuadBatch.addQuad(rect: caretRect, color: searchOverlayTextColor)
+            searchOverlayQuads.append(VVQuadPrimitive(frame: caretRect, color: searchOverlayTextColor.simdColor))
         }
 
         let caseActive = searchOverlayCaseSensitive
         let caseColor = (caseActive ? searchOverlayButtonActiveTextColor : searchOverlayButtonTextColor).simdColor
         let caseBg = backgroundColorForSearchOverlayAction(.toggleCase, active: caseActive)
-        searchOverlayQuadBatch.addQuad(rect: caseRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: caseBg)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: caseRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: caseBg.simdColor))
         addCenteredSearchOverlayText(caseLabel, rect: caseRect, baselineY: row1Baseline, color: caseColor)
 
         let currentActive = searchOverlayScope == .currentFile
         let openActive = searchOverlayScope == .openDocuments
         let currentBg = backgroundColorForSearchOverlayAction(.scopeCurrent, active: currentActive)
         let openBg = backgroundColorForSearchOverlayAction(.scopeOpen, active: openActive)
-        searchOverlayQuadBatch.addQuad(rect: currentRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: currentBg)
-        searchOverlayQuadBatch.addQuad(rect: openRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: openBg)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: currentRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: currentBg.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: openRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: openBg.simdColor))
 
         let separatorRect = CGRect(
             x: currentRect.maxX + scrollOffset.x - borderThickness / 2,
@@ -2013,7 +2339,7 @@ public final class MetalTextView: MTKView {
             width: borderThickness,
             height: currentRect.height
         )
-        searchOverlayQuadBatch.addQuad(rect: separatorRect, color: searchOverlayBorderColor)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: separatorRect, color: searchOverlayBorderColor.simdColor))
 
         let currentColor = (currentActive ? searchOverlayButtonActiveTextColor : searchOverlayButtonTextColor).simdColor
         let openColor = (openActive ? searchOverlayButtonActiveTextColor : searchOverlayButtonTextColor).simdColor
@@ -2022,8 +2348,8 @@ public final class MetalTextView: MTKView {
 
         let prevBg = backgroundColorForSearchOverlayAction(.prev, active: false)
         let nextBg = backgroundColorForSearchOverlayAction(.next, active: false)
-        searchOverlayQuadBatch.addQuad(rect: prevRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: prevBg)
-        searchOverlayQuadBatch.addQuad(rect: nextRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: nextBg)
+        searchOverlayQuads.append(VVQuadPrimitive(frame: prevRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: prevBg.simdColor))
+        searchOverlayQuads.append(VVQuadPrimitive(frame: nextRect.offsetBy(dx: scrollOffset.x, dy: scrollOffset.y), color: nextBg.simdColor))
         addCenteredSearchOverlayText(prevLabel, rect: prevRect, baselineY: row2Baseline, color: searchOverlayButtonTextColor.simdColor)
         addCenteredSearchOverlayText(nextLabel, rect: nextRect, baselineY: row2Baseline, color: searchOverlayButtonTextColor.simdColor)
 
@@ -2036,6 +2362,95 @@ public final class MetalTextView: MTKView {
                 color: countColor
             )
         }
+    }
+
+    private func prepareCompletionOverlay() {
+        completionQuads.removeAll(keepingCapacity: true)
+        completionTextRuns.removeAll(keepingCapacity: true)
+        guard completionVisible, !completionItems.isEmpty else { return }
+
+        guard let layout = layoutForLine(cursorLine) else { return }
+
+        let font = currentFont
+        let rowHeight = max(22, statusBarLineHeight + 4)
+        let padding: CGFloat = 8
+
+        let visibleCount = min(completionItems.count, completionMaxVisibleItems)
+        let labels = completionItems.prefix(visibleCount).map { $0.label }
+        let maxLabelWidth = labels.map { overlayTextWidth($0, font: font) }.max() ?? 120
+
+        let overlayWidth = max(200, maxLabelWidth + padding * 2)
+        let overlayHeight = padding * 2 + CGFloat(visibleCount) * rowHeight
+
+        let anchorX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: cursorColumn, in: layout)
+        let anchorY = layout.yOffset + layoutEngine.calculatedLineHeight
+
+        var overlayX = anchorX
+        var overlayY = anchorY
+
+        // Flip above if it would overflow bottom
+        if (overlayY - scrollOffset.y + overlayHeight) > bounds.height {
+            overlayY = max(0, layout.yOffset - overlayHeight)
+        }
+
+        // Clamp horizontally within viewport
+        let maxX = bounds.width - overlayWidth + scrollOffset.x
+        overlayX = min(max(0, overlayX), max(0, maxX))
+
+        let backgroundRect = CGRect(x: overlayX, y: overlayY, width: overlayWidth, height: overlayHeight)
+        completionQuads.append(VVQuadPrimitive(frame: backgroundRect, color: searchOverlayBackgroundColor.simdColor, cornerRadius: 6))
+
+        let borderThickness = max(1.0 / max(1.0, backingScaleFactor), 1.0)
+        let borderRect = backgroundRect.insetBy(dx: -borderThickness / 2, dy: -borderThickness / 2)
+        completionQuads.append(VVQuadPrimitive(frame: borderRect, color: searchOverlayBorderColor.simdColor, cornerRadius: 6))
+
+        let selectedIndex = max(0, min(completionSelectedIndex, visibleCount - 1))
+        for (index, item) in completionItems.prefix(visibleCount).enumerated() {
+            let rowY = overlayY + padding + CGFloat(index) * rowHeight
+            if index == selectedIndex {
+                let highlightRect = CGRect(x: overlayX + 1, y: rowY, width: overlayWidth - 2, height: rowHeight)
+                completionQuads.append(VVQuadPrimitive(frame: highlightRect, color: selectionColor.simdColor, cornerRadius: 4))
+            }
+            let baselineY = rowY + (rowHeight - statusBarLineHeight) / 2 + statusBarBaselineOffset
+            let textX = overlayX + padding
+            let textColor = (index == selectedIndex) ? themeTextColorForSelection() : searchOverlayTextColor.simdColor
+            if let run = makeTextRun(item.label, baselineY: baselineY, x: textX, color: textColor, font: font, fontVariant: .regular) {
+                completionTextRuns.append(run)
+            }
+        }
+    }
+
+    private func prepareBlameOverlay() {
+        blameTextRuns.removeAll(keepingCapacity: true)
+        guard showInlineBlame, let line = blameVisibleLine else { return }
+        guard let info = blameByLine[line + 1] else { return }
+        guard let layout = layoutForLine(line) else { return }
+
+        let screenY = layout.yOffset - scrollOffset.y
+        if screenY > effectiveViewportHeight || (screenY + layoutEngine.calculatedLineHeight) < 0 {
+            return
+        }
+
+        let lineLength = lineUTF16Length(line)
+        let endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: lineLength, in: layout)
+        let spacer = glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize) * 2
+        let startX = endX + spacer
+        let baselineY = layout.yOffset + layout.baselineOffset
+
+        let blameText = formattedBlame(info)
+        let font = currentFont.withSize(max(10, currentFont.pointSize - 2))
+        let color = lineNumberColor.simdColor
+        if let run = makeTextRun(blameText, baselineY: baselineY, x: startX, color: color, font: font, fontVariant: .regular) {
+            blameTextRuns.append(run)
+        }
+    }
+
+    private func themeTextColorForSelection() -> SIMD4<Float> {
+        defaultTextColor
+    }
+
+    private func formattedBlame(_ info: VVBlameInfo) -> String {
+        info.compactBlame
     }
 
     private func searchOverlayCountText() -> String {
@@ -2052,21 +2467,15 @@ public final class MetalTextView: MTKView {
     }
 
     private func addSearchOverlayText(_ text: String, x: CGFloat, baselineY: CGFloat, color: SIMD4<Float>) {
-        guard !text.isEmpty else { return }
-        let shaped = cachedOverlayGlyphs(text, font: currentFont)
-        guard !shaped.isEmpty else { return }
-        let bounds = overlayBounds(for: shaped)
-        let startX = x + scrollOffset.x - bounds.minX
-        let penY = baselineY + scrollOffset.y
-        for (glyph, cached) in shaped {
-            let position = CGPoint(x: startX + glyph.position.x, y: penY)
-            if cached.isColor {
-                let colorGlyph = SIMD4<Float>(1, 1, 1, color.w)
-                searchOverlayColorGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorGlyph)
-            } else {
-                searchOverlayGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: color)
-            }
-        }
+        guard let run = makeTextRun(
+            text,
+            baselineY: baselineY + scrollOffset.y,
+            x: x + scrollOffset.x,
+            color: color,
+            font: currentFont,
+            fontVariant: .regular
+        ) else { return }
+        searchOverlayTextRuns.append(run)
     }
 
     private func addCenteredSearchOverlayText(_ text: String, rect: CGRect, baselineY: CGFloat, color: SIMD4<Float>) {
@@ -2076,33 +2485,23 @@ public final class MetalTextView: MTKView {
     }
 
     private func searchOverlayTextWidth(_ text: String) -> CGFloat {
-        guard !text.isEmpty else { return 0 }
-        let shaped = cachedOverlayGlyphs(text, font: currentFont)
-        guard !shaped.isEmpty else { return 0 }
-        return overlayBounds(for: shaped).width
+        overlayTextWidth(text, font: currentFont)
     }
 
     private func addStatusBarText(_ text: String, x: CGFloat, baselineY: CGFloat, color: SIMD4<Float>) {
-        let shaped = cachedOverlayGlyphs(text, font: currentFont)
-        guard !shaped.isEmpty else { return }
-        let bounds = overlayBounds(for: shaped)
-        let startX = x + scrollOffset.x - bounds.minX
-        let penY = baselineY + scrollOffset.y
-        for (glyph, cached) in shaped {
-            let position = CGPoint(x: startX + glyph.position.x, y: penY)
-            if cached.isColor {
-                let colorGlyph = SIMD4<Float>(1, 1, 1, color.w)
-                statusBarColorGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorGlyph)
-            } else {
-                statusBarGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: color)
-            }
-        }
+        guard let run = makeTextRun(
+            text,
+            baselineY: baselineY + scrollOffset.y,
+            x: x + scrollOffset.x,
+            color: color,
+            font: currentFont,
+            fontVariant: .regular
+        ) else { return }
+        statusBarTextRuns.append(run)
     }
 
     private func statusBarTextWidth(_ text: String) -> CGFloat {
-        let shaped = cachedOverlayGlyphs(text, font: currentFont)
-        guard !shaped.isEmpty else { return 0 }
-        return overlayBounds(for: shaped).width
+        overlayTextWidth(text, font: currentFont)
     }
 
     private func isLineVisible(_ lineIndex: Int) -> Bool {
@@ -2122,78 +2521,32 @@ public final class MetalTextView: MTKView {
 
     private func calculatedGutterWidth() -> CGFloat {
         let lineWidth = lineNumberColumnWidth
-        let hasFoldMarkers = !foldRangeByStartLine.isEmpty
+        let hasFoldMarkers = reserveFoldMarkerSpace || !foldRangeByStartLine.isEmpty
         let foldArea = hasFoldMarkers ? (foldMarkerSpacing + foldMarkerAreaWidth) : 0
         let indicatorWidth = showsGitGutter ? gutterIndicatorWidth : 0
         let calculated = ceil(gutterInsets.left + lineWidth + foldArea + gutterInsets.right + indicatorWidth + gutterSeparatorWidth)
         return max(gutterMinimumWidth, calculated)
     }
 
-    private func addGutterText(_ text: String, baselineY: CGFloat, color: NSColor) {
-        let shaped = cachedOverlayGlyphs(text, font: gutterFont)
-        guard !shaped.isEmpty else { return }
-        let bounds = overlayBounds(for: shaped)
-        let totalWidth = bounds.width
+    private func addGutterText(_ text: String, baselineY: CGFloat, color: NSColor, x: CGFloat? = nil) {
+        let totalWidth = overlayTextWidth(text, font: gutterFont)
         let availableWidth = lineNumberColumnWidth
-        let startX = gutterInsets.left + max(0, availableWidth - totalWidth) - bounds.minX
-        let colorSimd = color.simdColor
-        for (glyph, cached) in shaped {
-            let position = CGPoint(x: startX + glyph.position.x, y: baselineY)
-            if cached.isColor {
-                let colorGlyph = SIMD4<Float>(1, 1, 1, colorSimd.w)
-                gutterColorGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorGlyph)
-            } else {
-                gutterGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorSimd)
-            }
-        }
+        let startX = x ?? (gutterInsets.left + max(0, availableWidth - totalWidth))
+        guard let run = makeTextRun(
+            text,
+            baselineY: baselineY,
+            x: startX,
+            color: color.simdColor,
+            font: gutterFont,
+            fontVariant: .monospace
+        ) else { return }
+        gutterTextRuns.append(run)
     }
 
-    private func addGutterSymbol(_ text: String, baselineY: CGFloat, x: CGFloat, color: NSColor) {
-        let shaped = cachedOverlayGlyphs(text, font: gutterFont)
-        guard !shaped.isEmpty else { return }
-        let bounds = overlayBounds(for: shaped)
-        let penX = x - bounds.minX
-        let colorSimd = color.simdColor
-        for (glyph, cached) in shaped {
-            let position = CGPoint(x: penX + glyph.position.x, y: baselineY)
-            if cached.isColor {
-                let colorGlyph = SIMD4<Float>(1, 1, 1, colorSimd.w)
-                gutterColorGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorGlyph)
-            } else {
-                gutterGlyphBatch.addGlyph(cached: cached, screenPosition: position, color: colorSimd)
-            }
-        }
-    }
-
-    private func cachedOverlayGlyphs(_ text: String, font: NSFont) -> [(glyph: ShapedGlyph, cached: CachedGlyph)] {
-        let shapedGlyphs = shapeOverlayText(text, font: font)
-        guard let renderer else { return [] }
-
-        var results: [(ShapedGlyph, CachedGlyph)] = []
-        results.reserveCapacity(shapedGlyphs.count)
-
-        for glyph in shapedGlyphs {
-            if let cached = renderer.glyphAtlas.glyph(for: glyph.glyphID, font: glyph.font) {
-                results.append((glyph, cached))
-            }
-        }
-
-        return results
-    }
-
-    private func overlayBounds(for glyphs: [(glyph: ShapedGlyph, cached: CachedGlyph)]) -> (minX: CGFloat, maxX: CGFloat, width: CGFloat) {
-        var minX = CGFloat.greatestFiniteMagnitude
-        var maxX = CGFloat.leastNormalMagnitude
-
-        for (glyph, cached) in glyphs {
-            let glyphMinX = glyph.position.x + cached.bearing.x
-            let glyphMaxX = glyphMinX + cached.size.width
-            minX = min(minX, glyphMinX)
-            maxX = max(maxX, glyphMaxX)
-        }
-
-        if minX == CGFloat.greatestFiniteMagnitude { return (0, 0, 0) }
-        return (minX, maxX, max(0, maxX - minX))
+    private func overlayTextWidth(_ text: String, font: NSFont) -> CGFloat {
+        let shaped = shapeOverlayText(text, font: font)
+        guard let last = shaped.last else { return 0 }
+        return max(0, last.position.x + last.advance)
     }
 
     private func shapeOverlayText(_ text: String, font: NSFont) -> [ShapedGlyph] {
@@ -2248,12 +2601,77 @@ public final class MetalTextView: MTKView {
         return result
     }
 
-    private func addGutterGlyph(_ glyph: CachedGlyph, topLeft: CGPoint, color: NSColor) {
-        gutterGlyphBatch.addGlyph(
-            cached: glyph,
-            screenPosition: topLeft,
-            color: color.simdColor
+    private func makeTextRun(
+        _ text: String,
+        baselineY: CGFloat,
+        x: CGFloat,
+        color: SIMD4<Float>,
+        font: NSFont,
+        fontVariant: VVFontVariant
+    ) -> VVTextRunPrimitive? {
+        let shaped = shapeOverlayText(text, font: font)
+        guard !shaped.isEmpty else { return nil }
+        let fontName = CTFontCopyPostScriptName(font as CTFont) as String
+        var glyphs: [VVTextGlyph] = []
+        glyphs.reserveCapacity(shaped.count)
+
+        for glyph in shaped {
+            let position = CGPoint(x: x + glyph.position.x, y: baselineY + glyph.position.y)
+            let size = glyphSize(for: glyph.glyphID, font: glyph.font)
+            glyphs.append(VVTextGlyph(
+                glyphID: UInt16(glyph.glyphID),
+                position: position,
+                size: size,
+                color: color,
+                fontVariant: fontVariant,
+                fontSize: font.pointSize,
+                fontName: fontName,
+                stringIndex: glyph.characterIndex
+            ))
+        }
+
+        return VVTextRunPrimitive(
+            glyphs: glyphs,
+            style: VVTextRunStyle(color: color),
+            position: CGPoint(x: x, y: baselineY),
+            fontSize: font.pointSize
         )
+    }
+
+    private func makeTextGlyph(from glyph: LayoutGlyph, baselineY: CGFloat) -> VVTextGlyph? {
+        let fontName = CTFontCopyPostScriptName(glyph.font) as String
+        let size = glyphSize(for: glyph.glyphID, font: glyph.font)
+        return VVTextGlyph(
+            glyphID: UInt16(glyph.glyphID),
+            position: CGPoint(x: textInsets.left + glyph.position.x, y: baselineY),
+            size: size,
+            color: glyph.color,
+            fontVariant: .monospace,
+            fontSize: currentFont.pointSize,
+            fontName: fontName,
+            stringIndex: glyph.characterIndex
+        )
+    }
+
+    private func glyphSize(for glyphID: CGGlyph, font: CTFont) -> CGSize {
+        var glyph = glyphID
+        var rect = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &rect, 1)
+        return CGSize(width: max(0, rect.width), height: max(0, rect.height))
+    }
+
+    private func glyphAdvance(for glyphID: CGGlyph, font: CTFont) -> CGFloat {
+        var glyph = glyphID
+        var advance = CGSize.zero
+        CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+        return advance.width
+    }
+
+    private func glyphAdvance(for character: Character, fontSize: CGFloat, variant: VVMarkdown.FontVariant = .monospace) -> CGFloat {
+        guard let cached = renderer?.glyphAtlas.glyph(for: character, variant: variant, fontSize: fontSize) else {
+            return estimatedCharWidth
+        }
+        return cached.advance
     }
 
     private struct FoldIconMetrics {
@@ -2297,16 +2715,10 @@ public final class MetalTextView: MTKView {
 
     private func foldMarkerCharacter(isFolded: Bool) -> Character {
         let preferred: Character = isFolded ? "▾" : "▸"
-        if renderer.glyphAtlas.glyph(for: preferred, variant: .regular) != nil {
+        if renderer?.glyphAtlas.glyph(for: preferred, variant: .monospace, fontSize: gutterFont.pointSize) != nil {
             return preferred
         }
         return isFolded ? "v" : ">"
-    }
-
-    private func renderCurrentLineHighlight(encoder: MTLRenderCommandEncoder) {
-        if let (buffer, count) = lineHighlightBatch.prepareBuffer() {
-            renderer.renderSelections(encoder: encoder, quads: buffer, quadCount: count)
-        }
     }
 
     // MARK: - Mouse Events
@@ -2333,17 +2745,29 @@ public final class MetalTextView: MTKView {
 
     override public func mouseDragged(with event: NSEvent) {
         lastMouseModifiers = event.modifierFlags
-        let locationInView = convert(event.locationInWindow, from: nil)
+        var locationInView = convert(event.locationInWindow, from: nil)
         if isPointInsideSearchOverlay(locationInView) {
             return
         }
-        if statusBarEnabled && locationInView.y > bounds.height - statusBarTotalHeight {
-            return
+        let textTop = max(0, bounds.height - statusBarTotalHeight)
+        let textLeft = showsGutter ? gutterWidth : 0
+        let isOutsideY = locationInView.y < 0 || locationInView.y > textTop
+        let isOutsideX = locationInView.x < textLeft || locationInView.x > bounds.width
+        if isOutsideY || isOutsideX {
+            _ = autoscroll(with: event)
         }
-        if showsGutter && locationInView.x < gutterWidth {
-            return
-        }
+        locationInView = clampSelectionPoint(locationInView)
         textDelegate?.metalTextView(self, didDragTo: locationInView)
+    }
+
+    private func clampSelectionPoint(_ point: CGPoint) -> CGPoint {
+        let textTop = max(0, bounds.height - statusBarTotalHeight)
+        let textLeft = showsGutter ? gutterWidth : 0
+        let textRight = max(textLeft + 1, bounds.width)
+        let textBottom: CGFloat = 0
+        let clampedX = min(max(point.x, textLeft + 1), textRight - 1)
+        let clampedY = min(max(point.y, textBottom + 1), max(textBottom + 1, textTop - 1))
+        return CGPoint(x: clampedX, y: clampedY)
     }
 
     override public func mouseMoved(with event: NSEvent) {
@@ -2524,7 +2948,11 @@ public final class MetalTextView: MTKView {
                 var endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: endCol, in: layout)
 
                 if endX <= startX {
-                    let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(for: Character(" "), variant: .regular)?.advance ?? 8
+                    let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
+                        for: Character(" "),
+                        variant: .regular,
+                        fontSize: currentFont.pointSize
+                    )?.advance ?? 8
                     endX = startX + spaceWidth
                 }
 

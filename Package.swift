@@ -13,10 +13,6 @@ let package = Package(
             targets: ["VVCode"]
         ),
         .library(
-            name: "VVCodeCore",
-            targets: ["VVCodeCore"]
-        ),
-        .library(
             name: "VVMetalPrimitives",
             targets: ["VVMetalPrimitives"]
         ),
@@ -24,9 +20,17 @@ let package = Package(
             name: "VVMarkdown",
             targets: ["VVMarkdown"]
         ),
+        .library(
+            name: "VVChatTimeline",
+            targets: ["VVChatTimeline"]
+        ),
         .executable(
             name: "VVMarkdownDump",
             targets: ["VVMarkdownDump"]
+        ),
+        .executable(
+            name: "VVKitPlayground",
+            targets: ["VVKitPlayground"]
         ),
         // Individual dynamic grammar libraries - load on demand via DynamicGrammarLoader
         .library(name: "TreeSitterSwift", type: .dynamic, targets: ["TreeSitterSwift"]),
@@ -264,20 +268,10 @@ let package = Package(
         .target(
             name: "VVCode",
             dependencies: [
-                "VVCodeCore",
                 "VVHighlighting",
                 "VVGit",
                 "VVLSP",
                 "VVMarkdown",
-            ]
-        ),
-
-        // Core text view and rendering
-        .target(
-            name: "VVCodeCore",
-            dependencies: ["VVGit", "VVLSP", "VVHighlighting"],
-            resources: [
-                .process("Metal/Shaders.metal")
             ]
         ),
 
@@ -2123,6 +2117,13 @@ let package = Package(
                 .process("Metal/MarkdownShaders.metal")
             ]
         ),
+        .target(
+            name: "VVChatTimeline",
+            dependencies: [
+                "VVMarkdown",
+                "VVMetalPrimitives",
+            ]
+        ),
         .executableTarget(
             name: "VVMarkdownDump",
             dependencies: [
@@ -2130,11 +2131,25 @@ let package = Package(
             ],
             path: "Sources/VVMarkdownDump"
         ),
+        .executableTarget(
+            name: "VVKitPlayground",
+            dependencies: [
+                "VVCode",
+                "VVMarkdown",
+                "VVChatTimeline",
+                "VVMetalPrimitives"
+            ],
+            path: "Examples/VVKitPlayground"
+        ),
 
         // Tests
         .testTarget(
             name: "VVCodeTests",
-            dependencies: ["VVCode", "VVCodeCore", "VVGit", "VVHighlighting"]
+            dependencies: ["VVCode", "VVGit", "VVHighlighting"]
+        ),
+        .testTarget(
+            name: "VVChatTimelineTests",
+            dependencies: ["VVChatTimeline"]
         ),
     ]
 )

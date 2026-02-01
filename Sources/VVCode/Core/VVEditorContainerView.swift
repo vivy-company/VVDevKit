@@ -278,7 +278,7 @@ public class VVEditorContainerView: NSView {
 
         // Text color
         textView.textColor = theme.textColor
-        textView.insertionPointColor = theme.cursorColor
+        textView.insertionPointColor = theme.textColor
 
         // Selection
         textView.selectedTextAttributes = [

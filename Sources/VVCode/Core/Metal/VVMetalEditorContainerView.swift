@@ -4,6 +4,7 @@ import MetalKit
 import Combine
 import VVHighlighting
 import SwiftTreeSitter
+import VVLSP
 
 /// Metal-based editor container view - replaces VVEditorContainerView for GPU-accelerated rendering
 public final class VVMetalEditorContainerView: NSView {
@@ -120,6 +121,21 @@ public final class VVMetalEditorContainerView: NSView {
     private var searchCache: (query: String, caseSensitive: Bool, token: Int, matches: [NSRange])?
     private let searchMatchLimit: Int = 20_000
     private var searchOptions = SearchEngine.Options(caseSensitive: true)
+
+    // LSP / Completion
+    private var lspClient: (any VVLSPClient)?
+    private var documentURI: String?
+    private var completionItems: [VVCompletionItem] = []
+    private var filteredCompletionItems: [VVCompletionItem] = []
+    private var completionAnchorOffset: Int = 0
+    private var completionCursorOffset: Int = 0
+    private var completionSelectedIndex: Int = 0
+    private var completionDebounceTimer: Timer?
+    private let immediateTriggerCharacters: Set<Character> = [".", "(", "<", ":", "/", "@", "\"", "'"]
+    private let delayedTriggerCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+
+    // Git blame
+    private var blameInfo: [VVBlameInfo] = []
 
     // Line map for position calculations
     private var lineMap: LineMap?
@@ -449,7 +465,7 @@ public final class VVMetalEditorContainerView: NSView {
     }
 
     /// Set git hunks for gutter display
-    public func setGitHunks(_ hunks: [MetalGutterView.GitHunk]) {
+    public func setGitHunks(_ hunks: [MetalGutterGitHunk]) {
         metalTextView.setGitHunks(hunks)
     }
 
@@ -1257,6 +1273,8 @@ public final class VVMetalEditorContainerView: NSView {
         highlightSyntax()
         updateContentSize()
         updateSelectionsDisplay()
+        notifyLSPDocumentChanged()
+        updateCompletionFilter()
     }
 
     private func applyMotion(extendSelection: Bool, _ transform: (Selection) -> Int) {
@@ -1273,6 +1291,7 @@ public final class VVMetalEditorContainerView: NSView {
             }
         }
         updateSelectionsDisplay()
+        cancelCompletions()
     }
 
     private func applyMotionToLineColumn(extendSelection: Bool, _ transform: (Int, Int) -> (line: Int, column: Int)) {
@@ -1561,13 +1580,14 @@ public final class VVMetalEditorContainerView: NSView {
 
     private func applyConfiguration() {
         metalTextView?.setTextInsets(NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4))
-        metalTextView?.setGutterInsets(NSEdgeInsets(top: 4, left: 12, bottom: 4, right: 16))
+        metalTextView?.setGutterInsets(NSEdgeInsets(top: 4, left: 14, bottom: 4, right: 20))
         metalTextView?.updateFont(_configuration.font, lineHeightMultiplier: _configuration.lineHeight)
         metalTextView?.setMinimumGutterWidth(_configuration.minimumGutterWidth)
         metalTextView?.setShowsGutter(_configuration.showGutter)
         metalTextView?.setShowsLineNumbers(_configuration.showLineNumbers)
         metalTextView?.setShowsGitGutter(_configuration.showGitGutter)
         metalTextView?.setStatusBarHeight(statusBarHeight)
+        metalTextView?.setBlameInfo(blameInfo, showInline: _configuration.showInlineBlame, delay: _configuration.blameDelay)
         setHelixModeEnabled(_configuration.helixModeEnabled)
 
         // Update content size after font change
@@ -1759,17 +1779,20 @@ public final class VVMetalEditorContainerView: NSView {
     private func ensureGlyphPreloadIfNeeded(with text: String) {
         guard !didPreloadGlyphs else { return }
         guard !text.isEmpty else { return }
-        metalTextView?.renderer?.glyphAtlas.preloadASCII()
+        let fontSize = _configuration.font.pointSize
+        metalTextView?.renderer?.glyphAtlas.preloadASCII(fontSize: fontSize)
         didPreloadGlyphs = true
     }
 
     private func applyTheme() {
+        let lineHighlight = currentLineHighlightColor(for: _theme.backgroundColor)
         metalTextView?.setBackgroundColor(_theme.backgroundColor)
         metalTextView?.setDefaultTextColor(_theme.textColor)
         metalTextView?.selectionColor = _theme.selectionColor
-        metalTextView?.cursorColor = _theme.cursorColor
+        metalTextView?.cursorColor = _theme.textColor
         metalTextView?.searchHighlightColor = _theme.selectionColor.withAlphaComponent(0.2)
         metalTextView?.activeSearchHighlightColor = _theme.selectionColor.withAlphaComponent(0.4)
+        metalTextView?.currentLineHighlightColor = lineHighlight
         metalTextView?.indentGuideColor = _theme.gutterSeparatorColor.withAlphaComponent(0.22)
         metalTextView?.indentGuideLinePadding = 0
         metalTextView?.indentGuideLineWidth = 1
@@ -1816,6 +1839,13 @@ public final class VVMetalEditorContainerView: NSView {
         let brightness = _theme.backgroundColor.brightnessComponent
         highlightTheme = brightness < 0.5 ? .defaultDark : .defaultLight
         Task { await highlighter?.setTheme(highlightTheme) }
+    }
+
+    private func currentLineHighlightColor(for background: NSColor) -> NSColor {
+        let brightness = background.brightnessComponent
+        let base = brightness < 0.5 ? NSColor.white : NSColor.black
+        let alpha: CGFloat = brightness < 0.5 ? 0.12 : 0.07
+        return base.withAlphaComponent(alpha)
     }
 
     // MARK: - Folding / Indent Guides
@@ -1901,7 +1931,7 @@ public final class VVMetalEditorContainerView: NSView {
             .map { $0.startLine...$0.endLine }
         foldedRanges = folded
         metalTextView?.setFoldedLineRanges(folded)
-        let gutterRanges = foldableRanges.map { MetalGutterView.FoldRange(startLine: $0.startLine, endLine: $0.endLine) }
+        let gutterRanges = foldableRanges.map { MetalGutterFoldRange(startLine: $0.startLine, endLine: $0.endLine) }
         metalTextView?.setFoldRanges(gutterRanges, foldedStartLines: foldedStartLines)
         updateContentSize()
         ensureSelectionsVisibleAfterFolding()
@@ -2105,14 +2135,14 @@ public final class VVMetalEditorContainerView: NSView {
 
     /// Set git hunks (VVDiffHunk version for compatibility)
     public func setGitHunks(_ hunks: [VVDiffHunk]) {
-        let metalHunks = hunks.map { hunk -> MetalGutterView.GitHunk in
-            let status: MetalGutterView.GitHunk.Status
+        let metalHunks = hunks.map { hunk -> MetalGutterGitHunk in
+            let status: MetalGutterGitHunk.Status
             switch hunk.changeType {
             case .added: status = .added
             case .deleted: status = .deleted
             case .modified: status = .modified
             }
-            return MetalGutterView.GitHunk(
+            return MetalGutterGitHunk(
                 startLine: hunk.newStart - 1,  // Convert to 0-indexed
                 lineCount: hunk.newCount,
                 status: status
@@ -2121,14 +2151,34 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView.setGitHunks(metalHunks)
     }
 
-    /// Set blame info (stub - not implemented for Metal yet)
+    /// Set blame info
     public func setBlameInfo(_ blame: [VVBlameInfo]) {
-        // TODO: Implement blame overlay for Metal view
+        blameInfo = blame
+        metalTextView?.setBlameInfo(blame, showInline: _configuration.showInlineBlame, delay: _configuration.blameDelay)
     }
 
-    /// Set LSP client (stub - not implemented for Metal yet)
-    public func setLSPClient(_ client: Any, documentURI: String) {
-        // TODO: Implement LSP integration for Metal view
+    /// Set LSP client
+    public func setLSPClient(_ client: (any VVLSPClient)?, documentURI: String?) {
+        if lspClient != nil, client == nil, let oldURI = self.documentURI {
+            Task { [oldURI] in
+                await lspClient?.documentClosed(oldURI)
+            }
+        }
+
+        lspClient = client
+        self.documentURI = documentURI
+        completionItems.removeAll()
+        filteredCompletionItems.removeAll()
+        completionAnchorOffset = 0
+        completionSelectedIndex = 0
+        completionDebounceTimer?.invalidate()
+        completionDebounceTimer = nil
+        metalTextView?.clearCompletions()
+
+        guard let client, let uri = documentURI, let lang = language?.identifier else { return }
+        Task {
+            await client.documentOpened(uri, text: textStorage, language: lang)
+        }
     }
 
     /// Focus the text view
@@ -2148,6 +2198,126 @@ public final class VVMetalEditorContainerView: NSView {
 
         highlightDebouncer = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+    }
+
+    // MARK: - LSP / Completions
+
+    private func notifyLSPDocumentChanged() {
+        guard let client = lspClient, let uri = documentURI else { return }
+        let text = textStorage
+        Task {
+            await client.documentChanged(uri, changes: [VVTextChange.full(text)])
+        }
+    }
+
+    private func triggerCompletion(triggerKind: VVCompletionTriggerKind, triggerCharacter: String?) {
+        guard let client = lspClient, let uri = documentURI else { return }
+        guard let cursorOffset = metalTextView?.insertionOffset() else { return }
+        let pos = lineMapPosition(forOffset: cursorOffset)
+        let position = VVTextPosition(line: pos.line, character: pos.column)
+        completionAnchorOffset = cursorOffset
+        if triggerCharacter != nil {
+            completionAnchorOffset = max(0, cursorOffset - 1)
+        }
+
+        Task {
+            do {
+                let items = try await client.completions(
+                    at: position,
+                    in: uri,
+                    triggerKind: triggerKind,
+                    triggerCharacter: triggerCharacter
+                )
+                await MainActor.run {
+                    self.completionItems = items
+                    self.updateCompletionFilter()
+                }
+            } catch {
+                await MainActor.run {
+                    self.cancelCompletions()
+                }
+            }
+        }
+    }
+
+    private func handleCompletionTrigger(for insertedText: String) {
+        guard lspClient != nil else { return }
+        completionDebounceTimer?.invalidate()
+        completionDebounceTimer = nil
+
+        guard insertedText.count == 1, let char = insertedText.first else {
+            return
+        }
+
+        if immediateTriggerCharacters.contains(char) {
+            triggerCompletion(triggerKind: .triggerCharacter, triggerCharacter: String(char))
+            return
+        }
+
+        if let scalar = char.unicodeScalars.first, delayedTriggerCharacters.contains(scalar) {
+            completionDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+                self?.triggerCompletion(triggerKind: .invoked, triggerCharacter: nil)
+            }
+        } else if metalTextView?.isCompletionVisible == true {
+            updateCompletionFilter()
+        }
+    }
+
+    private func updateCompletionFilter() {
+        guard let metalTextView, metalTextView.isCompletionVisible || !completionItems.isEmpty else { return }
+        guard let cursorOffset = metalTextView.insertionOffset() else { return }
+        completionCursorOffset = cursorOffset
+
+        let start = min(completionAnchorOffset, cursorOffset)
+        let end = max(completionAnchorOffset, cursorOffset)
+        let nsText = textStorage as NSString
+        let clampedStart = max(0, min(start, nsText.length))
+        let clampedEnd = max(clampedStart, min(end, nsText.length))
+        let prefix = nsText.substring(with: NSRange(location: clampedStart, length: clampedEnd - clampedStart))
+
+        filteredCompletionItems = filterCompletionItems(prefix)
+        completionSelectedIndex = 0
+
+        if filteredCompletionItems.isEmpty {
+            metalTextView.clearCompletions()
+        } else {
+            metalTextView.setCompletionItems(filteredCompletionItems, anchorOffset: completionAnchorOffset, cursorOffset: cursorOffset)
+            metalTextView.updateCompletionSelection(completionSelectedIndex)
+        }
+    }
+
+    private func filterCompletionItems(_ prefix: String) -> [VVCompletionItem] {
+        guard !prefix.isEmpty else {
+            return completionItems
+        }
+        let lower = prefix.lowercased()
+        return completionItems.filter { item in
+            let text = (item.filterText ?? item.label).lowercased()
+            return text.hasPrefix(lower)
+        }
+    }
+
+    private func cancelCompletions() {
+        completionItems.removeAll()
+        filteredCompletionItems.removeAll()
+        completionSelectedIndex = 0
+        metalTextView?.clearCompletions()
+    }
+
+    private func applySelectedCompletion() {
+        guard let item = metalTextView?.selectedCompletionItem() else { return }
+        let range = metalTextView?.completionAnchorRange()
+        guard let cursorOffset = metalTextView?.insertionOffset(),
+              let anchor = range?.anchor else { return }
+        let start = min(anchor, cursorOffset)
+        let end = max(anchor, cursorOffset)
+        let replaceRange = NSRange(location: start, length: end - start)
+        replaceRangeWithCompletion(replaceRange, insertText: item.insertText)
+        cancelCompletions()
+    }
+
+    private func replaceRangeWithCompletion(_ range: NSRange, insertText: String) {
+        replaceRange(range, with: insertText, updateMarkedRange: false)
     }
 
     private func performHighlighting() {
@@ -2593,9 +2763,11 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
             isComposingMarkedText = false
             markedTextRange = nil
             metalTextView?.setMarkedTextRange(nil)
+            handleCompletionTrigger(for: text)
             return
         }
         replaceSelections(with: text, expandEmptyToChar: false)
+        handleCompletionTrigger(for: text)
     }
 
     public func hiddenInputViewDidDeleteBackward(_ view: HiddenInputView) {
@@ -2754,6 +2926,27 @@ extension VVMetalEditorContainerView: HiddenInputViewDelegate {
     }
 
     public func hiddenInputView(_ view: HiddenInputView, shouldHandleKeyDown event: NSEvent) -> Bool {
+        if metalTextView?.isCompletionVisible == true {
+            switch event.keyCode {
+            case 125: // Down
+                completionSelectedIndex = min(completionSelectedIndex + 1, max(0, filteredCompletionItems.count - 1))
+                metalTextView?.updateCompletionSelection(completionSelectedIndex)
+                return true
+            case 126: // Up
+                completionSelectedIndex = max(0, completionSelectedIndex - 1)
+                metalTextView?.updateCompletionSelection(completionSelectedIndex)
+                return true
+            case 36, 48: // Return or Tab
+                applySelectedCompletion()
+                return true
+            case 53: // Esc
+                cancelCompletions()
+                return true
+            default:
+                break
+            }
+        }
+
         if searchOverlayActive && helixMode != .searchForward && helixMode != .searchBackward {
             return handleSearchOverlayKeyDown(event)
         }

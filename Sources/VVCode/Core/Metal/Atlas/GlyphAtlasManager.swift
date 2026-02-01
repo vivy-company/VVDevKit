@@ -650,31 +650,33 @@ public final class GlyphAtlasManager {
             context.fillPath()
         case .foldChevronClosed, .foldChevronOpen:
             let inset = max(0, lineWidth)
-            let triangleRect = rect.insetBy(dx: inset, dy: inset)
-            let minX = triangleRect.minX
-            let maxX = triangleRect.maxX
-            let minY = triangleRect.minY
-            let maxY = triangleRect.maxY
-            let midX = triangleRect.midX
-            let midY = triangleRect.midY
+            let chevronRect = rect.insetBy(dx: inset, dy: inset)
+            let minX = chevronRect.minX
+            let maxX = chevronRect.maxX
+            let minY = chevronRect.minY
+            let maxY = chevronRect.maxY
+            let midX = chevronRect.midX
+            let midY = chevronRect.midY
 
             let path = CGMutablePath()
             if kind == .foldChevronClosed {
-                // Right-pointing filled triangle
+                // Right-pointing chevron
                 path.move(to: CGPoint(x: minX, y: minY))
                 path.addLine(to: CGPoint(x: maxX, y: midY))
                 path.addLine(to: CGPoint(x: minX, y: maxY))
             } else {
-                // Down-pointing filled triangle
+                // Down-pointing chevron
                 path.move(to: CGPoint(x: minX, y: minY))
-                path.addLine(to: CGPoint(x: maxX, y: minY))
                 path.addLine(to: CGPoint(x: midX, y: maxY))
+                path.addLine(to: CGPoint(x: maxX, y: minY))
             }
 
-            path.closeSubpath()
             context.addPath(path)
-            context.setFillColor(gray: 1, alpha: 1)
-            context.fillPath()
+            context.setStrokeColor(gray: 1, alpha: 1)
+            context.setLineWidth(max(1, lineWidth))
+            context.setLineJoin(.round)
+            context.setLineCap(.round)
+            context.strokePath()
         }
 
         return alphaData

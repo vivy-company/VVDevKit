@@ -1,5 +1,5 @@
 import XCTest
-@testable import VVCodeCore
+@testable import VVCode
 
 final class LineMapTests: XCTestCase {
 

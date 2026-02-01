@@ -47,8 +47,7 @@ Then add the dependency to your target (the package name is still `VVCode`):
 
 | Module | Description |
 |--------|-------------|
-| `VVCode` | Editor public API and SwiftUI wrapper |
-| `VVCodeCore` | Core text view, layout, and Metal rendering |
+| `VVCode` | Editor public API, text view, layout, and Metal rendering |
 | `VVMetalPrimitives` | Metal-backed primitive scene graph and layout components |
 | `VVHighlighting` | Tree-sitter syntax highlighting |
 | `VVGit` | Git integration |

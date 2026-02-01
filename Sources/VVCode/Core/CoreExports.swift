@@ -1,4 +1,4 @@
-// VVCodeCore - Core rendering components
+// VVCode - Core rendering components
 
 import AppKit
 import VVGit
@@ -219,7 +219,7 @@ public struct VVTheme: Equatable, Hashable, Sendable {
     )
 }
 
-// MARK: - Language (simplified for VVCodeCore)
+// MARK: - Language (simplified for VVCode)
 
 /// Language identifier for syntax highlighting
 public struct VVLanguage: Hashable, Sendable, Identifiable {

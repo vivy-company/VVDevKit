@@ -627,14 +627,14 @@ public final class MarkdownLayoutEngine {
         switch blockType {
         case .heading(let level):
             let base = CGFloat(theme.headingSpacing)
-            let levelScale: CGFloat = level <= 2 ? 0.55 : 0.4
-            var spacing = max(1, base * levelScale)
+            let levelScale: CGFloat = level <= 2 ? 1.0 : 0.75
+            var spacing = max(4, base * levelScale)
             if let nextBlock {
                 switch nextBlock.type {
                 case .heading:
-                    spacing = max(1, base * 0.15)
+                    spacing = max(2, base * 0.35)
                 case .table, .codeBlock, .mermaid, .list, .blockQuote, .alert, .definitionList, .abbreviationList:
-                    spacing = max(1, base * 0.2)
+                    spacing = max(4, base * 0.6)
                 default:
                     break
                 }
@@ -668,9 +668,9 @@ public final class MarkdownLayoutEngine {
             }
             return baseSpacing
         case .codeBlock, .mermaid:
-            return max(CGFloat(theme.paragraphSpacing) + 4, lineHeight)
+            return max(CGFloat(theme.paragraphSpacing) * 1.2, lineHeight)
         case .definitionList, .abbreviationList:
-            return max(2, CGFloat(theme.paragraphSpacing) * 0.7)
+            return max(4, CGFloat(theme.paragraphSpacing) * 0.8)
         default:
             return CGFloat(theme.paragraphSpacing)
         }
@@ -1026,25 +1026,57 @@ public final class MarkdownLayoutEngine {
         let contentPadding = CGFloat(theme.contentPadding)
         let codePadding = CGFloat(theme.codeBlockPadding)
         let headerHeight = CGFloat(theme.codeBlockHeaderHeight)
+        let borderWidth = CGFloat(theme.codeBorderWidth)
         let codeLines = normalizedCodeLines(code)
-        let height = CGFloat(codeLines.count) * lineHeight + codePadding * 2 + headerHeight
+        let maxLineNumber = max(1, codeLines.count)
+        let gutterWidth = codeGutterWidth(for: maxLineNumber)
 
-        // Create default layout lines (highlighting applied async by view)
+        let innerWidth = max(40, contentWidth - contentPadding * 2 - borderWidth * 2)
+        let availableWidth = max(24, innerWidth - codePadding * 2 - gutterWidth)
+        let charWidth = max(1, measureTextWidth("8", variant: .monospace))
+        let maxChars = max(6, Int(floor(availableWidth / charWidth)))
+
         var layoutLines: [LayoutCodeLine] = []
+        layoutLines.reserveCapacity(codeLines.count)
+        var visualIndex = 0
+
         for (index, lineText) in codeLines.enumerated() {
-            let yOffset = codePadding + headerHeight + baselineOffset + CGFloat(index) * lineHeight
-            let defaultToken = LayoutCodeToken(
-                text: lineText,
-                range: NSRange(location: 0, length: lineText.utf16.count),
-                color: theme.codeColor
-            )
-            layoutLines.append(LayoutCodeLine(
-                lineNumber: index + 1,
-                text: lineText,
-                tokens: [defaultToken],
-                yOffset: yOffset
-            ))
+            let wrapped = wrapCodeLine(lineText, maxChars: maxChars)
+            if wrapped.isEmpty {
+                let yOffset = codePadding + headerHeight + baselineOffset + CGFloat(visualIndex) * lineHeight
+                let defaultToken = LayoutCodeToken(
+                    text: "",
+                    range: NSRange(location: 0, length: 0),
+                    color: theme.codeColor
+                )
+                layoutLines.append(LayoutCodeLine(
+                    lineNumber: index + 1,
+                    text: "",
+                    tokens: [defaultToken],
+                    yOffset: yOffset
+                ))
+                visualIndex += 1
+                continue
+            }
+            for (wrapIndex, segment) in wrapped.enumerated() {
+                let yOffset = codePadding + headerHeight + baselineOffset + CGFloat(visualIndex) * lineHeight
+                let defaultToken = LayoutCodeToken(
+                    text: segment,
+                    range: NSRange(location: 0, length: segment.utf16.count),
+                    color: theme.codeColor
+                )
+                layoutLines.append(LayoutCodeLine(
+                    lineNumber: wrapIndex == 0 ? (index + 1) : 0,
+                    text: segment,
+                    tokens: [defaultToken],
+                    yOffset: yOffset
+                ))
+                visualIndex += 1
+            }
         }
+
+        let extraBottomPadding = max(4, codePadding * 0.5)
+        let height = CGFloat(layoutLines.count) * lineHeight + codePadding * 2 + headerHeight + extraBottomPadding
 
         return LayoutBlock(
             blockId: id,
@@ -1052,6 +1084,22 @@ public final class MarkdownLayoutEngine {
             frame: CGRect(x: contentPadding, y: y, width: contentWidth - contentPadding * 2, height: height),
             content: .code(code, language: language, lines: layoutLines)
         )
+    }
+
+    private func wrapCodeLine(_ text: String, maxChars: Int) -> [String] {
+        guard maxChars > 0 else { return [text] }
+        let nsText = text as NSString
+        let length = nsText.length
+        guard length > 0 else { return [""] }
+        var segments: [String] = []
+        var index = 0
+        while index < length {
+            let count = min(maxChars, length - index)
+            let part = nsText.substring(with: NSRange(location: index, length: count))
+            segments.append(part)
+            index += count
+        }
+        return segments
     }
 
     private func normalizedCodeLines(_ code: String) -> [String] {
@@ -1065,6 +1113,12 @@ public final class MarkdownLayoutEngine {
             lines.removeLast()
         }
         return lines
+    }
+
+    private func codeGutterWidth(for maxLineNumber: Int) -> CGFloat {
+        let digits = max(1, String(maxLineNumber).count)
+        let charWidth = measureTextWidth("8", variant: .monospace)
+        return max(30, (CGFloat(digits) + 1.2) * charWidth)
     }
 
     private func layoutList(_ id: String, items: [MarkdownListItem], at y: CGFloat) -> LayoutBlock {
@@ -1159,7 +1213,7 @@ public final class MarkdownLayoutEngine {
         let padding = CGFloat(theme.contentPadding)
         let indent = CGFloat(theme.blockQuoteIndent)
         let shift = indent + CGFloat(theme.blockQuoteBorderWidth) + 4
-        let interBlockSpacing = max(2, CGFloat(theme.paragraphSpacing) * 0.5)
+        let interBlockSpacing = max(4, CGFloat(theme.paragraphSpacing) * 0.7)
 
         for block in blocks {
             let original = layoutBlock(block, at: currentY)
@@ -3268,6 +3322,7 @@ public final class MarkdownLayoutEngine {
             let attributes = CTRunGetAttributes(run) as NSDictionary
             let runFont = attributes[kCTFontAttributeName] as! CTFont
             let fontName = CTFontCopyPostScriptName(runFont) as String
+            let storedFontName = isSystemUIFontName(fontName) ? nil : fontName
             let runFontSize = CTFontGetSize(runFont)
 
             var runGlyphs = [CGGlyph](repeating: 0, count: glyphCount)
@@ -3295,7 +3350,7 @@ public final class MarkdownLayoutEngine {
                     color: color,
                     fontVariant: variant,
                     fontSize: runFontSize,
-                    fontName: fontName,
+                    fontName: storedFontName,
                     stringIndex: Int(stringIndices[i])
                 )
                 glyphs.append(glyph)
@@ -3331,6 +3386,16 @@ public final class MarkdownLayoutEngine {
         }
 
         return tokens
+    }
+
+    private func isSystemUIFontName(_ name: String) -> Bool {
+        if name.hasPrefix(".SF") || name.hasPrefix(".AppleSystem") {
+            return true
+        }
+        if name == ".AppleColorEmojiUI" || name == "AppleColorEmoji" || name == "AppleColorEmojiUI" {
+            return false
+        }
+        return false
     }
 }
 

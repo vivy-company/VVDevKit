@@ -21,7 +21,7 @@ import UIKit
 // MARK: - Text Selection Types
 
 /// Position in the markdown text for selection
-struct TextPosition: Comparable {
+struct TextPosition: Comparable, Equatable {
     let blockIndex: Int
     let runIndex: Int
     let glyphIndex: Int
@@ -198,6 +198,7 @@ public class MetalMarkdownNSView: NSView {
     private var selectionStart: TextPosition?
     private var selectionEnd: TextPosition?
     private var isSelecting: Bool = false
+    private var lastDragPoint: CGPoint?
     private var selectionColor: SIMD4<Float> = SIMD4(0.3, 0.5, 0.8, 0.4)
     private var hoveredLinkURL: String?
     private var trackingArea: NSTrackingArea?
@@ -602,7 +603,9 @@ public class MetalMarkdownNSView: NSView {
     }
 
     public override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        lastDragPoint = point
         let contentPoint = contentPoint(from: point)
 
         if copyCodeBlock(at: contentPoint) {
@@ -612,9 +615,10 @@ public class MetalMarkdownNSView: NSView {
             return
         }
 
-        selectionStart = hitTest(at: contentPoint)
+        selectionStart = nearestTextPosition(to: contentPoint)
         selectionEnd = selectionStart
         isSelecting = true
+        NSCursor.iBeam.set()
         needsRedraw = true
     }
 
@@ -622,14 +626,18 @@ public class MetalMarkdownNSView: NSView {
         guard isSelecting else { return }
 
         let point = convert(event.locationInWindow, from: nil)
+        lastDragPoint = point
+        autoscrollForDrag(point)
         let contentPoint = contentPoint(from: point)
 
-        selectionEnd = hitTest(at: contentPoint)
+        selectionEnd = nearestTextPosition(to: contentPoint) ?? selectionEnd
+        NSCursor.iBeam.set()
         needsRedraw = true
     }
 
     public override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        lastDragPoint = nil
         let contentPoint = contentPoint(from: point)
 
         if copyCodeBlock(at: contentPoint) {
@@ -657,6 +665,11 @@ public class MetalMarkdownNSView: NSView {
         }
 
         isSelecting = false
+        if linkURL(at: contentPoint) != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.iBeam.set()
+        }
     }
 
     public override func mouseMoved(with event: NSEvent) {
@@ -671,7 +684,7 @@ public class MetalMarkdownNSView: NSView {
         if url != nil {
             NSCursor.pointingHand.set()
         } else {
-            NSCursor.arrow.set()
+            NSCursor.iBeam.set()
         }
     }
 
@@ -1073,6 +1086,96 @@ public class MetalMarkdownNSView: NSView {
         return nil
     }
 
+    private func nearestTextPosition(to point: CGPoint) -> TextPosition? {
+        guard let layout = cachedLayout, !layout.blocks.isEmpty else { return nil }
+        if let first = findFirstPosition(in: layout),
+           let last = findLastPosition(in: layout) {
+            let firstFrame = layout.blocks.first?.frame ?? .zero
+            let lastFrame = layout.blocks.last?.frame ?? .zero
+            if point.y <= firstFrame.minY { return first }
+            if point.y >= lastFrame.maxY { return last }
+        }
+
+        var closestBlockIndex: Int?
+        var closestBlockDistance = CGFloat.greatestFiniteMagnitude
+        for (index, block) in layout.blocks.enumerated() {
+            guard getTextRuns(from: block) != nil else { continue }
+            let frame = block.frame
+            let distance: CGFloat
+            if point.y < frame.minY {
+                distance = frame.minY - point.y
+            } else if point.y > frame.maxY {
+                distance = point.y - frame.maxY
+            } else {
+                distance = 0
+            }
+            if distance < closestBlockDistance {
+                closestBlockDistance = distance
+                closestBlockIndex = index
+                if distance == 0 { break }
+            }
+        }
+
+        guard let blockIndex = closestBlockIndex else { return nil }
+        guard let runs = getTextRuns(from: layout.blocks[blockIndex]), !runs.isEmpty else {
+            return nil
+        }
+
+        var closestRunIndex = 0
+        var closestRunDistance = CGFloat.greatestFiniteMagnitude
+        var closestRunRect: CGRect?
+        for (runIndex, run) in runs.enumerated() {
+            guard let lineRect = runHitBounds(run) ?? runLineBounds(run) ?? runSelectionBounds(run) else { continue }
+            let distance = abs(point.y - lineRect.midY)
+            if distance < closestRunDistance {
+                closestRunDistance = distance
+                closestRunIndex = runIndex
+                closestRunRect = lineRect
+                if distance == 0 { break }
+            }
+        }
+
+        let run = runs[closestRunIndex]
+        let rect = closestRunRect ?? runHitBounds(run) ?? runLineBounds(run) ?? CGRect(x: run.position.x, y: run.position.y, width: 1, height: 1)
+        let clampedX = min(max(point.x, rect.minX), rect.maxX)
+        let clampedIndex = glyphIndexForX(run, x: clampedX) ?? 0
+        let length = runTextLength(run)
+        let index = max(0, min(clampedIndex, length))
+        return TextPosition(
+            blockIndex: blockIndex,
+            runIndex: closestRunIndex,
+            glyphIndex: index,
+            characterOffset: index
+        )
+    }
+
+    private func autoscrollForDrag(_ point: CGPoint) {
+        let maxScrollY = max(0, contentHeight + topInset - bounds.height)
+        let maxScrollX = max(0, (cachedLayout?.contentWidth ?? bounds.width) - bounds.width)
+        var newOffset = scrollOffset
+
+        if point.y < 0 {
+            let speed = min(60, max(4, abs(point.y) * 0.35))
+            newOffset.y = max(0, newOffset.y - speed)
+        } else if point.y > bounds.height {
+            let speed = min(60, max(4, (point.y - bounds.height) * 0.35))
+            newOffset.y = min(maxScrollY, newOffset.y + speed)
+        }
+
+        if point.x < 0 {
+            let speed = min(40, max(3, abs(point.x) * 0.25))
+            newOffset.x = max(0, newOffset.x - speed)
+        } else if point.x > bounds.width {
+            let speed = min(40, max(3, (point.x - bounds.width) * 0.25))
+            newOffset.x = min(maxScrollX, newOffset.x + speed)
+        }
+
+        if newOffset.x != scrollOffset.x || newOffset.y != scrollOffset.y {
+            scrollOffset = newOffset
+            needsRedraw = true
+        }
+    }
+
     private func getTextRuns(from block: LayoutBlock) -> [LayoutTextRun]? {
         switch block.content {
         case .text(let runs):
@@ -1116,7 +1219,7 @@ public class MetalMarkdownNSView: NSView {
         let contentOriginX = frame.origin.x + borderWidth
         let contentOriginY = frame.origin.y + borderWidth
 
-        let maxLineNumber = max(lines.map(\.lineNumber).max() ?? 0, lines.count)
+        let maxLineNumber = max(lines.map(\.lineNumber).max() ?? 0, 1)
         let gutterWidth = codeGutterWidth(for: maxLineNumber)
         let startX = contentOriginX + padding + gutterWidth
         let lineHeight = layoutEngine.currentLineHeight
@@ -1494,6 +1597,20 @@ public class MetalMarkdownNSView: NSView {
 
     private func render() {
         needsRedraw = false
+
+        if isSelecting, let dragPoint = lastDragPoint {
+            let beforeOffset = scrollOffset
+            autoscrollForDrag(dragPoint)
+            let contentPoint = contentPoint(from: dragPoint)
+            let newEnd = nearestTextPosition(to: contentPoint)
+            if newEnd != selectionEnd {
+                selectionEnd = newEnd
+                needsRedraw = true
+            }
+            if beforeOffset.x != scrollOffset.x || beforeOffset.y != scrollOffset.y {
+                needsRedraw = true
+            }
+        }
 
         guard let renderer = renderer,
               let drawable = metalLayer.nextDrawable(),
@@ -1972,7 +2089,8 @@ public class MetalMarkdownNSView: NSView {
         if debugOptions.contains(.codeGutter) {
             for block in layout.blocks {
                 guard case .code(_, _, let lines) = block.content else { continue }
-                let gutterWidth = codeGutterWidth(for: max(lines.count, 1))
+                let maxLineNumber = max(lines.map(\.lineNumber).max() ?? 0, 1)
+                let gutterWidth = codeGutterWidth(for: maxLineNumber)
                 let headerHeight = CGFloat(theme.codeBlockHeaderHeight)
                 let borderWidth: CGFloat = 1
                 let gutterFrame = CGRect(

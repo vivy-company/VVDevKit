@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import Combine
 import Metal
-import VVCodeCore
 import VVGit
 import VVLSP
 
@@ -153,53 +152,13 @@ struct VVCodeViewRepresentable: NSViewRepresentable {
     var onSelectionChange: ((NSRange) -> Void)?
     var onCursorPositionChange: ((VVTextPosition) -> Void)?
 
-    /// Check if Metal is available for GPU-accelerated rendering
-    private static var isMetalAvailable: Bool = {
-        MTLCreateSystemDefaultDevice() != nil
-    }()
-
     func makeNSView(context: Context) -> NSView {
-        // Automatically use Metal when available
-        if Self.isMetalAvailable {
-            return makeMetalView(context: context)
-        } else {
-            return makeAppKitView(context: context)
-        }
+        // Metal-only rendering
+        makeMetalView(context: context)
     }
 
     private func makeMetalView(context: Context) -> VVMetalEditorContainerView {
         let containerView = VVMetalEditorContainerView(
-            frame: .zero,
-            configuration: configuration,
-            theme: theme
-        )
-
-        containerView.delegate = context.coordinator
-        containerView.setText(document.text)
-
-        if let language = language ?? document.language {
-            containerView.setLanguage(language)
-        }
-
-        if let diff = gitDiff {
-            let hunks = VVDiffParser.parse(unifiedDiff: diff)
-            containerView.setGitHunks(hunks)
-        }
-
-        if let blame = gitBlame {
-            containerView.setBlameInfo(blame)
-        }
-
-        // Focus the text view after a delay to ensure window is ready
-        DispatchQueue.main.async {
-            containerView.focusTextView()
-        }
-
-        return containerView
-    }
-
-    private func makeAppKitView(context: Context) -> VVEditorContainerView {
-        let containerView = VVEditorContainerView(
             frame: .zero,
             configuration: configuration,
             theme: theme
@@ -236,11 +195,8 @@ struct VVCodeViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        if let metalView = nsView as? VVMetalEditorContainerView {
-            updateMetalView(metalView, context: context)
-        } else if let appKitView = nsView as? VVEditorContainerView {
-            updateAppKitView(appKitView, context: context)
-        }
+        guard let metalView = nsView as? VVMetalEditorContainerView else { return }
+        updateMetalView(metalView, context: context)
     }
 
     private func updateMetalView(_ nsView: VVMetalEditorContainerView, context: Context) {
@@ -266,45 +222,17 @@ struct VVCodeViewRepresentable: NSViewRepresentable {
 
         let blame: [VVBlameInfo] = gitBlame ?? []
         nsView.setBlameInfo(blame)
-    }
-
-    private func updateAppKitView(_ nsView: VVEditorContainerView, context: Context) {
-        // Update text if changed externally
-        if nsView.text != document.text {
-            nsView.setText(document.text)
-        }
-
-        // Update language
-        if let language = language ?? document.language {
-            nsView.setLanguage(language)
-        }
-
-        // Update theme
-        nsView.setTheme(theme)
-
-        // Update configuration
-        nsView.setConfiguration(configuration)
-
-        // Update git data
-        if let diff = gitDiff {
-            let hunks = VVDiffParser.parse(unifiedDiff: diff)
-            nsView.setGitHunks(hunks)
-        } else {
-            nsView.setGitHunks([])
-        }
-
-        if let blame = gitBlame {
-            nsView.setBlameInfo(blame)
-        } else {
-            nsView.setBlameInfo([])
-        }
 
         // Update LSP client
         if let client = lspClient {
             let uri = document.fileURL?.absoluteString ?? "untitled:\(UUID().uuidString)"
             nsView.setLSPClient(client, documentURI: uri)
+        } else {
+            nsView.setLSPClient(nil, documentURI: nil)
         }
     }
+
+    // Metal-only; AppKit backend removed.
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
