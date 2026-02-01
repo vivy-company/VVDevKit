@@ -224,8 +224,18 @@ public final class VVChatMessageRenderer {
         }
 
         if usesBubble {
+            let bubbleFrame = CGRect(x: 0, y: currentY, width: bubbleWidth, height: contentBlockHeight)
+            if style.userBubbleBorderWidth > 0, style.userBubbleBorderColor.w > 0 {
+                let borderFrame = bubbleFrame.insetBy(dx: -style.userBubbleBorderWidth, dy: -style.userBubbleBorderWidth)
+                let border = VVQuadPrimitive(
+                    frame: borderFrame,
+                    color: style.userBubbleBorderColor,
+                    cornerRadius: style.userBubbleCornerRadius + style.userBubbleBorderWidth
+                )
+                builder.add(kind: .quad(border), zIndex: -2)
+            }
             let bubble = VVQuadPrimitive(
-                frame: CGRect(x: 0, y: currentY, width: bubbleWidth, height: contentBlockHeight),
+                frame: bubbleFrame,
                 color: style.userBubbleColor,
                 cornerRadius: style.userBubbleCornerRadius
             )

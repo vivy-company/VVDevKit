@@ -594,6 +594,7 @@ struct ChatPlaygroundView: View {
     @State private var draftContent = ""
     @State private var userIndex = 0
     @State private var assistantIndex = 0
+    @State private var autoTurnIndex = 0
     @State private var simulationTask: Task<Void, Never>?
     @State private var isAutoRunning = false
     @State private var streamResponses = true
@@ -720,19 +721,23 @@ struct ChatPlaygroundView: View {
         controller.setMessages(SampleData.chatMessages(), scrollToBottom: true)
     }
 
-    private func appendUserMessage() {
-        let content = SampleData.userMessages[userIndex % SampleData.userMessages.count]
-        userIndex += 1
+    private func appendUserMessage(content: String? = nil) {
+        let message = content ?? SampleData.userMessages[userIndex % SampleData.userMessages.count]
+        if content == nil {
+            userIndex += 1
+        }
         controller.appendMessage(
-            VVChatMessage(role: .user, state: .final, content: content, timestamp: Date())
+            VVChatMessage(role: .user, state: .final, content: message, timestamp: Date())
         )
     }
 
-    private func appendAssistantMessage() {
-        let content = assistantResponse(forIndex: assistantIndex)
-        assistantIndex += 1
+    private func appendAssistantMessage(content: String? = nil) {
+        let message = content ?? assistantResponse(forIndex: assistantIndex)
+        if content == nil {
+            assistantIndex += 1
+        }
         controller.appendMessage(
-            VVChatMessage(role: .assistant, state: .final, content: content, timestamp: Date())
+            VVChatMessage(role: .assistant, state: .final, content: message, timestamp: Date())
         )
     }
 
@@ -778,15 +783,16 @@ struct ChatPlaygroundView: View {
     }
 
     private func runSingleAutoStep() async {
+        let turn = nextAutoTurn()
         await MainActor.run {
-            appendUserMessage()
+            appendUserMessage(content: turn.user)
         }
 
         if streamResponses {
-            await streamNextAssistantResponse()
+            await streamAssistantMessage(turn.assistant)
         } else {
             await MainActor.run {
-                appendAssistantMessage()
+                appendAssistantMessage(content: turn.assistant)
             }
         }
     }
@@ -825,6 +831,13 @@ struct ChatPlaygroundView: View {
     private func assistantResponse(forIndex index: Int) -> String {
         let responses = useComplexResponses ? SampleData.complexAssistantResponses : SampleData.assistantMessages
         return responses[index % responses.count]
+    }
+
+    private func nextAutoTurn() -> SampleData.AutoTurn {
+        let turns = useComplexResponses ? SampleData.autoComplexTurns : SampleData.autoSimpleTurns
+        let turn = turns[autoTurnIndex % turns.count]
+        autoTurnIndex += 1
+        return turn
     }
 
     private func chunkedSegments(for text: String) -> [String] {
@@ -871,6 +884,11 @@ struct ChatTimelineRepresentable: NSViewRepresentable {
 }
 
 enum SampleData {
+    struct AutoTurn {
+        let user: String
+        let assistant: String
+    }
+
     static let swiftSample = """
     import Foundation
 
@@ -1060,13 +1078,46 @@ enum SampleData {
     static let userMessages: [String] = [
         "Can you show me the API surface?",
         "Let's test markdown rendering with tables.",
-        "Does the editor support wrapping and blame?"
+        "Does the editor support wrapping and blame?",
+        "Can we stress the chat timeline layout?",
+        "Show a tiny Mermaid diagram in chat.",
+        "How do system messages look?"
     ]
 
     static let assistantMessages: [String] = [
         "Sure! Here is a quick walkthrough of VVKit components and how they connect.",
         "Markdown supports tables, math, and mermaid diagrams. Try editing the sample.",
-        "Inline blame is available when you provide blame info and enable it in configuration."
+        "Inline blame is available when you provide blame info and enable it in configuration.",
+        "The chat timeline is virtualized and follows streaming updates when pinned.",
+        "Mermaid blocks are rendered with a lightweight parser and layout engine.",
+        "System messages render without bubbles and can appear between turns."
+    ]
+
+    static let autoSimpleTurns: [AutoTurn] = [
+        AutoTurn(
+            user: "Can you show me the API surface?",
+            assistant: "Sure! Here is a quick walkthrough of VVKit components and how they connect."
+        ),
+        AutoTurn(
+            user: "Let's test markdown rendering with tables.",
+            assistant: "Markdown supports tables, math, and mermaid diagrams. Try editing the sample."
+        ),
+        AutoTurn(
+            user: "Does the editor support wrapping and blame?",
+            assistant: "Inline blame is available when you provide blame info and enable it in configuration."
+        ),
+        AutoTurn(
+            user: "Can we stress the chat timeline layout?",
+            assistant: "The chat timeline is virtualized and follows streaming updates when pinned."
+        ),
+        AutoTurn(
+            user: "Show a tiny Mermaid diagram in chat.",
+            assistant: "Mermaid blocks are rendered with a lightweight parser and layout engine."
+        ),
+        AutoTurn(
+            user: "How do system messages look?",
+            assistant: "System messages render without bubbles and can appear between turns."
+        )
     ]
 
     static let complexAssistantResponses: [String] = [
@@ -1137,7 +1188,59 @@ enum SampleData {
         ```bash
         swift build --product TreeSitterSwift
         ```
+        """,
         """
+        Quick checklist:
+
+        - Paragraphs, lists, and links
+        - Inline code: `VVChatTimelineView`
+        - Block quote below
+
+        > Keep responses crisp while streaming.
+
+        ```swift
+        enum Mode { case read, write }
+        ```
+        """,
+        """
+        Pipeline snapshot:
+
+        | Stage | Status |
+        | --- | --- |
+        | Parse | ✅ |
+        | Layout | ✅ |
+        | Render | ✅ |
+
+        ```mermaid
+        flowchart LR
+          A[Input] --> B[Parse]
+          B --> C[Layout]
+          C --> D[Render]
+        ```
+        """
+    ]
+
+    static let autoComplexTurns: [AutoTurn] = [
+        AutoTurn(
+            user: "Give me a mixed markdown response with code and math.",
+            assistant: complexAssistantResponses[0]
+        ),
+        AutoTurn(
+            user: "Validate streaming, tables, and a mermaid diagram.",
+            assistant: complexAssistantResponses[1]
+        ),
+        AutoTurn(
+            user: "Stress long-form wrapping with lists.",
+            assistant: complexAssistantResponses[2]
+        ),
+        AutoTurn(
+            user: "Show a quick checklist with a quote and code.",
+            assistant: complexAssistantResponses[3]
+        ),
+        AutoTurn(
+            user: "Render a pipeline table and flowchart.",
+            assistant: complexAssistantResponses[4]
+        )
     ]
 
     static let draftSteps: [String] = [

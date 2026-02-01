@@ -130,6 +130,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             currentFont = style.baseFont
         }
         updateDocumentHeight(controller.totalHeight)
+        clampScrollIfNeeded()
         jumpButton.isHidden = !update.hasUnreadNewContent
 
         if update.heightDelta != 0,
@@ -141,6 +142,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         if update.shouldScrollToBottom {
             scrollToBottom(animated: false)
+            controller.updatePinnedState(distanceFromBottom: 0)
         } else if !didInitialScroll, update.totalHeight > 0 {
             scrollToBottom(animated: false)
             didInitialScroll = true
@@ -151,10 +153,24 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func updateDocumentHeight(_ height: CGFloat) {
-        let width = scrollView.contentView.bounds.width
-        let newFrame = CGRect(x: 0, y: 0, width: width, height: max(height, bounds.height))
+        let contentBounds = scrollView.contentView.bounds
+        let width = contentBounds.width
+        let minHeight = contentBounds.height
+        let newFrame = CGRect(x: 0, y: 0, width: width, height: max(height, minHeight))
         if metalView.frame != newFrame {
             metalView.frame = newFrame
+        }
+    }
+
+    private func clampScrollIfNeeded() {
+        guard let controller else { return }
+        let visibleRect = scrollView.contentView.bounds
+        let contentHeight = max(controller.totalHeight, visibleRect.height)
+        let maxOffset = max(0, contentHeight - visibleRect.height)
+        if visibleRect.origin.y > maxOffset {
+            let newOrigin = CGPoint(x: visibleRect.origin.x, y: maxOffset)
+            scrollView.contentView.setBoundsOrigin(newOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
 
@@ -170,7 +186,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func handleScroll() {
         guard let controller else { return }
         let visibleRect = scrollView.contentView.bounds
-        let maxOffset = max(0, metalView.frame.height - visibleRect.height)
+        let contentHeight = max(controller.totalHeight, visibleRect.height)
+        let maxOffset = max(0, contentHeight - visibleRect.height)
         let distanceFromBottom = maxOffset - visibleRect.origin.y
         controller.updatePinnedState(distanceFromBottom: distanceFromBottom)
         jumpButton.isHidden = !controller.state.hasUnreadNewContent
@@ -179,8 +196,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     public func scrollToBottom(animated: Bool) {
+        guard let controller else { return }
         let visibleRect = scrollView.contentView.bounds
-        let maxOffset = max(0, metalView.frame.height - visibleRect.height)
+        let contentHeight = max(controller.totalHeight, visibleRect.height)
+        let maxOffset = max(0, contentHeight - visibleRect.height)
         let newOrigin = CGPoint(x: visibleRect.origin.x, y: maxOffset)
         if animated {
             NSAnimationContext.runAnimationGroup { context in

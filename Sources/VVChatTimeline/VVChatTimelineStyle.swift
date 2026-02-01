@@ -20,6 +20,8 @@ public struct VVChatTimelineStyle {
     public var timestampTextColor: SIMD4<Float>
     public var loadingIndicatorTextColor: SIMD4<Float>
     public var userBubbleColor: SIMD4<Float>
+    public var userBubbleBorderColor: SIMD4<Float>
+    public var userBubbleBorderWidth: CGFloat
     public var userBubbleCornerRadius: CGFloat
     public var userBubbleInsets: VVInsets
     public var userBubbleMaxWidth: CGFloat
@@ -47,6 +49,8 @@ public struct VVChatTimelineStyle {
         timestampTextColor: SIMD4<Float>? = nil,
         loadingIndicatorTextColor: SIMD4<Float>? = nil,
         userBubbleColor: SIMD4<Float> = SIMD4(0.18, 0.2, 0.24, 1),
+        userBubbleBorderColor: SIMD4<Float> = SIMD4(0, 0, 0, 0),
+        userBubbleBorderWidth: CGFloat = 0,
         userBubbleCornerRadius: CGFloat = 14,
         userBubbleInsets: VVInsets = .init(top: 10, left: 12, bottom: 10, right: 12),
         userBubbleMaxWidth: CGFloat = 420,
@@ -81,6 +85,8 @@ public struct VVChatTimelineStyle {
         self.timestampTextColor = timestampTextColor ?? SIMD4(theme.textColor.x, theme.textColor.y, theme.textColor.z, 0.6)
         self.loadingIndicatorTextColor = loadingIndicatorTextColor ?? SIMD4(theme.textColor.x, theme.textColor.y, theme.textColor.z, 0.7)
         self.userBubbleColor = userBubbleColor
+        self.userBubbleBorderColor = userBubbleBorderColor
+        self.userBubbleBorderWidth = userBubbleBorderWidth
         self.userBubbleCornerRadius = userBubbleCornerRadius
         self.userBubbleInsets = userBubbleInsets
         self.userBubbleMaxWidth = userBubbleMaxWidth
