@@ -9,9 +9,9 @@ import VVMetalPrimitives
 import UniformTypeIdentifiers
 
 @main
-struct VVKitPlaygroundApp: App {
+struct VVDevKitPlaygroundApp: App {
     var body: some Scene {
-        WindowGroup("VVKit Playground") {
+        WindowGroup("VVDevKit Playground") {
             ContentView()
         }
         .windowStyle(.titleBar)
@@ -927,7 +927,7 @@ enum SampleData {
 
     static let jsonSample = """
     {
-      "name": "VVKit",
+      "name": "VVDevKit",
       "features": ["Code", "Markdown", "Chat"],
       "version": "0.1.0",
       "meta": {
@@ -938,9 +938,9 @@ enum SampleData {
     """
 
     static let markdownSample = """
-    # VVKit Markdown Demo
+    # VVDevKit Markdown Demo
 
-    VVKit renders markdown with Metal. This sample includes: **bold**, _italic_, `inline code`, and links.
+    VVDevKit renders markdown with Metal. This sample includes: **bold**, _italic_, `inline code`, and links.
 
     > Block quote with a second line.
 
@@ -1085,7 +1085,7 @@ enum SampleData {
     ]
 
     static let assistantMessages: [String] = [
-        "Sure! Here is a quick walkthrough of VVKit components and how they connect.",
+        "Sure! Here is a quick walkthrough of VVDevKit components and how they connect.",
         "Markdown supports tables, math, and mermaid diagrams. Try editing the sample.",
         "Inline blame is available when you provide blame info and enable it in configuration.",
         "The chat timeline is virtualized and follows streaming updates when pinned.",
@@ -1096,7 +1096,7 @@ enum SampleData {
     static let autoSimpleTurns: [AutoTurn] = [
         AutoTurn(
             user: "Can you show me the API surface?",
-            assistant: "Sure! Here is a quick walkthrough of VVKit components and how they connect."
+            assistant: "Sure! Here is a quick walkthrough of VVDevKit components and how they connect."
         ),
         AutoTurn(
             user: "Let's test markdown rendering with tables.",
@@ -1252,7 +1252,7 @@ enum SampleData {
     static func chatMessages() -> [VVChatMessage] {
         let now = Date()
         return [
-            VVChatMessage(role: .system, state: .final, content: "VVKit demo chat initialized.", timestamp: now),
+            VVChatMessage(role: .system, state: .final, content: "VVDevKit demo chat initialized.", timestamp: now),
             VVChatMessage(role: .user, state: .final, content: userMessages[0], timestamp: now.addingTimeInterval(5)),
             VVChatMessage(role: .assistant, state: .final, content: assistantMessages[0], timestamp: now.addingTimeInterval(10)),
             VVChatMessage(role: .user, state: .final, content: userMessages[1], timestamp: now.addingTimeInterval(15)),

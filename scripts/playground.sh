@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCHEME="VVKitPlayground"
+SCHEME="VVDevKitPlayground"
 CONFIG="${1:-Debug}"
 DERIVED_DATA="${ROOT_DIR}/build"
 DESTINATION="platform=macOS"
@@ -38,7 +38,7 @@ if [[ ! -d "${APP_PATH}" ]]; then
   <key>CFBundleName</key>
   <string>${SCHEME}</string>
   <key>CFBundleIdentifier</key>
-  <string>com.vvkit.${SCHEME}</string>
+  <string>com.vvdevkit.${SCHEME}</string>
   <key>CFBundleExecutable</key>
   <string>${SCHEME}</string>
   <key>CFBundlePackageType</key>

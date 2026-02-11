@@ -25,7 +25,7 @@ swift build --product TreeSitterPython
 
 ## Architecture
 
-VVKit is a Metal-based kit of reusable components and Swift code. The VVCode module provides the editor layer, with supporting modules for rendering, highlighting, Git, LSP, and Markdown:
+VVDevKit is a Metal-based kit of reusable components and Swift code. The VVCode module provides the editor layer, with supporting modules for rendering, highlighting, Git, LSP, and Markdown:
 
 ### Module Hierarchy
 

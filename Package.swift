@@ -29,8 +29,8 @@ let package = Package(
             targets: ["VVMarkdownDump"]
         ),
         .executable(
-            name: "VVKitPlayground",
-            targets: ["VVKitPlayground"]
+            name: "VVDevKitPlayground",
+            targets: ["VVDevKitPlayground"]
         ),
         // Individual dynamic grammar libraries - load on demand via DynamicGrammarLoader
         .library(name: "TreeSitterSwift", type: .dynamic, targets: ["TreeSitterSwift"]),
@@ -2132,14 +2132,14 @@ let package = Package(
             path: "Sources/VVMarkdownDump"
         ),
         .executableTarget(
-            name: "VVKitPlayground",
+            name: "VVDevKitPlayground",
             dependencies: [
                 "VVCode",
                 "VVMarkdown",
                 "VVChatTimeline",
                 "VVMetalPrimitives"
             ],
-            path: "Examples/VVKitPlayground"
+            path: "Examples/VVDevKitPlayground"
         ),
 
         // Tests

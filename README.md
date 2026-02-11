@@ -1,12 +1,12 @@
-# VVKit
+# VVDevKit
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-vivy--company-ea4aaa?logo=github)](https://github.com/sponsors/vivy-company)
 
-VVKit is a kit of Metal-based, reusable components, renderers, and document utilities for building macOS and iOS apps. It includes the VVCode editor, markdown rendering, Metal primitives, highlighting, Git integration, and LSP support.
+VVDevKit is a kit of Metal-based, reusable components, renderers, and document utilities for building macOS and iOS apps. It includes the VVCode editor, markdown rendering, Metal primitives, highlighting, Git integration, and LSP support.
 
 Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
-> **Note:** VVKit is experimental and under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
+> **Note:** VVDevKit is experimental and under active development. APIs may change and bugs are expected. A demo app will be available in a future release.
 
 The primary primitives module is `VVMetalPrimitives`, with supporting modules for rendering, highlighting, Git, LSP, and Markdown. Planned modules include `VVBook` for ebook workflows.
 
@@ -30,7 +30,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/vivy-company/VVKit", from: "0.1.0")
+    .package(url: "https://github.com/vivy-company/VVDevKit", from: "0.1.0")
 ]
 ```
 
