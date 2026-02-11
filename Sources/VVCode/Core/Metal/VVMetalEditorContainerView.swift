@@ -278,6 +278,15 @@ public final class VVMetalEditorContainerView: NSView {
         updateContentSize()
     }
 
+    override public func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.focusTextView()
+            }
+        }
+    }
+
     override public func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         updateContentSize()
@@ -571,6 +580,10 @@ public final class VVMetalEditorContainerView: NSView {
         selectionRanges = selections.map { $0.range }
         metalTextView.setSelection(selectionRanges)
         metalTextView.setSelectedLineRanges(selectionLineRanges(from: selectionRanges))
+        if let hiddenInputView, !selectionRanges.isEmpty {
+            let primary = max(0, min(primarySelectionIndex, selectionRanges.count - 1))
+            hiddenInputView.selectedRange = selectionRanges[primary]
+        }
 
         let cursorPositions = selections.map { selection -> (line: Int, column: Int) in
             lineMapPosition(forOffset: selection.cursor)
@@ -602,6 +615,7 @@ public final class VVMetalEditorContainerView: NSView {
         primarySelectionIndex = 0
         selectionRanges = [safeRange]
         metalTextView.setSelection(selectionRanges)
+        hiddenInputView?.selectedRange = safeRange
         delegate?.editorDidChangeSelection(safeRange)
 
         if updateAnchor {
@@ -1275,6 +1289,7 @@ public final class VVMetalEditorContainerView: NSView {
         updateSelectionsDisplay()
         notifyLSPDocumentChanged()
         updateCompletionFilter()
+        notifyTextDidChange()
     }
 
     private func applyMotion(extendSelection: Bool, _ transform: (Selection) -> Int) {
@@ -1381,6 +1396,10 @@ public final class VVMetalEditorContainerView: NSView {
 
         let newText = nsText as String
         textStorage = newText
+        textRevision &+= 1
+        searchCache = nil
+        metalTextView?.setSearchMatchRanges([])
+        metalTextView?.setActiveSearchMatch(nil)
         lineMap = LineMap(text: textStorage)
 
         if sorted.count == 1 {
@@ -1400,6 +1419,9 @@ public final class VVMetalEditorContainerView: NSView {
         highlightSyntax()
         updateContentSize()
         updateSelectionsDisplay()
+        notifyLSPDocumentChanged()
+        updateCompletionFilter()
+        notifyTextDidChange()
     }
 
     private func deleteForwardSelections() {
@@ -1455,6 +1477,10 @@ public final class VVMetalEditorContainerView: NSView {
 
         let newText = nsText as String
         textStorage = newText
+        textRevision &+= 1
+        searchCache = nil
+        metalTextView?.setSearchMatchRanges([])
+        metalTextView?.setActiveSearchMatch(nil)
         lineMap = LineMap(text: textStorage)
 
         if sorted.count == 1 {
@@ -1474,6 +1500,9 @@ public final class VVMetalEditorContainerView: NSView {
         highlightSyntax()
         updateContentSize()
         updateSelectionsDisplay()
+        notifyLSPDocumentChanged()
+        updateCompletionFilter()
+        notifyTextDidChange()
     }
 
     private func yankSelections(expandEmptyToChar: Bool) {
@@ -2208,6 +2237,12 @@ public final class VVMetalEditorContainerView: NSView {
         Task {
             await client.documentChanged(uri, changes: [VVTextChange.full(text)])
         }
+    }
+
+    private func notifyTextDidChange() {
+        delegate?.editorDidChangeText(textStorage)
+        onTextChange?(textStorage)
+        onTextChangeInternal?(textStorage)
     }
 
     private func triggerCompletion(triggerKind: VVCompletionTriggerKind, triggerCharacter: String?) {
@@ -3303,8 +3338,6 @@ extension VVMetalEditorContainerView: MetalTextViewDelegate {
             } else {
                 selectionMode = .character
                 setCursor(line: line, column: column)
-                selectionRanges = []
-                metalTextView.setSelection([])
                 setSelectionAnchor(line: line, column: column)
                 selectionAnchorRange = nil
             }

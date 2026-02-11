@@ -57,7 +57,7 @@ public struct VVChatTimelineStyle {
         headerSpacing: CGFloat = 6,
         footerSpacing: CGFloat = 6,
         loadingIndicatorText: String = "Typing…",
-        timelineInsets: VVInsets = .init(top: 12, left: 0, bottom: 12, right: 0),
+        timelineInsets: VVInsets = .init(top: 12, left: 0, bottom: 0, right: 0),
         messageSpacing: CGFloat = 10,
         userInsets: VVInsets = .init(top: 6, left: 16, bottom: 6, right: 16),
         assistantInsets: VVInsets = .init(top: 6, left: 16, bottom: 6, right: 16),
@@ -66,11 +66,17 @@ public struct VVChatTimelineStyle {
         backgroundColor: SIMD4<Float> = SIMD4(0.08, 0.09, 0.1, 1),
         renderedCacheLimit: Int = 200
     ) {
-        self.theme = theme
-        if let draftTheme {
-            self.draftTheme = draftTheme
-        } else {
+        func normalizedTheme(_ theme: MarkdownTheme) -> MarkdownTheme {
             var adjusted = theme
+            adjusted.contentPadding = 0
+            return adjusted
+        }
+
+        self.theme = normalizedTheme(theme)
+        if let draftTheme {
+            self.draftTheme = normalizedTheme(draftTheme)
+        } else {
+            var adjusted = normalizedTheme(theme)
             adjusted.textColor = SIMD4(theme.textColor.x, theme.textColor.y, theme.textColor.z, theme.textColor.w * 0.7)
             self.draftTheme = adjusted
         }

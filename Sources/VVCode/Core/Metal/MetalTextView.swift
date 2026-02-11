@@ -13,6 +13,7 @@ public final class MetalTextView: MTKView {
 
     // Use flipped coordinates (Y=0 at top) for proper AppKit integration
     override public var isFlipped: Bool { true }
+    override public var acceptsFirstResponder: Bool { false }
 
     // Set I-beam cursor for text editing
     override public func resetCursorRects() {
@@ -2726,7 +2727,7 @@ public final class MetalTextView: MTKView {
     override public func mouseDown(with event: NSEvent) {
         lastMouseModifiers = event.modifierFlags
         lastClickCount = event.clickCount
-        window?.makeFirstResponder(self)
+        requestTextInputFocus()
         let locationInView = convert(event.locationInWindow, from: nil)
         if handleSearchOverlayMouseDown(at: locationInView) {
             return
@@ -2758,6 +2759,18 @@ public final class MetalTextView: MTKView {
         }
         locationInView = clampSelectionPoint(locationInView)
         textDelegate?.metalTextView(self, didDragTo: locationInView)
+    }
+
+    private func requestTextInputFocus() {
+        var responder: NSResponder? = self
+        while let next = responder?.nextResponder {
+            if let container = next as? VVMetalEditorContainerView {
+                container.focusTextView()
+                return
+            }
+            responder = next
+        }
+        window?.makeFirstResponder(self)
     }
 
     private func clampSelectionPoint(_ point: CGPoint) -> CGPoint {

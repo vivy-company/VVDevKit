@@ -15,9 +15,6 @@ public final class HiddenInputView: NSTextView {
     public var selectedRangeProvider: (() -> NSRange)?
     public var markedRangeProvider: (() -> NSRange?)?
 
-    // Text storage for input handling
-    private var pendingText: String = ""
-
     // MARK: - Initialization
 
     public init() {
@@ -74,7 +71,6 @@ public final class HiddenInputView: NSTextView {
     // MARK: - Text Input
 
     override public func insertText(_ insertString: Any, replacementRange: NSRange) {
-        super.insertText(insertString, replacementRange: replacementRange)
         let text: String
         if let str = insertString as? String {
             text = str
@@ -136,12 +132,10 @@ public final class HiddenInputView: NSTextView {
         }
 
         inputDelegate?.hiddenInputView(self, didSetMarkedText: text, selectedRange: selectedRange, replacementRange: replacementRange)
-        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
     }
 
     override public func unmarkText() {
         inputDelegate?.hiddenInputViewDidUnmarkText(self)
-        super.unmarkText()
     }
 
     override public func hasMarkedText() -> Bool {
@@ -341,11 +335,6 @@ public final class HiddenInputView: NSTextView {
     override public func keyDown(with event: NSEvent) {
         // Check for custom key bindings
         if inputDelegate?.hiddenInputView(self, shouldHandleKeyDown: event) == true {
-            return
-        }
-
-        // Let the input context handle it (for IME)
-        if inputContext?.handleEvent(event) == true {
             return
         }
 
