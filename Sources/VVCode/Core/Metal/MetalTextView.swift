@@ -24,6 +24,7 @@ public final class MetalTextView: MTKView {
 
     public private(set) var renderer: MarkdownMetalRenderer!
     public private(set) var layoutEngine: TextLayoutEngine!
+    public var metalContext: VVMetalContext?
 
 
     // Text content
@@ -38,7 +39,7 @@ public final class MetalTextView: MTKView {
 
     // Syntax highlighting
     private var coloredRanges: [ColoredRange] = []
-    private var defaultTextColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
+    private var defaultTextColor: SIMD4<Float> = .white
     private var backgroundColor: NSColor = .black
     private var bracketMatchRanges: [NSRange] = []
     private var searchMatchRanges: [NSRange] = []
@@ -72,6 +73,26 @@ public final class MetalTextView: MTKView {
     private var foldRangeByStartLine: [Int: MetalGutterFoldRange] = [:]
     private var foldedStartLines: Set<Int> = []
     private var gitHunks: [MetalGutterGitHunk] = []
+    private var diffOverlayHunks: [MetalDiffOverlayHunk] = []
+    private var cachedDiffOverlayHunks: [MetalDiffOverlayHunk] = []
+    private var diffOverlayHitAreas: [DiffOverlayHitArea] = []
+    private var showsDiffOverlayHunks: Bool = true
+    private var hoveredDiffOverlayHunkID: String? {
+        didSet {
+            if oldValue != hoveredDiffOverlayHunkID {
+                onDiffOverlayHover?(hoveredDiffOverlayHunkID)
+                scheduleRedraw()
+            }
+        }
+    }
+    private var hoveredDiffOverlayAction: (hunkID: String, action: DiffOverlayAction)? {
+        didSet {
+            if oldValue?.hunkID != hoveredDiffOverlayAction?.hunkID
+                || oldValue?.action != hoveredDiffOverlayAction?.action {
+                scheduleRedraw()
+            }
+        }
+    }
     private var selectedLineRanges: [ClosedRange<Int>] = []
     private var hoveredFoldLine: Int? {
         didSet {
@@ -114,8 +135,12 @@ public final class MetalTextView: MTKView {
     private var searchOverlayTextRuns: [VVTextRunPrimitive] = []
     private var completionTextRuns: [VVTextRunPrimitive] = []
     private var blameTextRuns: [VVTextRunPrimitive] = []
+    private var diffOverlayTextRuns: [VVTextRunPrimitive] = []
 
     private var gutterQuads: [VVQuadPrimitive] = []
+    private var diffOverlayGradientQuads: [VVGradientQuadPrimitive] = []
+    private var diffOverlayQuads: [VVQuadPrimitive] = []
+    private var diffOverlayLines: [VVLinePrimitive] = []
     private var lineHighlightQuads: [VVQuadPrimitive] = []
     private var indentGuideQuads: [VVQuadPrimitive] = []
     private var activeIndentGuideQuads: [VVQuadPrimitive] = []
@@ -306,6 +331,18 @@ public final class MetalTextView: MTKView {
         case openDocuments
     }
 
+    public enum DiffOverlayAction: Hashable, Sendable {
+        case comment
+        case copy
+        case toggleFold
+    }
+
+    private struct DiffOverlayHitArea {
+        let hunkID: String
+        let action: DiffOverlayAction?
+        let rect: CGRect
+    }
+
     private enum SearchOverlayAction: Hashable {
         case field
         case toggleCase
@@ -358,27 +395,32 @@ public final class MetalTextView: MTKView {
     // Delegates
     public weak var textDelegate: MetalTextViewDelegate?
     public var onToggleFold: ((Int) -> Void)?
+    public var onDiffOverlayAction: ((String, DiffOverlayAction) -> Void)?
+    public var onDiffOverlayHover: ((String?) -> Void)?
 
     public private(set) var lastMouseModifiers: NSEvent.ModifierFlags = []
     public private(set) var lastClickCount: Int = 0
 
     // MARK: - Initialization
 
-    public init(frame: CGRect, device: MTLDevice, font: NSFont) {
+    public init(frame: CGRect, device: MTLDevice, font: NSFont, metalContext: VVMetalContext? = nil) {
+        self.metalContext = metalContext ?? VVMetalContext.shared
         super.init(frame: frame, device: device)
         commonInit(font: font)
     }
 
     required init(coder: NSCoder) {
+        self.metalContext = VVMetalContext.shared
         super.init(coder: coder)
-        if let device = MTLCreateSystemDefaultDevice() {
-            self.device = device
+        let device = metalContext?.device ?? MTLCreateSystemDefaultDevice()
+        self.device = device
+        if device != nil {
             commonInit(font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular))
         }
     }
 
     private func commonInit(font: NSFont) {
-        guard let device = self.device else { return }
+        guard self.device != nil else { return }
         currentFont = font
 
         // Configure MTKView
@@ -397,10 +439,10 @@ public final class MetalTextView: MTKView {
         }
 
         // Initialize primitive renderer
-        do {
-            renderer = try MarkdownMetalRenderer(device: device, baseFont: font, scaleFactor: layerScale)
-        } catch {
-            print("Failed to initialize MarkdownMetalRenderer: \(error)")
+        if let ctx = metalContext {
+            renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: layerScale)
+        } else {
+            print("Failed to initialize MarkdownMetalRenderer: no VVMetalContext available")
             return
         }
 
@@ -528,6 +570,38 @@ public final class MetalTextView: MTKView {
 
     public func setGitHunks(_ hunks: [MetalGutterGitHunk]) {
         gitHunks = hunks
+        scheduleRedraw()
+    }
+
+    public func setDiffOverlayHunks(_ hunks: [MetalDiffOverlayHunk]) {
+        cachedDiffOverlayHunks = hunks.sorted { lhs, rhs in
+            if lhs.startLine == rhs.startLine {
+                return lhs.endLine < rhs.endLine
+            }
+            return lhs.startLine < rhs.startLine
+        }
+        applyCachedDiffOverlayHunks()
+    }
+
+    public func setShowsDiffOverlayHunks(_ show: Bool) {
+        guard showsDiffOverlayHunks != show else { return }
+        showsDiffOverlayHunks = show
+        applyCachedDiffOverlayHunks()
+    }
+
+    private func applyCachedDiffOverlayHunks() {
+        if showsDiffOverlayHunks {
+            diffOverlayHunks = cachedDiffOverlayHunks
+            if let hovered = hoveredDiffOverlayHunkID,
+               !diffOverlayHunks.contains(where: { $0.id == hovered }) {
+                hoveredDiffOverlayHunkID = nil
+                hoveredDiffOverlayAction = nil
+            }
+        } else {
+            diffOverlayHunks.removeAll(keepingCapacity: true)
+            hoveredDiffOverlayHunkID = nil
+            hoveredDiffOverlayAction = nil
+        }
         scheduleRedraw()
     }
 
@@ -958,6 +1032,7 @@ public final class MetalTextView: MTKView {
 
     private func buildScene() -> VVScene {
         prepareGutterBatches()
+        prepareDiffOverlayBatches()
         prepareGlyphBatch()
         prepareIndentGuideBatch()
         prepareActiveIndentGuideBatch()
@@ -975,20 +1050,24 @@ public final class MetalTextView: MTKView {
         var scene = VVScene()
 
         appendQuads(gutterQuads, to: &scene, zIndex: 1)
-        appendQuads(lineHighlightQuads, to: &scene, zIndex: 2)
-        appendQuads(indentGuideQuads, to: &scene, zIndex: 3)
-        appendQuads(activeIndentGuideQuads, to: &scene, zIndex: 4)
-        appendQuads(searchMatchQuads, to: &scene, zIndex: 5)
-        appendQuads(activeSearchMatchQuads, to: &scene, zIndex: 6)
-        appendQuads(selectionQuads, to: &scene, zIndex: 7)
-        appendQuads(bracketMatchQuads, to: &scene, zIndex: 8)
+        appendGradientQuads(diffOverlayGradientQuads, to: &scene, zIndex: 2)
+        appendQuads(diffOverlayQuads, to: &scene, zIndex: 3)
+        appendLines(diffOverlayLines, to: &scene, zIndex: 4)
+        appendQuads(lineHighlightQuads, to: &scene, zIndex: 5)
+        appendQuads(indentGuideQuads, to: &scene, zIndex: 6)
+        appendQuads(activeIndentGuideQuads, to: &scene, zIndex: 7)
+        appendQuads(searchMatchQuads, to: &scene, zIndex: 8)
+        appendQuads(activeSearchMatchQuads, to: &scene, zIndex: 9)
+        appendQuads(selectionQuads, to: &scene, zIndex: 10)
+        appendQuads(bracketMatchQuads, to: &scene, zIndex: 11)
 
-        appendTextRuns(contentTextRuns, to: &scene, zIndex: 10)
-        appendTextRuns(gutterTextRuns, to: &scene, zIndex: 11)
-        appendTextRuns(blameTextRuns, to: &scene, zIndex: 12)
+        appendTextRuns(contentTextRuns, to: &scene, zIndex: 12)
+        appendTextRuns(gutterTextRuns, to: &scene, zIndex: 13)
+        appendTextRuns(diffOverlayTextRuns, to: &scene, zIndex: 14)
+        appendTextRuns(blameTextRuns, to: &scene, zIndex: 15)
 
-        appendQuads(markedTextQuads, to: &scene, zIndex: 13)
-        appendQuads(cursorQuads, to: &scene, zIndex: 14)
+        appendQuads(markedTextQuads, to: &scene, zIndex: 16)
+        appendQuads(cursorQuads, to: &scene, zIndex: 17)
 
         appendQuads(statusBarQuads, to: &scene, zIndex: 20)
         appendTextRuns(statusBarTextRuns, to: &scene, zIndex: 21)
@@ -1005,6 +1084,18 @@ public final class MetalTextView: MTKView {
     private func appendQuads(_ quads: [VVQuadPrimitive], to scene: inout VVScene, zIndex: Int) {
         for quad in quads {
             scene.add(kind: .quad(quad), zIndex: zIndex)
+        }
+    }
+
+    private func appendGradientQuads(_ quads: [VVGradientQuadPrimitive], to scene: inout VVScene, zIndex: Int) {
+        for quad in quads {
+            scene.add(kind: .gradientQuad(quad), zIndex: zIndex)
+        }
+    }
+
+    private func appendLines(_ lines: [VVLinePrimitive], to scene: inout VVScene, zIndex: Int) {
+        for line in lines {
+            scene.add(kind: .line(line), zIndex: zIndex)
         }
     }
 
@@ -1078,6 +1169,9 @@ public final class MetalTextView: MTKView {
                 renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
             }
 
+        case .gradientQuad(let quad):
+            renderGradientQuad(quad, encoder: encoder, renderer: renderer)
+
         case .line(let line):
             let minX = min(line.start.x, line.end.x)
             let minY = min(line.start.y, line.end.y)
@@ -1129,8 +1223,8 @@ public final class MetalTextView: MTKView {
             }
 
         case .image(let image):
-            let borderColor = SIMD4<Float>(0.35, 0.35, 0.35, 1.0)
-            let background = SIMD4<Float>(0.12, 0.12, 0.12, 1.0)
+            let borderColor: SIMD4<Float> = .gray(0.35)
+            let background: SIMD4<Float> = .gray(0.12)
             let border = QuadInstance(
                 position: SIMD2<Float>(Float(image.frame.origin.x), Float(image.frame.origin.y)),
                 size: SIMD2<Float>(Float(image.frame.width), Float(image.frame.height)),
@@ -1184,7 +1278,80 @@ public final class MetalTextView: MTKView {
 
         case .textRun:
             break
+
+        case .underline(let underline):
+            let instance = LineInstance(
+                position: SIMD2<Float>(Float(underline.origin.x), Float(underline.origin.y)),
+                width: Float(underline.width),
+                height: Float(underline.thickness),
+                color: underline.color
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .path:
+            break
         }
+    }
+
+    private func renderGradientQuad(
+        _ gradient: VVGradientQuadPrimitive,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
+        let stepCount = max(2, min(48, gradient.steps))
+        let frame = gradient.frame.integral
+        guard frame.width > 0, frame.height > 0 else { return }
+
+        var instances: [QuadInstance] = []
+        instances.reserveCapacity(stepCount)
+
+        switch gradient.direction {
+        case .horizontal:
+            let segmentWidth = frame.width / CGFloat(stepCount)
+            for index in 0..<stepCount {
+                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
+                let x = frame.minX + CGFloat(index) * segmentWidth
+                let width = index == stepCount - 1 ? max(0, frame.maxX - x) : segmentWidth + 0.75
+                guard width > 0 else { continue }
+                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
+                instances.append(
+                    QuadInstance(
+                        position: SIMD2<Float>(Float(x), Float(frame.minY)),
+                        size: SIMD2<Float>(Float(width), Float(frame.height)),
+                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
+                        cornerRadius: Float(cornerRadius)
+                    )
+                )
+            }
+
+        case .vertical:
+            let segmentHeight = frame.height / CGFloat(stepCount)
+            for index in 0..<stepCount {
+                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
+                let y = frame.minY + CGFloat(index) * segmentHeight
+                let height = index == stepCount - 1 ? max(0, frame.maxY - y) : segmentHeight + 0.75
+                guard height > 0 else { continue }
+                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
+                instances.append(
+                    QuadInstance(
+                        position: SIMD2<Float>(Float(frame.minX), Float(y)),
+                        size: SIMD2<Float>(Float(frame.width), Float(height)),
+                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
+                        cornerRadius: Float(cornerRadius)
+                    )
+                )
+            }
+        }
+
+        guard !instances.isEmpty, let buffer = renderer.makeBuffer(for: instances) else { return }
+        renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: gradient.cornerRadius > 0)
+    }
+
+    private func lerpColor(_ start: SIMD4<Float>, _ end: SIMD4<Float>, t: Float) -> SIMD4<Float> {
+        let clamped = max(0, min(1, t))
+        return start + (end - start) * clamped
     }
 
     private func appendTextPrimitive(
@@ -1238,7 +1405,7 @@ public final class MetalTextView: MTKView {
         if let fontName = glyph.fontName {
             return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
         }
-        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize)
+        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
     private func toLayoutFontVariant(_ variant: VVFontVariant) -> VVMarkdown.FontVariant {
@@ -1326,10 +1493,25 @@ public final class MetalTextView: MTKView {
 
     override public func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.acceptsMouseMovedEvents = true
-        updateBackingScaleFactor()
+        if window != nil {
+            window?.acceptsMouseMovedEvents = true
+            updateBackingScaleFactor()
+            updateDrawableSize()
+            updateCursorBlinkTimer()
+        } else {
+            releaseDrawables()
+        }
+    }
+
+    override public func viewDidHide() {
+        super.viewDidHide()
+        releaseDrawables()
+    }
+
+    override public func viewDidUnhide() {
+        super.viewDidUnhide()
         updateDrawableSize()
-        updateCursorBlinkTimer()
+        setNeedsDisplay(bounds)
     }
 
     override public func viewDidChangeBackingProperties() {
@@ -1380,11 +1562,8 @@ public final class MetalTextView: MTKView {
     }
 
     private func rebuildRenderer(for font: NSFont) {
-        guard let device = device else { return }
-        do {
-            renderer = try MarkdownMetalRenderer(device: device, baseFont: font, scaleFactor: backingScaleFactor)
-        } catch {
-            print("Failed to rebuild MarkdownMetalRenderer: \(error)")
+        if let ctx = metalContext {
+            renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: backingScaleFactor)
         }
     }
 
@@ -1705,6 +1884,278 @@ public final class MetalTextView: MTKView {
 
     // MARK: - Batch Preparation
 
+    private func prepareDiffOverlayBatches() {
+        diffOverlayGradientQuads.removeAll(keepingCapacity: true)
+        diffOverlayQuads.removeAll(keepingCapacity: true)
+        diffOverlayLines.removeAll(keepingCapacity: true)
+        diffOverlayTextRuns.removeAll(keepingCapacity: true)
+        diffOverlayHitAreas.removeAll(keepingCapacity: true)
+
+        guard showsDiffOverlayHunks, !diffOverlayHunks.isEmpty else { return }
+
+        let lineHeight = layoutEngine.calculatedLineHeight
+        guard lineHeight > 0 else { return }
+
+        let visible = visibleLineRange(scrollOffset: scrollOffset.y, height: effectiveViewportHeight)
+        guard visible.first <= visible.last else { return }
+
+        let laneStartX = scrollOffset.x + max(0, gutterWidth - 1) + 2
+        let connectorStartX = scrollOffset.x + max(0, gutterWidth - 2)
+        let laneWidth: CGFloat = 8
+        let badgeFont = NSFont.monospacedSystemFont(ofSize: max(10, gutterFont.pointSize - 0.5), weight: .medium)
+        let actionFont = NSFont.monospacedSystemFont(ofSize: max(9, gutterFont.pointSize - 1.5), weight: .semibold)
+
+        for hunk in diffOverlayHunks {
+            if hunk.endLine < visible.first {
+                continue
+            }
+            if hunk.startLine > visible.last {
+                break
+            }
+            let startLine = max(hunk.startLine, visible.first)
+            let endLine = min(hunk.endLine, visible.last)
+            guard startLine <= endLine else { continue }
+
+            let topY = scrollOffset.y + textInsets.top + CGFloat(startLine) * lineHeight
+            let bottomY = scrollOffset.y + textInsets.top + CGFloat(endLine + 1) * lineHeight
+            let laneHeight = max(1, bottomY - topY - 2)
+            guard laneHeight > 0 else { continue }
+
+            let colors = diffOverlayColors(for: hunk.status)
+            let laneFrame = CGRect(
+                x: laneStartX + 2,
+                y: topY + 1,
+                width: laneWidth,
+                height: laneHeight
+            )
+            let isHoveredHunk = hoveredDiffOverlayHunkID == hunk.id
+            if isHoveredHunk {
+                let hoveredCodeFrame = CGRect(
+                    x: scrollOffset.x + textInsets.left + 4,
+                    y: topY + 1,
+                    width: max(120, min(bounds.width - textInsets.left - 18, maxLineWidth + 18)),
+                    height: laneHeight
+                )
+                diffOverlayQuads.append(
+                    VVQuadPrimitive(
+                        frame: hoveredCodeFrame,
+                        color: SIMD4<Float>(colors.accent.x, colors.accent.y, colors.accent.z, 0.07),
+                        cornerRadius: 4
+                    )
+                )
+                diffOverlayQuads.append(
+                    contentsOf: VVShadowQuadPrimitive(
+                        frame: laneFrame,
+                        color: colors.shadow,
+                        cornerRadius: 3,
+                        spread: 5,
+                        steps: 4
+                    ).expandedQuads()
+                )
+            }
+            diffOverlayHitAreas.append(
+                DiffOverlayHitArea(
+                    hunkID: hunk.id,
+                    action: nil,
+                    rect: CGRect(
+                        x: laneFrame.minX - 6,
+                        y: laneFrame.minY - 2,
+                        width: max(170, min(420, bounds.width * 0.55)),
+                        height: laneFrame.height + 4
+                    )
+                )
+            )
+
+            if isHoveredHunk {
+                diffOverlayGradientQuads.append(
+                    VVGradientQuadPrimitive(
+                        frame: laneFrame,
+                        startColor: colors.surfaceStart,
+                        endColor: colors.surfaceEnd,
+                        direction: .vertical,
+                        cornerRadius: 3,
+                        steps: 10
+                    )
+                )
+            }
+
+            diffOverlayQuads.append(
+                VVQuadPrimitive(
+                    frame: CGRect(
+                        x: laneStartX,
+                        y: topY + 1,
+                        width: 2,
+                        height: laneHeight
+                    ),
+                    color: colors.accent,
+                    cornerRadius: 1
+                )
+            )
+
+            let connectorY = topY + min(lineHeight * 0.5, laneHeight * 0.5)
+            diffOverlayLines.append(
+                VVLinePrimitive(
+                    start: CGPoint(x: connectorStartX, y: connectorY),
+                    end: CGPoint(x: laneStartX, y: connectorY),
+                    thickness: 1,
+                    color: colors.connector
+                )
+            )
+
+            let rawBadgeText = diffOverlayBadgeText(for: hunk)
+            let badgeText = rawBadgeText.count > 44
+                ? String(rawBadgeText.prefix(44)) + "..."
+                : rawBadgeText
+            guard !badgeText.isEmpty else { continue }
+
+            let baselineY = baselineY(forLine: startLine)
+                ?? (textInsets.top + CGFloat(startLine) * lineHeight + layoutEngine.calculatedBaselineOffset)
+            let baselineWithScroll = baselineY + scrollOffset.y
+            let textWidth = overlayTextWidth(badgeText, font: badgeFont)
+            let badgePaddingX: CGFloat = 6
+            let badgeWidth = min(max(96, textWidth + badgePaddingX * 2), max(160, min(320, bounds.width * 0.4)))
+            let badgeHeight = max(12, lineHeight - 5)
+            let badgeX = scrollOffset.x + max(textInsets.left + 64, bounds.width - badgeWidth - 18)
+            let badgeY = baselineWithScroll - layoutEngine.calculatedBaselineOffset + max(1, (lineHeight - badgeHeight) * 0.45)
+
+            diffOverlayQuads.append(
+                VVQuadPrimitive(
+                    frame: CGRect(x: badgeX, y: badgeY, width: badgeWidth, height: badgeHeight),
+                    color: colors.badge,
+                    cornerRadius: min(6, badgeHeight / 2)
+                )
+            )
+
+            if let textRun = makeTextRun(
+                badgeText,
+                baselineY: baselineWithScroll,
+                x: badgeX + badgePaddingX,
+                color: colors.badgeText,
+                font: badgeFont,
+                fontVariant: .monospace
+            ) {
+                diffOverlayTextRuns.append(textRun)
+            }
+
+            guard isHoveredHunk else { continue }
+
+            let actions: [DiffOverlayAction] = [.comment, .copy, .toggleFold]
+            let buttonSize = min(max(14, lineHeight - 8), 20)
+            let buttonSpacing: CGFloat = 4
+            let totalWidth = CGFloat(actions.count) * buttonSize + CGFloat(max(0, actions.count - 1)) * buttonSpacing
+            let actionStartX = max(badgeX + 4, badgeX + badgeWidth - totalWidth - 4)
+            let actionY = laneFrame.minY + 2
+
+            for (actionIndex, action) in actions.enumerated() {
+                let buttonX = actionStartX + CGFloat(actionIndex) * (buttonSize + buttonSpacing)
+                let buttonRect = CGRect(
+                    x: buttonX,
+                    y: actionY,
+                    width: buttonSize,
+                    height: buttonSize
+                )
+                let isHoveredAction = hoveredDiffOverlayAction?.hunkID == hunk.id
+                    && hoveredDiffOverlayAction?.action == action
+
+                diffOverlayHitAreas.append(
+                    DiffOverlayHitArea(
+                        hunkID: hunk.id,
+                        action: action,
+                        rect: buttonRect
+                    )
+                )
+
+                let buttonColor: SIMD4<Float> = isHoveredAction
+                    ? SIMD4<Float>(colors.accent.x, colors.accent.y, colors.accent.z, 0.36)
+                    : SIMD4<Float>(colors.accent.x, colors.accent.y, colors.accent.z, 0.2)
+
+                diffOverlayQuads.append(
+                    VVQuadPrimitive(
+                        frame: buttonRect,
+                        color: buttonColor,
+                        cornerRadius: min(5, buttonSize * 0.45)
+                    )
+                )
+                diffOverlayQuads.append(
+                    contentsOf: VVShadowQuadPrimitive(
+                        frame: buttonRect,
+                        color: SIMD4<Float>(colors.accent.x, colors.accent.y, colors.accent.z, 0.2),
+                        cornerRadius: min(5, buttonSize * 0.45),
+                        spread: 4,
+                        steps: 4
+                    ).expandedQuads()
+                )
+
+                let label = diffOverlayActionLabel(action)
+                let labelWidth = overlayTextWidth(label, font: actionFont)
+                let labelX = buttonRect.minX + (buttonRect.width - labelWidth) / 2
+                let labelBaseline = buttonRect.minY + (buttonRect.height - actionFont.pointSize) / 2 + actionFont.pointSize * 0.82
+
+                if let labelRun = makeTextRun(
+                    label,
+                    baselineY: labelBaseline,
+                    x: labelX,
+                    color: SIMD4<Float>(1, 1, 1, 0.95),
+                    font: actionFont,
+                    fontVariant: .monospace
+                ) {
+                    diffOverlayTextRuns.append(labelRun)
+                }
+            }
+        }
+    }
+
+    private func diffOverlayActionLabel(_ action: DiffOverlayAction) -> String {
+        switch action {
+        case .comment:
+            return "C"
+        case .copy:
+            return "Y"
+        case .toggleFold:
+            return "F"
+        }
+    }
+
+    private func diffOverlayColors(for status: MetalDiffOverlayHunk.Status) -> (
+        accent: SIMD4<Float>,
+        connector: SIMD4<Float>,
+        surfaceStart: SIMD4<Float>,
+        surfaceEnd: SIMD4<Float>,
+        badge: SIMD4<Float>,
+        badgeText: SIMD4<Float>,
+        shadow: SIMD4<Float>
+    ) {
+        let base: SIMD4<Float>
+        switch status {
+        case .added:
+            base = gitAddedColor.simdColor
+        case .modified:
+            base = gitModifiedColor.simdColor
+        case .deleted:
+            base = gitDeletedColor.simdColor
+        }
+
+        func tinted(_ alpha: Float) -> SIMD4<Float> {
+            SIMD4<Float>(base.x, base.y, base.z, alpha)
+        }
+
+        return (
+            accent: tinted(0.78),
+            connector: tinted(0.32),
+            surfaceStart: tinted(0.1),
+            surfaceEnd: tinted(0.02),
+            badge: tinted(0.2),
+            badgeText: SIMD4<Float>(1, 1, 1, 0.9),
+            shadow: tinted(0.1)
+        )
+    }
+
+    private func diffOverlayBadgeText(for hunk: MetalDiffOverlayHunk) -> String {
+        let fileName = (hunk.filePath as NSString).lastPathComponent
+        let changeLabel = "+\(max(0, hunk.addedLineCount)) -\(max(0, hunk.deletedLineCount))"
+        return "\(fileName) \(changeLabel)"
+    }
+
     private func prepareGutterBatches() {
         gutterQuads.removeAll(keepingCapacity: true)
         gutterTextRuns.removeAll(keepingCapacity: true)
@@ -1722,7 +2173,7 @@ public final class MetalTextView: MTKView {
         if let highlight = currentLineHighlightInfo() {
             let highlightRect = CGRect(
                 x: scrollOffset.x,
-                y: scrollOffset.y + highlight.y,
+                y: highlight.y,
                 width: gutterWidth,
                 height: highlight.height
             )
@@ -1731,7 +2182,7 @@ public final class MetalTextView: MTKView {
 
         if showsGitGutter && !gitHunks.isEmpty {
             let indicatorWidth = gutterIndicatorWidth
-            let indicatorX = gutterWidth - gutterSeparatorWidth - indicatorWidth
+            let indicatorX = scrollOffset.x
             for hunk in gitHunks {
                 let start = hunk.startLine
                 let end = hunk.startLine + max(0, hunk.lineCount - 1)
@@ -1748,8 +2199,8 @@ public final class MetalTextView: MTKView {
                 }
 
                 let y = textInsets.top + CGFloat(hunk.startLine) * layoutEngine.calculatedLineHeight
-                let quadX = scrollOffset.x + indicatorX
-                let quadY = scrollOffset.y + y
+                let quadX = indicatorX
+                let quadY = y
                 if hunk.status == .deleted {
                     let rect = CGRect(x: quadX, y: quadY, width: indicatorWidth, height: layoutEngine.calculatedLineHeight / 2)
                     gutterQuads.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
@@ -1796,7 +2247,7 @@ public final class MetalTextView: MTKView {
                 let isFolded = foldedStartLines.contains(lineIndex)
                 let isHovered = hoveredFoldLine == lineIndex
                 if isHovered {
-                    let bgX = foldMarkerAreaX + max(0, (foldMarkerAreaWidth - foldMetrics.hoverSize.width) / 2)
+                    let bgX = scrollOffset.x + foldMarkerAreaX + max(0, (foldMarkerAreaWidth - foldMetrics.hoverSize.width) / 2)
                     let bgY = baselineY - layoutEngine.calculatedBaselineOffset + (layoutEngine.calculatedLineHeight - foldMetrics.hoverSize.height) / 2
                     let rect = CGRect(x: bgX, y: bgY, width: foldMetrics.hoverSize.width, height: foldMetrics.hoverSize.height)
                     gutterQuads.append(VVQuadPrimitive(frame: rect, color: foldMarkerHoverBackgroundColor.simdColor, cornerRadius: foldMetrics.hoverCornerRadius))
@@ -1989,7 +2440,7 @@ public final class MetalTextView: MTKView {
         selectionQuads.removeAll(keepingCapacity: true)
 
         for range in selectionRanges {
-            // Convert range to line/column coordinates and create selection rects
+            guard range.length > 0 else { continue }
             let rects = rectsForRange(range)
             for rect in rects {
                 selectionQuads.append(VVQuadPrimitive(frame: rect, color: selectionColor.simdColor))
@@ -2524,15 +2975,14 @@ public final class MetalTextView: MTKView {
         let lineWidth = lineNumberColumnWidth
         let hasFoldMarkers = reserveFoldMarkerSpace || !foldRangeByStartLine.isEmpty
         let foldArea = hasFoldMarkers ? (foldMarkerSpacing + foldMarkerAreaWidth) : 0
-        let indicatorWidth = showsGitGutter ? gutterIndicatorWidth : 0
-        let calculated = ceil(gutterInsets.left + lineWidth + foldArea + gutterInsets.right + indicatorWidth + gutterSeparatorWidth)
+        let calculated = ceil(gutterInsets.left + lineWidth + foldArea + gutterInsets.right + gutterSeparatorWidth)
         return max(gutterMinimumWidth, calculated)
     }
 
     private func addGutterText(_ text: String, baselineY: CGFloat, color: NSColor, x: CGFloat? = nil) {
         let totalWidth = overlayTextWidth(text, font: gutterFont)
         let availableWidth = lineNumberColumnWidth
-        let startX = x ?? (gutterInsets.left + max(0, availableWidth - totalWidth))
+        let startX = scrollOffset.x + (x ?? (gutterInsets.left + max(0, availableWidth - totalWidth)))
         guard let run = makeTextRun(
             text,
             baselineY: baselineY,
@@ -2669,7 +3119,7 @@ public final class MetalTextView: MTKView {
     }
 
     private func glyphAdvance(for character: Character, fontSize: CGFloat, variant: VVMarkdown.FontVariant = .monospace) -> CGFloat {
-        guard let cached = renderer?.glyphAtlas.glyph(for: character, variant: variant, fontSize: fontSize) else {
+        guard let cached = renderer?.glyphAtlas.glyph(for: character, variant: variant, fontSize: fontSize, baseFont: renderer?.baseFont) else {
             return estimatedCharWidth
         }
         return cached.advance
@@ -2716,7 +3166,7 @@ public final class MetalTextView: MTKView {
 
     private func foldMarkerCharacter(isFolded: Bool) -> Character {
         let preferred: Character = isFolded ? "▾" : "▸"
-        if renderer?.glyphAtlas.glyph(for: preferred, variant: .monospace, fontSize: gutterFont.pointSize) != nil {
+        if renderer?.glyphAtlas.glyph(for: preferred, variant: .monospace, fontSize: gutterFont.pointSize, baseFont: renderer?.baseFont) != nil {
             return preferred
         }
         return isFolded ? "v" : ">"
@@ -2730,6 +3180,9 @@ public final class MetalTextView: MTKView {
         requestTextInputFocus()
         let locationInView = convert(event.locationInWindow, from: nil)
         if handleSearchOverlayMouseDown(at: locationInView) {
+            return
+        }
+        if handleDiffOverlayMouseDown(at: locationInView) {
             return
         }
         if handleGutterMouseDown(at: locationInView) {
@@ -2789,6 +3242,8 @@ public final class MetalTextView: MTKView {
 
     override public func mouseExited(with event: NSEvent) {
         hoveredFoldLine = nil
+        hoveredDiffOverlayHunkID = nil
+        hoveredDiffOverlayAction = nil
         if searchOverlayHoverAction != nil {
             searchOverlayHoverAction = nil
         }
@@ -2846,6 +3301,22 @@ public final class MetalTextView: MTKView {
         return true
     }
 
+    private func handleDiffOverlayMouseDown(at point: CGPoint) -> Bool {
+        guard !diffOverlayHitAreas.isEmpty else { return false }
+
+        let pointInScene = CGPoint(x: point.x + scrollOffset.x, y: point.y + scrollOffset.y)
+        guard let hit = diffOverlayHitAreas.first(where: { $0.rect.contains(pointInScene) }) else {
+            return false
+        }
+
+        hoveredDiffOverlayHunkID = hit.hunkID
+        hoveredDiffOverlayAction = hit.action.map { (hunkID: hit.hunkID, action: $0) }
+        guard let action = hit.action else { return false }
+
+        onDiffOverlayAction?(hit.hunkID, action)
+        return true
+    }
+
     private func updateSearchOverlayHover(at point: CGPoint) -> Bool {
         guard searchOverlayVisible, let overlayRect = searchOverlayRect else {
             if searchOverlayHoverAction != nil {
@@ -2876,8 +3347,13 @@ public final class MetalTextView: MTKView {
         let point = convert(event.locationInWindow, from: nil)
         if updateSearchOverlayHover(at: point) {
             hoveredFoldLine = nil
+            hoveredDiffOverlayHunkID = nil
+            hoveredDiffOverlayAction = nil
             return
         }
+
+        updateDiffOverlayHover(at: point)
+
         guard showsGutter, gutterWidth > 0 else {
             hoveredFoldLine = nil
             return
@@ -2908,6 +3384,30 @@ public final class MetalTextView: MTKView {
         }
 
         hoveredFoldLine = line
+    }
+
+    private func updateDiffOverlayHover(at point: CGPoint) {
+        guard !diffOverlayHitAreas.isEmpty else {
+            hoveredDiffOverlayHunkID = nil
+            hoveredDiffOverlayAction = nil
+            return
+        }
+
+        if statusBarEnabled && point.y > bounds.height - statusBarTotalHeight {
+            hoveredDiffOverlayHunkID = nil
+            hoveredDiffOverlayAction = nil
+            return
+        }
+
+        let pointInScene = CGPoint(x: point.x + scrollOffset.x, y: point.y + scrollOffset.y)
+        guard let hit = diffOverlayHitAreas.first(where: { $0.rect.contains(pointInScene) }) else {
+            hoveredDiffOverlayHunkID = nil
+            hoveredDiffOverlayAction = nil
+            return
+        }
+
+        hoveredDiffOverlayHunkID = hit.hunkID
+        hoveredDiffOverlayAction = hit.action.map { (hunkID: hit.hunkID, action: $0) }
     }
 
     // MARK: - Hit Testing
@@ -2964,7 +3464,8 @@ public final class MetalTextView: MTKView {
                     let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
                         for: Character(" "),
                         variant: .regular,
-                        fontSize: currentFont.pointSize
+                        fontSize: currentFont.pointSize,
+                        baseFont: renderer?.baseFont
                     )?.advance ?? 8
                     endX = startX + spaceWidth
                 }

@@ -258,13 +258,14 @@ public struct VVLanguage: Hashable, Sendable, Identifiable {
     public static let html = VVLanguage(identifier: "html", displayName: "HTML", fileExtensions: ["html", "htm"])
     public static let css = VVLanguage(identifier: "css", displayName: "CSS", fileExtensions: ["css"])
     public static let bash = VVLanguage(identifier: "bash", displayName: "Bash", fileExtensions: ["sh", "bash", "zsh"])
+    public static let diff = VVLanguage(identifier: "diff", displayName: "Diff", fileExtensions: ["diff", "patch"])
     public static let sql = VVLanguage(identifier: "sql", displayName: "SQL", fileExtensions: ["sql"])
     public static let toml = VVLanguage(identifier: "toml", displayName: "TOML", fileExtensions: ["toml"])
     public static let dockerfile = VVLanguage(identifier: "dockerfile", displayName: "Dockerfile", fileExtensions: ["dockerfile"])
 
     public static let allLanguages: [VVLanguage] = [
         .swift, .rust, .typescript, .javascript, .python, .go, .c, .cpp,
-        .json, .yaml, .markdown, .html, .css, .bash, .sql, .toml, .dockerfile
+        .json, .yaml, .markdown, .html, .css, .bash, .diff, .sql, .toml, .dockerfile
     ]
 
     // MARK: - Detection

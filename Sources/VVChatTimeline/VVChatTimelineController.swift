@@ -83,9 +83,14 @@ public final class VVChatTimelineController {
     }
 
     public func setMessages(_ newMessages: [VVChatMessage], scrollToBottom: Bool = true) {
+        draftThrottler.cancel()
+        activeDraftID = nil
         messages = newMessages
         messageImageURLs.removeAll(keepingCapacity: true)
         imageURLToMessageIDs.removeAll(keepingCapacity: true)
+        if scrollToBottom {
+            state.hasUnreadNewContent = false
+        }
         rebuildLayouts(shouldScrollToBottom: scrollToBottom)
     }
 
@@ -111,6 +116,9 @@ public final class VVChatTimelineController {
     }
 
     public func beginStreamingAssistantMessage(id: String = UUID().uuidString, content: String = "") -> String {
+        if activeDraftID != nil && activeDraftID != id {
+            draftThrottler.cancel()
+        }
         let message = VVChatMessage(id: id, role: .assistant, state: .draft, content: content, revision: 0)
         activeDraftID = id
         appendMessage(message)
@@ -124,12 +132,22 @@ public final class VVChatTimelineController {
             activeDraftID = id
             draftThrottler.schedule(content) { [weak self] text in
                 Task { @MainActor in
-                    self?.applyDraftUpdate(id: id, content: text)
+                    guard let self else { return }
+                    guard self.activeDraftID == id else { return }
+                    self.applyDraftUpdate(id: id, content: text)
                 }
             }
         } else {
             applyDraftUpdate(id: id, content: content)
         }
+    }
+
+    public func appendToDraftMessage(id: String, chunk: String, throttle: Bool = false) {
+        guard !chunk.isEmpty else { return }
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard messages[index].state == .draft else { return }
+        let appended = messages[index].content + chunk
+        updateDraftMessage(id: id, content: appended, throttle: throttle)
     }
 
     public func finalizeMessage(id: String, content: String) {
@@ -138,6 +156,7 @@ public final class VVChatTimelineController {
         messages[index].content = content
         messages[index].revision += 1
         if activeDraftID == id {
+            draftThrottler.cancel()
             activeDraftID = nil
         }
         updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: true)
@@ -157,6 +176,7 @@ public final class VVChatTimelineController {
     public func jumpToLatest() {
         state.hasUnreadNewContent = false
         state.isPinnedToBottom = true
+        state.userIsInteracting = false
         let update = Update(
             totalHeight: totalHeight,
             shouldScrollToBottom: true,
@@ -190,6 +210,7 @@ public final class VVChatTimelineController {
 
     private func applyDraftUpdate(id: String, content: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard messages[index].state == .draft else { return }
         messages[index].content = content
         messages[index].revision += 1
         updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: true)
@@ -197,7 +218,7 @@ public final class VVChatTimelineController {
 
     private func updateMessageLayout(at index: Int, shouldScrollToBottom: Bool, markUnread: Bool) {
         let message = messages[index]
-        let shouldFollow = shouldScrollToBottom || (message.state == .draft && state.isPinnedToBottom)
+        let shouldFollow = shouldScrollToBottom
         let renderedMessage = renderer.renderedMessage(for: message)
         updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
         let oldHeight = layouts[index].frame.height

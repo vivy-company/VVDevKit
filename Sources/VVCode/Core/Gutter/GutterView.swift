@@ -108,10 +108,6 @@ public class GutterView: NSView {
 
         var newWidth = size.width + lineNumberPadding * 2
 
-        if showGitGutter {
-            newWidth += gitGutterWidth + 2
-        }
-
         newWidth += separatorWidth
 
         // Update width constraint if needed
@@ -225,7 +221,7 @@ public class GutterView: NSView {
         ]
 
         let size = (string as NSString).size(withAttributes: attributes)
-        let x = bounds.width - size.width - lineNumberPadding - separatorWidth - (showGitGutter ? gitGutterWidth + 2 : 0)
+        let x = bounds.width - size.width - lineNumberPadding - separatorWidth
         let y = lineRect.origin.y + (lineRect.height - size.height) / 2
 
         (string as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: attributes)
@@ -246,19 +242,21 @@ public class GutterView: NSView {
 
         let indicatorRect: NSRect
 
+        let indicatorX: CGFloat = 0
+
         if status == .deleted {
             // Draw a triangle for deleted lines
             indicatorRect = NSRect(
-                x: bounds.width - separatorWidth - gitGutterWidth - 1,
+                x: indicatorX,
                 y: lineRect.origin.y,
                 width: gitGutterWidth,
                 height: 6
             )
 
             let path = NSBezierPath()
-            path.move(to: NSPoint(x: indicatorRect.minX, y: indicatorRect.midY))
-            path.line(to: NSPoint(x: indicatorRect.maxX, y: indicatorRect.minY))
-            path.line(to: NSPoint(x: indicatorRect.maxX, y: indicatorRect.maxY))
+            path.move(to: NSPoint(x: indicatorRect.maxX, y: indicatorRect.midY))
+            path.line(to: NSPoint(x: indicatorRect.minX, y: indicatorRect.minY))
+            path.line(to: NSPoint(x: indicatorRect.minX, y: indicatorRect.maxY))
             path.close()
 
             color.setFill()
@@ -266,7 +264,7 @@ public class GutterView: NSView {
         } else {
             // Draw a bar for added/modified lines
             indicatorRect = NSRect(
-                x: bounds.width - separatorWidth - gitGutterWidth - 1,
+                x: indicatorX,
                 y: lineRect.origin.y + 2,
                 width: gitGutterWidth,
                 height: lineRect.height - 4

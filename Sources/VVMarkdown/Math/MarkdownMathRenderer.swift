@@ -246,7 +246,7 @@ public final class MarkdownMathRenderer: @unchecked Sendable {
 
     // MARK: - Initialization
 
-    public init(mathColor: SIMD4<Float> = SIMD4(0.8, 0.6, 1.0, 1.0)) {
+    public init(mathColor: SIMD4<Float> = .rgba(0.8, 0.6, 1.0)) {
         self.mathColor = mathColor
     }
 

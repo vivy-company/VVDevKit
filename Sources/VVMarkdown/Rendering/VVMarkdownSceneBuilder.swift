@@ -16,7 +16,7 @@ struct VVMarkdownSceneBuilder {
     let layoutEngine: MarkdownLayoutEngine
     let contentWidth: CGFloat
     let scale: CGFloat
-    let componentProvider: MarkdownComponentProvider?
+    let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
     let highlightedCodeBlocks: [String: HighlightedCodeBlock]
     let copiedBlockId: String?
@@ -41,46 +41,43 @@ struct VVMarkdownSceneBuilder {
             layoutEngine: layoutEngine,
             contentWidth: layout.contentWidth
         )
-        let componentFactory = VVMarkdownComponentFactory(builder: self)
-        let defaultFactory: (LayoutBlock) -> VVComponent = { block in
-            componentFactory.component(for: block)
+        let viewFactory = VVMarkdownViewFactory(builder: self)
+        let defaultViewFactory: (LayoutBlock) -> any VVView = { block in
+            viewFactory.view(for: block)
         }
+
         for block in layout.blocks {
-            let component = componentProvider?(block, context, defaultFactory) ?? defaultFactory(block)
-            let styledComponent = componentFactory.applyStyleRegistry(to: component, for: block)
-            let measured = styledComponent.measure(in: env, width: layout.contentWidth)
-            builder.add(node: measured.node)
+            let view = viewProvider?(block, context, defaultViewFactory) ?? defaultViewFactory(block)
+            let styledView = viewFactory.applyStyleRegistryView(to: view, for: block)
+            let viewLayout = styledView.layout(in: env, constraint: VVLayoutConstraint(maxWidth: layout.contentWidth))
+            builder.add(node: viewLayout.node)
         }
         return builder.scene
     }
 
-    fileprivate func makeBlockComponent(for block: LayoutBlock) -> VVComponent {
+    fileprivate func makeBlockView(for block: LayoutBlock) -> any VVView {
         let clipRect = CGRect(origin: .zero, size: block.frame.size)
         switch block.content {
         case .text(let runs):
             let primitives = makeTextRunPrimitives(runs, relativeTo: block.frame)
-            let textComponent = VVTextBlockComponent(runs: primitives)
-            return VVFrameComponent(frame: block.frame, child: textComponent, clipRect: clipRect)
+            let textView = VVTextBlockView(runs: primitives)
+            return VVPositionedFrame(frame: block.frame, child: textView, clipRect: clipRect)
         case .inline(let runs, let images):
-            let textComponent = VVTextBlockComponent(runs: makeTextRunPrimitives(runs, relativeTo: block.frame))
-            let imageComponents = images.map { makeInlineImageComponent($0, relativeTo: block.frame) }
-            let layer = VVLayerComponent(children: [textComponent] + imageComponents)
-            return VVFrameComponent(frame: block.frame, child: layer, clipRect: clipRect)
+            let textView = VVTextBlockView(runs: makeTextRunPrimitives(runs, relativeTo: block.frame))
+            let imageViews: [any VVView] = images.map { makeInlineImageView($0, relativeTo: block.frame) }
+            let layer = VVZStack(children: [textView] + imageViews)
+            return VVPositionedFrame(frame: block.frame, child: layer, clipRect: clipRect)
         case .imageRow(let images):
-            let imageComponents = images.map { makeInlineImageComponent($0, relativeTo: block.frame) }
-            let layer = VVLayerComponent(children: imageComponents)
-            return VVFrameComponent(frame: block.frame, child: layer, clipRect: clipRect)
+            let imageViews: [any VVView] = images.map { makeInlineImageView($0, relativeTo: block.frame) }
+            let layer = VVZStack(children: imageViews)
+            return VVPositionedFrame(frame: block.frame, child: layer, clipRect: clipRect)
         case .image(let url, _, let size):
             let imageSize = size ?? block.frame.size
-            let imageComponent = VVImageComponent(url: url, size: imageSize, cornerRadius: 4)
-            return VVFrameComponent(frame: block.frame, child: imageComponent, clipRect: clipRect)
+            let imageView = VVImage(url: url, size: imageSize, cornerRadius: 4)
+            return VVPositionedFrame(frame: block.frame, child: imageView, clipRect: clipRect)
         case .thematicBreak:
-            let line = VVRuleComponent(
-                thickness: 2,
-                color: theme.thematicBreakColor,
-                inset: 20
-            )
-            return VVFrameComponent(frame: block.frame, child: line, clipRect: clipRect)
+            let divider = VDivider(thickness: 2, color: theme.thematicBreakColor, inset: 20)
+            return VVPositionedFrame(frame: block.frame, child: divider, clipRect: clipRect)
         case .code(let code, let language, let lines):
             var codeBuilder = VVSceneBuilder()
             appendCodeBlockPrimitives(
@@ -92,65 +89,43 @@ struct VVMarkdownSceneBuilder {
                 to: &codeBuilder
             )
             let codeNode = localizedNode(from: codeBuilder.scene, blockFrame: block.frame)
-            let component = VVPrimitiveComponent(node: codeNode, size: block.frame.size)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .quoteBlocks:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .listItems:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .tableRows:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .definitionList:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .abbreviationList:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .math:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
-        case .mermaid:
-            let component = makePrimitiveComponent(for: block)
-            return VVFrameComponent(frame: block.frame, child: component, clipRect: clipRect)
+            let nodeView = VVNodeView(node: codeNode, size: block.frame.size)
+            return VVPositionedFrame(frame: block.frame, child: nodeView, clipRect: clipRect)
+        case .quoteBlocks, .listItems, .tableRows, .definitionList, .abbreviationList, .math, .mermaid:
+            let nodeView = makeNodeView(for: block)
+            return VVPositionedFrame(frame: block.frame, child: nodeView, clipRect: clipRect)
         }
     }
 
-    private func makePrimitiveComponent(for block: LayoutBlock) -> VVPrimitiveComponent {
+    private func makeNodeView(for block: LayoutBlock) -> VVNodeView {
         var builder = VVSceneBuilder()
         appendBlock(block, to: &builder)
         let node = localizedNode(from: builder.scene, blockFrame: block.frame)
-        return VVPrimitiveComponent(node: node, size: block.frame.size)
+        return VVNodeView(node: node, size: block.frame.size)
     }
 
-    fileprivate func applyStyleRegistry(to component: VVComponent, for block: LayoutBlock) -> VVComponent {
-        guard let registry = styleRegistry else { return component }
+    fileprivate func applyStyleRegistryView(to view: any VVView, for block: LayoutBlock) -> any VVView {
+        guard let registry = styleRegistry else { return view }
         let style = registry.style(for: block.blockType)
-        var wrapped: VVComponent = component
+        var result: any VVView = view
         if let backgroundColor = style.backgroundColor {
             let cornerRadius = style.cornerRadius ?? 0
-            let background = VVQuadPrimitive(frame: CGRect(origin: .zero, size: block.frame.size), color: backgroundColor, cornerRadius: cornerRadius)
-            let backgroundNode = VVNode(primitives: [.quad(background)])
-            wrapped = VVLayerComponent(children: [VVAbsoluteComponent(frame: CGRect(origin: .zero, size: block.frame.size), child: backgroundNode), wrapped])
+            result = result.background(color: backgroundColor, cornerRadius: cornerRadius)
         }
         if let borderColor = style.borderColor, let borderWidth = style.borderWidth, borderWidth > 0 {
             let cornerRadius = style.cornerRadius ?? 0
-            let borderQuad = VVQuadPrimitive(frame: CGRect(origin: .zero, size: block.frame.size), color: borderColor, cornerRadius: cornerRadius)
-            let borderNode = VVNode(primitives: [.quad(borderQuad)])
-            wrapped = VVLayerComponent(children: [VVAbsoluteComponent(frame: CGRect(origin: .zero, size: block.frame.size), child: borderNode), wrapped])
+            result = result.border(color: borderColor, width: borderWidth, cornerRadii: VVCornerRadii(cornerRadius))
         }
         if style.padding.top != 0 || style.padding.left != 0 || style.padding.bottom != 0 || style.padding.right != 0 {
-            wrapped = VVInsetComponent(insets: style.padding, child: wrapped)
+            result = result.padding(top: style.padding.top, right: style.padding.right, bottom: style.padding.bottom, left: style.padding.left)
         }
-        return wrapped
+        return result
     }
 
-    private func makeInlineImageComponent(_ image: LayoutInlineImage, relativeTo frame: CGRect) -> VVComponent {
+    private func makeInlineImageView(_ image: LayoutInlineImage, relativeTo frame: CGRect) -> any VVView {
         let relativeFrame = image.frame.offsetBy(dx: -frame.origin.x, dy: -frame.origin.y)
-        let imageComponent = VVImageComponent(url: image.url, size: relativeFrame.size, cornerRadius: 4)
-        return VVFrameComponent(frame: relativeFrame, child: imageComponent)
+        let imageView = VVImage(url: image.url, size: relativeFrame.size, cornerRadius: 4)
+        return VVPositionedFrame(frame: relativeFrame, child: imageView)
     }
 
     private func makeTextRunPrimitives(_ runs: [LayoutTextRun], relativeTo frame: CGRect) -> [VVTextRunPrimitive] {
@@ -446,12 +421,11 @@ struct VVMarkdownSceneBuilder {
         let lineCount = maxLineNumber
         let gutterWidth = codeGutterWidth(for: maxLineNumber)
 
-        let bottomInset = max(0, cornerRadius - borderWidth)
         let gutterFrame = CGRect(
             x: innerFrame.minX,
             y: innerFrame.minY + headerHeight,
             width: gutterWidth,
-            height: max(0, innerFrame.height - headerHeight - bottomInset)
+            height: max(0, innerFrame.height - headerHeight)
         )
         let gutterQuad = VVQuadPrimitive(frame: gutterFrame, color: theme.codeGutterBackgroundColor, cornerRadius: 0)
         builder.add(VVPrimitive(kind: .quad(gutterQuad), clipRect: innerFrame))
@@ -506,10 +480,7 @@ struct VVMarkdownSceneBuilder {
         let baseLineHeight = layoutEngine.currentLineHeight
         let extraLeading = max(0, baseLineHeight - (baseAscent + baseDescent))
         let baselineOffset = baseAscent + extraLeading * 0.5
-        var clipFrame = frame.insetBy(dx: borderWidth, dy: borderWidth)
-        if bottomInset > 0 {
-            clipFrame.size.height = max(0, clipFrame.height - bottomInset)
-        }
+        let clipFrame = frame.insetBy(dx: borderWidth, dy: borderWidth)
 
         let availableWidth = max(24, innerFrame.width - padding * 2 - gutterWidth)
         let charWidth = max(1, layoutEngine.measureTextWidth("8", variant: .monospace))
@@ -645,10 +616,7 @@ struct VVMarkdownSceneBuilder {
         )
 
         let background = isCopied
-            ? SIMD4<Float>(min(1, theme.codeCopyButtonBackground.x + 0.08),
-                           min(1, theme.codeCopyButtonBackground.y + 0.08),
-                           min(1, theme.codeCopyButtonBackground.z + 0.08),
-                           theme.codeCopyButtonBackground.w)
+            ? theme.codeCopyButtonBackground.lighter(0.08)
             : theme.codeCopyButtonBackground
         let buttonQuad = VVQuadPrimitive(frame: buttonFrame, color: background, cornerRadius: CGFloat(theme.codeCopyButtonCornerRadius))
         builder.add(kind: .quad(buttonQuad))
@@ -823,7 +791,7 @@ struct VVMarkdownSceneBuilder {
 
     private func appendTablePrimitives(frame: CGRect, rows: [LayoutTableRow], to builder: inout VVSceneBuilder) {
         let borderWidth: CGFloat = 1
-        let inset = borderWidth + 1
+        let inset = borderWidth * 0.5
         let innerFrame = frame.insetBy(dx: inset, dy: inset)
         let backgroundClip = innerFrame
         let maxRadius = min(innerFrame.width, innerFrame.height) * 0.5
@@ -925,17 +893,17 @@ struct VVMarkdownSceneBuilder {
         let base: SIMD4<Float>
         switch kind {
         case .note:
-            base = SIMD4(0.36, 0.62, 1.0, 1.0)
+            base = .rgba(0.36, 0.62, 1.0)
         case .tip:
-            base = SIMD4(0.33, 0.78, 0.45, 1.0)
+            base = .rgba(0.33, 0.78, 0.45)
         case .important:
-            base = SIMD4(0.73, 0.55, 0.94, 1.0)
+            base = .rgba(0.73, 0.55, 0.94)
         case .warning:
-            base = SIMD4(0.94, 0.66, 0.25, 1.0)
+            base = .rgba(0.94, 0.66, 0.25)
         case .caution:
-            base = SIMD4(0.92, 0.35, 0.35, 1.0)
+            base = .rgba(0.92, 0.35, 0.35)
         }
-        let background = SIMD4(base.x * 0.18, base.y * 0.18, base.z * 0.18, 1.0)
+        let background = SIMD4<Float>(base.x * 0.18, base.y * 0.18, base.z * 0.18, 1.0)
         return (background, base, base)
     }
 
@@ -975,14 +943,14 @@ struct VVMarkdownSceneBuilder {
     }
 }
 
-fileprivate struct VVMarkdownComponentFactory {
+fileprivate struct VVMarkdownViewFactory {
     let builder: VVMarkdownSceneBuilder
 
-    func component(for block: LayoutBlock) -> VVComponent {
-        builder.makeBlockComponent(for: block)
+    func view(for block: LayoutBlock) -> any VVView {
+        builder.makeBlockView(for: block)
     }
 
-    func applyStyleRegistry(to component: VVComponent, for block: LayoutBlock) -> VVComponent {
-        builder.applyStyleRegistry(to: component, for: block)
+    func applyStyleRegistryView(to view: any VVView, for block: LayoutBlock) -> any VVView {
+        builder.applyStyleRegistryView(to: view, for: block)
     }
 }

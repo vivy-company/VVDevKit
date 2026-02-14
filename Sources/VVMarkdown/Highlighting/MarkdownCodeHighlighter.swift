@@ -184,7 +184,7 @@ public actor MarkdownCodeHighlighter {
 
     // MARK: - Initialization
 
-    public init(theme: HighlightTheme = .defaultDark, defaultColor: SIMD4<Float> = SIMD4(0.85, 0.85, 0.85, 1.0)) {
+    public init(theme: HighlightTheme = .defaultDark, defaultColor: SIMD4<Float> = .gray(0.85)) {
         self.theme = theme
         self.defaultColor = defaultColor
     }

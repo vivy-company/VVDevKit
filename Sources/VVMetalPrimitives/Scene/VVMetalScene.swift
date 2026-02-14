@@ -3,12 +3,15 @@ import CoreGraphics
 public enum VVPrimitiveKind: Hashable, Sendable {
     case textRun(VVTextRunPrimitive)
     case quad(VVQuadPrimitive)
+    case gradientQuad(VVGradientQuadPrimitive)
     case line(VVLinePrimitive)
+    case underline(VVUnderlinePrimitive)
     case bullet(VVBulletPrimitive)
     case image(VVImagePrimitive)
     case blockQuoteBorder(VVBlockQuoteBorderPrimitive)
     case tableLine(VVTableLinePrimitive)
     case pieSlice(VVPieSlicePrimitive)
+    case path(VVPathPrimitive)
 }
 
 public struct VVPrimitive: Hashable, Sendable {

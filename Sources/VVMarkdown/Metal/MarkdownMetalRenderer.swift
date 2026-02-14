@@ -205,174 +205,63 @@ public struct PieSliceInstance {
 
 // MARK: - Markdown Metal Renderer
 
-/// Metal renderer for markdown content
+/// Metal renderer for markdown content.
+///
+/// When created with a shared ``VVMetalContext``, the renderer is a lightweight
+/// per-view wrapper holding only triple-buffered uniform state.  All pipeline
+/// states, samplers, and the glyph atlas are owned by the context.
 public final class MarkdownMetalRenderer {
 
     // MARK: - Properties
 
-    public let device: MTLDevice
-    public let commandQueue: MTLCommandQueue
+    /// Shared context owning device, command queue, pipelines, samplers.
+    public let context: VVMetalContext
+
+    /// Shared glyph atlas (cached by scale factor in VVMetalContext).
     public let glyphAtlas: MarkdownGlyphAtlas
 
-    // Pipeline states
-    private var glyphPipeline: MTLRenderPipelineState!
-    private var colorGlyphPipeline: MTLRenderPipelineState!
-    private var quadPipeline: MTLRenderPipelineState!
-    private var roundedQuadPipeline: MTLRenderPipelineState!
-    private var bulletPipeline: MTLRenderPipelineState!
-    private var checkboxPipeline: MTLRenderPipelineState!
-    private var thematicBreakPipeline: MTLRenderPipelineState!
-    private var blockQuoteBorderPipeline: MTLRenderPipelineState!
-    private var tableGridPipeline: MTLRenderPipelineState!
-    private var linkUnderlinePipeline: MTLRenderPipelineState!
-    private var strikethroughPipeline: MTLRenderPipelineState!
-    private var imagePipeline: MTLRenderPipelineState!
-    private var pieSlicePipeline: MTLRenderPipelineState!
+    /// The base font this renderer was created with, used for variant-based glyph lookups.
+    public let baseFont: VVFont
 
-    // Image sampler
-    private var imageSamplerState: MTLSamplerState!
+    /// Forwarding accessors so existing call sites continue to compile.
+    public var device: MTLDevice { context.device }
+    public var commandQueue: MTLCommandQueue { context.commandQueue }
 
-    // Uniform buffers (triple buffered)
+    // Uniform buffers (triple buffered) – per-view
     private var uniformBuffers: [MTLBuffer] = []
     private var currentUniformBufferIndex = 0
     private let uniformBufferCount = 3
-
-    // Sampler
-    private var samplerState: MTLSamplerState!
 
     // Current uniforms
     public var uniforms = MarkdownUniforms()
 
     // MARK: - Initialization
 
-    public init(device: MTLDevice, baseFont: VVFont, scaleFactor: CGFloat = 2.0) throws {
-        self.device = device
+    /// Create a renderer backed by a shared context. The glyph atlas is shared
+    /// across renderers that use the same base font and scale factor.
+    public init(context: VVMetalContext, baseFont: VVFont, scaleFactor: CGFloat = 2.0) {
+        self.context = context
+        self.baseFont = baseFont
+        self.glyphAtlas = context.sharedAtlas(baseFont: baseFont, scaleFactor: scaleFactor)
+        setupUniformBuffers()
+    }
 
-        guard let queue = device.makeCommandQueue() else {
+    /// Legacy convenience: uses the process-wide shared ``VVMetalContext``.
+    public convenience init(device: MTLDevice, baseFont: VVFont, scaleFactor: CGFloat = 2.0) throws {
+        guard let ctx = VVMetalContext.shared else {
             throw MarkdownRendererError.failedToCreateCommandQueue
         }
-        self.commandQueue = queue
-        self.glyphAtlas = MarkdownGlyphAtlas(device: device, baseFont: baseFont, scaleFactor: scaleFactor)
-
-        try setupPipelines()
-        setupUniformBuffers()
-        setupSampler()
-    }
-
-    // MARK: - Pipeline Setup
-
-    private func setupPipelines() throws {
-        let library: MTLLibrary
-
-        // Try loading shader source from bundle (pure SPM builds)
-        if let source = Self.loadShaderSource() {
-            library = try device.makeLibrary(source: source, options: nil)
-        } else if let metallib = Self.loadMetalLibrary(device: device) {
-            // Try loading pre-compiled metallib from package bundle (Xcode builds SPM packages this way)
-            library = metallib
-        } else if let defaultLibrary = device.makeDefaultLibrary() {
-            // Try default library (Xcode project with .metal files in main target)
-            library = defaultLibrary
-        } else {
-            fatalError("MarkdownMetalRenderer: Could not load shader. Ensure MarkdownShaders.metal is included in package resources or compiled by Xcode.")
-        }
-
-        glyphPipeline = try createPipeline(library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownGlyphFragmentShader", label: "Markdown Glyph")
-        colorGlyphPipeline = try createPipeline(library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownColorGlyphFragmentShader", label: "Markdown Color Glyph")
-        quadPipeline = try createPipeline(library: library, vertex: "markdownQuadVertexShader", fragment: "markdownQuadFragmentShader", label: "Markdown Quad")
-        roundedQuadPipeline = try createPipeline(library: library, vertex: "markdownQuadVertexShader", fragment: "markdownRoundedQuadFragmentShader", label: "Markdown Rounded Quad")
-        bulletPipeline = try createPipeline(library: library, vertex: "bulletVertexShader", fragment: "bulletFragmentShader", label: "Bullet")
-        checkboxPipeline = try createPipeline(library: library, vertex: "checkboxVertexShader", fragment: "checkboxFragmentShader", label: "Checkbox")
-        thematicBreakPipeline = try createPipeline(library: library, vertex: "thematicBreakVertexShader", fragment: "thematicBreakFragmentShader", label: "Thematic Break")
-        blockQuoteBorderPipeline = try createPipeline(library: library, vertex: "blockQuoteBorderVertexShader", fragment: "blockQuoteBorderFragmentShader", label: "Block Quote Border")
-        tableGridPipeline = try createPipeline(library: library, vertex: "tableGridVertexShader", fragment: "tableGridFragmentShader", label: "Table Grid")
-        linkUnderlinePipeline = try createPipeline(library: library, vertex: "linkUnderlineVertexShader", fragment: "linkUnderlineFragmentShader", label: "Link Underline")
-        strikethroughPipeline = try createPipeline(library: library, vertex: "strikethroughVertexShader", fragment: "strikethroughFragmentShader", label: "Strikethrough")
-        imagePipeline = try createPipeline(library: library, vertex: "imageVertexShader", fragment: "imageFragmentShader", label: "Image")
-
-        pieSlicePipeline = try createPipeline(library: library, vertex: "pieSliceVertexShader", fragment: "pieSliceFragmentShader", label: "Pie Slice")
-    }
-
-    private static func loadShaderSource() -> String? {
-        #if SWIFT_PACKAGE
-        let bundle = Bundle.module
-        #else
-        let bundle = Bundle(for: MarkdownMetalRenderer.self)
-        #endif
-
-        guard let url = bundle.url(forResource: "MarkdownShaders", withExtension: "metal") else {
-            return nil
-        }
-
-        return try? String(contentsOf: url, encoding: .utf8)
-    }
-
-    private static func loadMetalLibrary(device: MTLDevice) -> MTLLibrary? {
-        #if SWIFT_PACKAGE
-        let bundle = Bundle.module
-        #else
-        let bundle = Bundle(for: MarkdownMetalRenderer.self)
-        #endif
-
-        // Xcode compiles .metal files to default.metallib
-        guard let url = bundle.url(forResource: "default", withExtension: "metallib") else {
-            return nil
-        }
-
-        return try? device.makeLibrary(URL: url)
-    }
-
-    private func createPipeline(library: MTLLibrary, vertex: String, fragment: String, label: String) throws -> MTLRenderPipelineState {
-        guard let vertexFn = library.makeFunction(name: vertex),
-              let fragmentFn = library.makeFunction(name: fragment) else {
-            throw MarkdownRendererError.failedToCreateShaderFunction(vertex)
-        }
-
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.label = label
-        descriptor.vertexFunction = vertexFn
-        descriptor.fragmentFunction = fragmentFn
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-
-        // Enable alpha blending
-        descriptor.colorAttachments[0].isBlendingEnabled = true
-        descriptor.colorAttachments[0].rgbBlendOperation = .add
-        descriptor.colorAttachments[0].alphaBlendOperation = .add
-        descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-        descriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
-        descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-
-        return try device.makeRenderPipelineState(descriptor: descriptor)
+        self.init(context: ctx, baseFont: baseFont, scaleFactor: scaleFactor)
     }
 
     private func setupUniformBuffers() {
         let size = MemoryLayout<MarkdownUniforms>.stride
         for _ in 0..<uniformBufferCount {
-            if let buffer = device.makeBuffer(length: size, options: .storageModeShared) {
+            if let buffer = context.device.makeBuffer(length: size, options: .storageModeShared) {
                 buffer.label = "Markdown Uniform Buffer"
                 uniformBuffers.append(buffer)
             }
         }
-    }
-
-    private func setupSampler() {
-        let descriptor = MTLSamplerDescriptor()
-        descriptor.minFilter = .nearest
-        descriptor.magFilter = .nearest
-        descriptor.mipFilter = .notMipmapped
-        descriptor.sAddressMode = .clampToEdge
-        descriptor.tAddressMode = .clampToEdge
-        samplerState = device.makeSamplerState(descriptor: descriptor)
-
-        // Image sampler with linear filtering for smooth scaling
-        let imageDescriptor = MTLSamplerDescriptor()
-        imageDescriptor.minFilter = .linear
-        imageDescriptor.magFilter = .linear
-        imageDescriptor.mipFilter = .linear
-        imageDescriptor.sAddressMode = .clampToEdge
-        imageDescriptor.tAddressMode = .clampToEdge
-        imageSamplerState = device.makeSamplerState(descriptor: imageDescriptor)
     }
 
     // MARK: - Frame Management
@@ -402,11 +291,11 @@ public final class MarkdownMetalRenderer {
     public func renderGlyphs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int, texture: MTLTexture) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(glyphPipeline)
+        encoder.setRenderPipelineState(context.glyphPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
         encoder.setFragmentTexture(texture, index: 0)
-        encoder.setFragmentSamplerState(samplerState, index: 0)
+        encoder.setFragmentSamplerState(context.samplerState, index: 0)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
     }
@@ -419,11 +308,11 @@ public final class MarkdownMetalRenderer {
     public func renderColorGlyphs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int, texture: MTLTexture) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(colorGlyphPipeline)
+        encoder.setRenderPipelineState(context.colorGlyphPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
         encoder.setFragmentTexture(texture, index: 0)
-        encoder.setFragmentSamplerState(samplerState, index: 0)
+        encoder.setFragmentSamplerState(context.samplerState, index: 0)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
     }
@@ -431,7 +320,7 @@ public final class MarkdownMetalRenderer {
     public func renderQuads(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int, rounded: Bool = false) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(rounded ? roundedQuadPipeline : quadPipeline)
+        encoder.setRenderPipelineState(rounded ? context.roundedQuadPipeline : context.quadPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
         if rounded {
@@ -444,7 +333,7 @@ public final class MarkdownMetalRenderer {
     public func renderBullets(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(bulletPipeline)
+        encoder.setRenderPipelineState(context.bulletPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -454,7 +343,7 @@ public final class MarkdownMetalRenderer {
     public func renderCheckboxes(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(checkboxPipeline)
+        encoder.setRenderPipelineState(context.checkboxPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -464,7 +353,7 @@ public final class MarkdownMetalRenderer {
     public func renderThematicBreaks(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(thematicBreakPipeline)
+        encoder.setRenderPipelineState(context.thematicBreakPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -474,7 +363,7 @@ public final class MarkdownMetalRenderer {
     public func renderBlockQuoteBorders(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(blockQuoteBorderPipeline)
+        encoder.setRenderPipelineState(context.blockQuoteBorderPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -484,7 +373,7 @@ public final class MarkdownMetalRenderer {
     public func renderTableGrid(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(tableGridPipeline)
+        encoder.setRenderPipelineState(context.tableGridPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -494,7 +383,7 @@ public final class MarkdownMetalRenderer {
     public func renderLinkUnderlines(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(linkUnderlinePipeline)
+        encoder.setRenderPipelineState(context.linkUnderlinePipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -504,7 +393,7 @@ public final class MarkdownMetalRenderer {
     public func renderStrikethroughs(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(strikethroughPipeline)
+        encoder.setRenderPipelineState(context.strikethroughPipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
 
@@ -514,11 +403,11 @@ public final class MarkdownMetalRenderer {
     public func renderImages(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int, texture: MTLTexture) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(imagePipeline)
+        encoder.setRenderPipelineState(context.imagePipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
         encoder.setFragmentTexture(texture, index: 0)
-        encoder.setFragmentSamplerState(imageSamplerState, index: 0)
+        encoder.setFragmentSamplerState(context.imageSamplerState, index: 0)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
     }
@@ -526,7 +415,7 @@ public final class MarkdownMetalRenderer {
     public func renderPieSlices(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
-        encoder.setRenderPipelineState(pieSlicePipeline)
+        encoder.setRenderPipelineState(context.pieSlicePipeline)
         encoder.setVertexBuffer(instances, offset: 0, index: 0)
         encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
         encoder.setFragmentBuffer(instances, offset: 0, index: 0)
@@ -538,9 +427,7 @@ public final class MarkdownMetalRenderer {
     // MARK: - Buffer Creation
 
     public func makeBuffer<T>(for instances: [T]) -> MTLBuffer? {
-        guard !instances.isEmpty else { return nil }
-        let size = MemoryLayout<T>.stride * instances.count
-        return device.makeBuffer(bytes: instances, length: size, options: .storageModeShared)
+        context.makeBuffer(for: instances)
     }
 
     // MARK: - Font Update

@@ -1,5 +1,6 @@
 #if canImport(SwiftUI) && os(macOS)
 import SwiftUI
+import VVMarkdown
 
 public struct VVChatTimelineViewRepresentable: NSViewRepresentable {
     public var controller: VVChatTimelineController

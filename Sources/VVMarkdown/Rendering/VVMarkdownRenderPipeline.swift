@@ -13,7 +13,7 @@ public struct VVMarkdownRenderPipeline {
     let theme: MarkdownTheme
     let layoutEngine: MarkdownLayoutEngine
     let scale: CGFloat
-    let componentProvider: MarkdownComponentProvider?
+    let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
     let highlightedCodeBlocks: [String: HighlightedCodeBlock]
     let copiedBlockId: String?
@@ -29,7 +29,7 @@ public struct VVMarkdownRenderPipeline {
         theme: MarkdownTheme,
         layoutEngine: MarkdownLayoutEngine,
         scale: CGFloat = 2.0,
-        componentProvider: MarkdownComponentProvider? = nil,
+        viewProvider: MarkdownViewProvider? = nil,
         styleRegistry: MarkdownStyleRegistry? = nil,
         highlightedCodeBlocks: [String: HighlightedCodeBlock] = [:],
         copiedBlockId: String? = nil,
@@ -39,7 +39,7 @@ public struct VVMarkdownRenderPipeline {
             theme: theme,
             layoutEngine: layoutEngine,
             scale: scale,
-            componentProvider: componentProvider,
+            viewProvider: viewProvider,
             styleRegistry: styleRegistry,
             highlightedCodeBlocks: highlightedCodeBlocks,
             copiedBlockId: copiedBlockId,
@@ -57,7 +57,7 @@ public struct VVMarkdownRenderPipeline {
         theme: MarkdownTheme,
         layoutEngine: MarkdownLayoutEngine,
         scale: CGFloat,
-        componentProvider: MarkdownComponentProvider?,
+        viewProvider: MarkdownViewProvider?,
         styleRegistry: MarkdownStyleRegistry?,
         highlightedCodeBlocks: [String: HighlightedCodeBlock],
         copiedBlockId: String?,
@@ -72,7 +72,7 @@ public struct VVMarkdownRenderPipeline {
         self.theme = theme
         self.layoutEngine = layoutEngine
         self.scale = scale
-        self.componentProvider = componentProvider
+        self.viewProvider = viewProvider
         self.styleRegistry = styleRegistry
         self.highlightedCodeBlocks = highlightedCodeBlocks
         self.copiedBlockId = copiedBlockId
@@ -91,7 +91,7 @@ public struct VVMarkdownRenderPipeline {
             layoutEngine: layoutEngine,
             contentWidth: layout.contentWidth,
             scale: scale,
-            componentProvider: componentProvider,
+            viewProvider: viewProvider,
             styleRegistry: styleRegistry,
             highlightedCodeBlocks: highlightedCodeBlocks,
             copiedBlockId: copiedBlockId,

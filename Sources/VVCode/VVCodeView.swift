@@ -4,6 +4,7 @@ import Combine
 import Metal
 import VVGit
 import VVLSP
+import VVMarkdown
 
 /// LSP connection status
 public enum VVLSPStatus: Equatable, Sendable {

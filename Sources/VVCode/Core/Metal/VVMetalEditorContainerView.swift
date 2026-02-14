@@ -154,6 +154,7 @@ public final class VVMetalEditorContainerView: NSView {
 
     // Cancellables
     private var cancellables = Set<AnyCancellable>()
+    private var lastVisibleLineRange: ClosedRange<Int>?
 
     // Delegate
     public weak var delegate: VVEditorDelegate?
@@ -162,6 +163,7 @@ public final class VVMetalEditorContainerView: NSView {
     public var onTextChange: ((String) -> Void)?
     public var onSelectionChange: (([NSRange]) -> Void)?
     public var onCursorChange: ((Int, Int) -> Void)?
+    public var onVisibleLineRangeChange: ((ClosedRange<Int>) -> Void)?
 
     // Callbacks (internal use)
     private var onTextChangeInternal: ((String) -> Void)?
@@ -170,9 +172,12 @@ public final class VVMetalEditorContainerView: NSView {
 
     // MARK: - Initialization
 
-    public init(frame: CGRect, configuration: VVConfiguration, theme: VVTheme) {
+    public var metalContext: VVMetalContext?
+
+    public init(frame: CGRect, configuration: VVConfiguration, theme: VVTheme, metalContext: VVMetalContext? = nil) {
         self._configuration = configuration
         self._theme = theme
+        self.metalContext = metalContext ?? VVMetalContext.shared
         super.init(frame: frame)
         setupViews()
         applyConfiguration()
@@ -182,6 +187,7 @@ public final class VVMetalEditorContainerView: NSView {
     required init?(coder: NSCoder) {
         self._configuration = VVConfiguration()
         self._theme = VVTheme.defaultDark
+        self.metalContext = VVMetalContext.shared
         super.init(coder: coder)
         setupViews()
         applyConfiguration()
@@ -203,7 +209,7 @@ public final class VVMetalEditorContainerView: NSView {
     }
 
     private func setupViews() {
-        guard let device = MTLCreateSystemDefaultDevice() else {
+        guard let device = metalContext?.device ?? MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this device")
         }
 
@@ -211,7 +217,8 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView = MetalTextView(
             frame: bounds,
             device: device,
-            font: _configuration.font
+            font: _configuration.font,
+            metalContext: metalContext
         )
         metalTextView.onContentSizeChange = { [weak self] in
             self?.updateContentSize()
@@ -476,6 +483,16 @@ public final class VVMetalEditorContainerView: NSView {
     /// Set git hunks for gutter display
     public func setGitHunks(_ hunks: [MetalGutterGitHunk]) {
         metalTextView.setGitHunks(hunks)
+    }
+
+    /// Set rich diff overlays for in-content hunk visualization.
+    public func setDiffOverlayHunks(_ hunks: [MetalDiffOverlayHunk]) {
+        metalTextView.setDiffOverlayHunks(hunks)
+    }
+
+    /// Enable or disable drawing diff overlay callouts.
+    public func setShowsDiffOverlayHunks(_ show: Bool) {
+        metalTextView?.setShowsDiffOverlayHunks(show)
     }
 
     // MARK: - Cursor and Selection
@@ -1603,6 +1620,7 @@ public final class VVMetalEditorContainerView: NSView {
 
         // Trigger visible-range-only highlighting
         scheduleScrollHighlight()
+        notifyVisibleLineRangeChanged()
     }
 
     // MARK: - Configuration
@@ -1773,6 +1791,7 @@ public final class VVMetalEditorContainerView: NSView {
         documentView.frame = CGRect(origin: .zero, size: documentSize)
 
         updateMetalViewport()
+        notifyVisibleLineRangeChanged()
     }
 
     @discardableResult
@@ -1783,6 +1802,20 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView.scrollOffset = visibleRect.origin
         metalTextView.frame = CGRect(origin: viewportOrigin, size: viewportSize)
         return visibleRect
+    }
+
+    private func notifyVisibleLineRangeChanged() {
+        let visible = metalTextView.visibleLineRange(
+            scrollOffset: scrollView.documentVisibleRect.origin.y,
+            height: scrollView.contentView.bounds.height
+        )
+        guard visible.first <= visible.last else { return }
+
+        let range = visible.first...visible.last
+        guard range != lastVisibleLineRange else { return }
+
+        lastVisibleLineRange = range
+        onVisibleLineRangeChange?(range)
     }
 
     private func scrollToRange(_ range: NSRange) {

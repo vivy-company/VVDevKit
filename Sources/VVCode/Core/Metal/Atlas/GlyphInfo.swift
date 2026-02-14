@@ -2,6 +2,7 @@ import Foundation
 import simd
 import CoreText
 import AppKit
+import VVMetalPrimitives
 
 // MARK: - GPU Data Structures
 
@@ -20,7 +21,7 @@ public struct GlyphInstance {
         size: SIMD2<Float> = .zero,
         uvOrigin: SIMD2<Float> = .zero,
         uvSize: SIMD2<Float> = .zero,
-        color: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1),
+        color: SIMD4<Float> = .white,
         atlasIndex: UInt32 = 0
     ) {
         self.position = position

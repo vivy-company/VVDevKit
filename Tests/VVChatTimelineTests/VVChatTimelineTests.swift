@@ -5,7 +5,11 @@ import XCTest
 final class VVChatTimelineTests: XCTestCase {
     func testPinnedStateUpdate() {
         var state = VVChatTimelineState(isPinnedToBottom: true, userIsInteracting: false, hasUnreadNewContent: false, pinThreshold: 24)
+        // Pinned state should detach quickly as user scrolls up from bottom.
         state.updatePinnedState(distanceFromBottom: 10)
+        XCTAssertFalse(state.isPinnedToBottom)
+        // Once detached, repin when close enough to bottom.
+        state.updatePinnedState(distanceFromBottom: 5)
         XCTAssertTrue(state.isPinnedToBottom)
         state.updatePinnedState(distanceFromBottom: 30)
         XCTAssertFalse(state.isPinnedToBottom)
@@ -34,6 +38,48 @@ final class VVChatTimelineTests: XCTestCase {
         XCTAssertFalse(controller.state.hasUnreadNewContent)
         controller.updateImageSize(url: "file:///tmp/test.png", size: CGSize(width: 120, height: 80))
         XCTAssertFalse(controller.state.hasUnreadNewContent)
+    }
+
+    func testDraftUpdateDoesNotAutoFollowWhileUserInteracting() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        var updates: [VVChatTimelineController.Update] = []
+        controller.onUpdate = { updates.append($0) }
+
+        let id = controller.beginStreamingAssistantMessage(content: "hello")
+        controller.markUserInteraction(true)
+        controller.updateDraftMessage(id: id, content: "hello world", throttle: false)
+
+        XCTAssertEqual(updates.last?.shouldScrollToBottom, false)
+    }
+
+    func testFinalizeCancelsPendingThrottledDraftUpdate() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        let id = controller.beginStreamingAssistantMessage(content: "h")
+
+        controller.updateDraftMessage(id: id, content: "hello", throttle: true)
+        controller.finalizeMessage(id: id, content: "final")
+
+        let flushed = expectation(description: "pending throttled updates flushed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            flushed.fulfill()
+        }
+        wait(for: [flushed], timeout: 1.0)
+
+        let message = controller.messages.first(where: { $0.id == id })
+        XCTAssertEqual(message?.state, .final)
+        XCTAssertEqual(message?.content, "final")
+    }
+
+    func testAppendToDraftMessageAppendsChunk() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        let id = controller.beginStreamingAssistantMessage(content: "Hello")
+
+        controller.appendToDraftMessage(id: id, chunk: " world", throttle: false)
+        controller.appendToDraftMessage(id: id, chunk: "!", throttle: false)
+
+        let message = controller.messages.first(where: { $0.id == id })
+        XCTAssertEqual(message?.content, "Hello world!")
+        XCTAssertEqual(message?.state, .draft)
     }
 }
 

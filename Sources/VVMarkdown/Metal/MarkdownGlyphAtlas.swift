@@ -54,6 +54,7 @@ private struct GlyphKey: Hashable {
     let glyphID: CGGlyph
     let fontVariant: FontVariant
     let fontSize: Int  // Scaled font size for cache key
+    let baseFontName: String  // Distinguishes same variant with different base fonts
 }
 
 private struct FontKey: Hashable {
@@ -65,6 +66,13 @@ private struct FontGlyphKey: Hashable {
     let glyphID: CGGlyph
     let fontKey: FontKey
 }
+
+private struct VariantFontKey: Hashable {
+    let baseFontName: String
+    let variant: FontVariant
+    let size: Int
+}
+
 // MARK: - Markdown Glyph Atlas
 
 /// Manages glyph texture atlases for markdown Metal text rendering
@@ -72,7 +80,7 @@ public final class MarkdownGlyphAtlas {
 
     // MARK: - Constants
 
-    public static let atlasSize = 4096
+    public static let atlasSize = 1024
     public static let glyphPadding = 2
 
     // MARK: - Properties
@@ -82,7 +90,7 @@ public final class MarkdownGlyphAtlas {
     private var colorAtlasPages: [MTLTexture] = []
     private var glyphCache: [GlyphKey: MarkdownCachedGlyph] = [:]
     private var fontGlyphCache: [FontGlyphKey: MarkdownCachedGlyph] = [:]
-    private var fonts: [FontVariant: [Int: CTFont]] = [:]  // Variant -> [fontSize -> font]
+    private var variantFontCache: [VariantFontKey: CTFont] = [:]
     private var fontCache: [FontKey: CTFont] = [:]
 
     private var baseFont: VVFont
@@ -106,33 +114,33 @@ public final class MarkdownGlyphAtlas {
         self.device = device
         self.baseFont = baseFont
         self.scaleFactor = scaleFactor
-        setupFontVariants()
-        createNewAtlasPage()
     }
 
-    private func setupFontVariants() {
-        fonts = [:]
-        for variant in [FontVariant.regular, .semibold, .semiboldItalic, .bold, .italic, .boldItalic, .monospace, .emoji] {
-            fonts[variant] = [:]
+    private func ensureAtlasPage() {
+        if atlasPages.isEmpty {
+            createNewAtlasPage()
         }
     }
 
-    private func fontFor(variant: FontVariant, size: CGFloat) -> CTFont {
+    private func fontFor(variant: FontVariant, size: CGFloat, baseFont override: VVFont? = nil) -> CTFont {
+        let resolvedBase = override ?? self.baseFont
         let scaledSize = size * scaleFactor
         let intSize = Int(scaledSize)
+        let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
+        let key = VariantFontKey(baseFontName: baseName, variant: variant, size: intSize)
 
-        if let cached = fonts[variant]?[intSize] {
+        if let cached = variantFontCache[key] {
             return cached
         }
 
         let font: CTFont
         switch variant {
         case .regular:
-            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
 
         case .semibold:
             #if canImport(AppKit)
-            let descriptor = baseFont.fontDescriptor.addingAttributes([
+            let descriptor = resolvedBase.fontDescriptor.addingAttributes([
                 NSFontDescriptor.AttributeName.traits: [
                     NSFontDescriptor.TraitKey.weight: NSFont.Weight.semibold
                 ]
@@ -140,10 +148,10 @@ public final class MarkdownGlyphAtlas {
             if let semiboldFont = NSFont(descriptor: descriptor, size: scaledSize) {
                 font = semiboldFont as CTFont
             } else {
-                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             }
             #else
-            let descriptor = baseFont.fontDescriptor.addingAttributes([
+            let descriptor = resolvedBase.fontDescriptor.addingAttributes([
                 UIFontDescriptor.AttributeName.traits: [
                     UIFontDescriptor.TraitKey.weight: UIFont.Weight.semibold
                 ]
@@ -154,7 +162,7 @@ public final class MarkdownGlyphAtlas {
 
         case .semiboldItalic:
             #if canImport(AppKit)
-            let descriptor = baseFont.fontDescriptor.addingAttributes([
+            let descriptor = resolvedBase.fontDescriptor.addingAttributes([
                 NSFontDescriptor.AttributeName.traits: [
                     NSFontDescriptor.TraitKey.weight: NSFont.Weight.semibold
                 ]
@@ -166,10 +174,10 @@ public final class MarkdownGlyphAtlas {
                     font = semiboldFont as CTFont
                 }
             } else {
-                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             }
             #else
-            let descriptor = baseFont.fontDescriptor.addingAttributes([
+            let descriptor = resolvedBase.fontDescriptor.addingAttributes([
                 UIFontDescriptor.AttributeName.traits: [
                     UIFontDescriptor.TraitKey.weight: UIFont.Weight.semibold
                 ]
@@ -186,37 +194,37 @@ public final class MarkdownGlyphAtlas {
         case .bold:
             #if canImport(AppKit)
             let manager = NSFontManager.shared
-            if let boldFont = manager.convert(baseFont, toHaveTrait: .boldFontMask) as CTFont? {
+            if let boldFont = manager.convert(resolvedBase, toHaveTrait: .boldFontMask) as CTFont? {
                 font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(boldFont), scaledSize, nil)
             } else {
-                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             }
             #else
-            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             #endif
 
         case .italic:
             #if canImport(AppKit)
             let manager = NSFontManager.shared
-            if let italicFont = manager.convert(baseFont, toHaveTrait: .italicFontMask) as CTFont? {
+            if let italicFont = manager.convert(resolvedBase, toHaveTrait: .italicFontMask) as CTFont? {
                 font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(italicFont), scaledSize, nil)
             } else {
-                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             }
             #else
-            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             #endif
 
         case .boldItalic:
             #if canImport(AppKit)
             let manager = NSFontManager.shared
-            if let boldItalicFont = manager.convert(baseFont, toHaveTrait: [.boldFontMask, .italicFontMask]) as CTFont? {
+            if let boldItalicFont = manager.convert(resolvedBase, toHaveTrait: [.boldFontMask, .italicFontMask]) as CTFont? {
                 font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(boldItalicFont), scaledSize, nil)
             } else {
-                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+                font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             }
             #else
-            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(baseFont as CTFont), scaledSize, nil)
+            font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(resolvedBase as CTFont), scaledSize, nil)
             #endif
 
         case .monospace:
@@ -224,16 +232,16 @@ public final class MarkdownGlyphAtlas {
             font = CTFontCreateWithFontDescriptor(CTFontCopyFontDescriptor(monoFont as CTFont), scaledSize, nil)
 
         case .emoji:
-            #if canImport(AppKit)
-            let emojiFont = NSFont(name: "AppleColorEmoji", size: scaledSize) ?? NSFont.systemFont(ofSize: scaledSize)
-            font = emojiFont as CTFont
-            #else
-            let emojiFont = UIFont(name: "AppleColorEmoji", size: scaledSize) ?? UIFont.systemFont(ofSize: scaledSize)
-            font = emojiFont as CTFont
-            #endif
+            // Use CTFontCreateForString to obtain the exact emoji font that CoreText
+            // assigns (e.g. .AppleColorEmojiUI). Glyph IDs from layout come from this
+            // same font, so reusing it avoids glyph-table mismatches that occur when
+            // creating AppleColorEmoji by name (different PostScript name / glyph IDs).
+            let probe: CFString = "😀" as CFString
+            let emojiRef = CTFontCreateForString(resolvedBase as CTFont, probe, CFRangeMake(0, CFStringGetLength(probe)))
+            font = CTFontCreateCopyWithAttributes(emojiRef, scaledSize, nil, nil)
         }
 
-        fonts[variant]?[intSize] = font
+        variantFontCache[key] = font
         return font
     }
 
@@ -262,30 +270,35 @@ public final class MarkdownGlyphAtlas {
 
     // MARK: - Public API
 
-    /// Get or create a cached glyph for rendering
-    public func glyph(for glyphID: CGGlyph, variant: FontVariant, fontSize: CGFloat) -> MarkdownCachedGlyph? {
+    /// Get or create a cached glyph for rendering.
+    /// Pass `baseFont` to correctly derive font variants when the atlas is shared across views with different base fonts.
+    public func glyph(for glyphID: CGGlyph, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+        let resolvedBase = baseFont ?? self.baseFont
+        let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
         let intSize = Int(fontSize * scaleFactor)
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize)
+        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontName: baseName)
 
         if let cached = glyphCache[key] {
             return cached
         }
 
         return queue.sync {
-            glyphUnsafe(for: glyphID, variant: variant, fontSize: fontSize)
+            glyphUnsafe(for: glyphID, variant: variant, fontSize: fontSize, baseFont: resolvedBase)
         }
     }
 
-    private func glyphUnsafe(for glyphID: CGGlyph, variant: FontVariant, fontSize: CGFloat) -> MarkdownCachedGlyph? {
+    private func glyphUnsafe(for glyphID: CGGlyph, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+        let resolvedBase = baseFont ?? self.baseFont
+        let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
         let intSize = Int(fontSize * scaleFactor)
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize)
+        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontName: baseName)
 
         if let cached = glyphCache[key] {
             return cached
         }
 
-        let font = fontFor(variant: variant, size: fontSize)
-        return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant, fontSize: fontSize)
+        let font = fontFor(variant: variant, size: fontSize, baseFont: resolvedBase)
+        return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant, fontSize: fontSize, baseFontName: baseName)
     }
 
     public func glyph(for glyphID: CGGlyph, font: CTFont, variant: FontVariant = .regular) -> MarkdownCachedGlyph? {
@@ -313,21 +326,22 @@ public final class MarkdownGlyphAtlas {
     }
 
     /// Get glyph for a character
-    public func glyph(for character: Character, variant: FontVariant, fontSize: CGFloat) -> MarkdownCachedGlyph? {
+    public func glyph(for character: Character, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
         return queue.sync {
-            glyphUnsafe(for: character, variant: variant, fontSize: fontSize)
+            glyphUnsafe(for: character, variant: variant, fontSize: fontSize, baseFont: baseFont)
         }
     }
 
-    private func glyphUnsafe(for character: Character, variant: FontVariant, fontSize: CGFloat) -> MarkdownCachedGlyph? {
-        let font = fontFor(variant: variant, size: fontSize)
+    private func glyphUnsafe(for character: Character, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+        let resolvedBase = baseFont ?? self.baseFont
+        let font = fontFor(variant: variant, size: fontSize, baseFont: resolvedBase)
 
         let text = String(character)
         var unichars = Array(text.utf16)
         var glyphs = [CGGlyph](repeating: 0, count: unichars.count)
 
         if CTFontGetGlyphsForCharacters(font, &unichars, &glyphs, unichars.count) {
-            return glyphUnsafe(for: glyphs[0], variant: variant, fontSize: fontSize)
+            return glyphUnsafe(for: glyphs[0], variant: variant, fontSize: fontSize, baseFont: resolvedBase)
         }
 
         let fallback = CTFontCreateForString(font, text as CFString, CFRangeMake(0, unichars.count))
@@ -368,19 +382,54 @@ public final class MarkdownGlyphAtlas {
     }
 
     /// Preload ASCII glyphs for fast startup
-    public func preloadASCII(fontSize: CGFloat) {
+    public func preloadASCII(fontSize: CGFloat, baseFont: VVFont? = nil) {
+        let resolvedBase = baseFont ?? self.baseFont
         queue.async { [weak self] in
             guard let self = self else { return }
 
-        for variant in [FontVariant.regular, .semibold, .semiboldItalic, .bold, .italic, .boldItalic, .monospace, .emoji] {
+        for variant in [FontVariant.regular, .bold, .monospace] {
             for codePoint in 32..<127 {
                 if let scalar = Unicode.Scalar(codePoint) {
-                    _ = self.glyphUnsafe(for: Character(scalar), variant: variant, fontSize: fontSize)
+                    _ = self.glyphUnsafe(for: Character(scalar), variant: variant, fontSize: fontSize, baseFont: resolvedBase)
                 }
             }
             }
         }
     }
+
+    /// Reclaim memory by dropping rasterized glyphs and extra atlas pages.
+    /// The next glyph request will re-rasterize on demand.
+    public func purge() {
+        queue.sync {
+            glyphCache.removeAll()
+            fontGlyphCache.removeAll()
+            variantFontCache.removeAll()
+            fontCache.removeAll()
+
+            // Keep one alpha and one color page, clear them
+            while atlasPages.count > 1 { atlasPages.removeLast() }
+            while colorAtlasPages.count > 1 { colorAtlasPages.removeLast() }
+
+            currentAtlasIndex = 0
+            packingX = Self.glyphPadding
+            packingY = Self.glyphPadding
+            rowHeight = 0
+
+            colorAtlasIndex = 0
+            colorPackingX = Self.glyphPadding
+            colorPackingY = Self.glyphPadding
+            colorRowHeight = 0
+        }
+    }
+
+    // MARK: - Diagnostics
+
+    /// Number of alpha atlas pages currently allocated.
+    public var alphaPageCount: Int { atlasPages.count }
+    /// Number of color atlas pages currently allocated.
+    public var colorPageCount: Int { colorAtlasPages.count }
+    /// Total number of cached glyph entries (variant-keyed + font-keyed).
+    public var cachedGlyphCount: Int { glyphCache.count + fontGlyphCache.count }
 
     /// Get the current atlas texture
     public var atlasTexture: MTLTexture? {
@@ -444,13 +493,27 @@ public final class MarkdownGlyphAtlas {
         colorRowHeight = 0
     }
 
-    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: FontVariant, fontSize: CGFloat, storeInVariantCache: Bool = true) -> MarkdownCachedGlyph? {
+    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: FontVariant, fontSize: CGFloat, storeInVariantCache: Bool = true, baseFontName: String? = nil) -> MarkdownCachedGlyph? {
         var glyph = glyphID
         var boundingRect = CGRect.zero
         CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &boundingRect, 1)
 
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+
+        // Color/emoji bitmap glyphs (sbix) may report zero bounding rects because
+        // the visual data lives in bitmap tables, not in glyph outlines.
+        // Fall back to font metrics so the glyph still gets rasterized.
+        let isColor = CTFontCreatePathForGlyph(font, glyphID, nil) == nil
+        if isColor && (boundingRect.width <= 0 || boundingRect.height <= 0) {
+            let ascent = CTFontGetAscent(font)
+            let descent = CTFontGetDescent(font)
+            let height = ascent + descent
+            let width = advance.width > 0 ? advance.width : height
+            if height > 0 {
+                boundingRect = CGRect(x: 0, y: -descent, width: width, height: height)
+            }
+        }
 
         let padding = CGFloat(Self.glyphPadding)
         let glyphWidth = Int(ceil(boundingRect.width + padding * 2))
@@ -467,8 +530,6 @@ public final class MarkdownGlyphAtlas {
                 advance: advance.width / scaleFactor
             )
         }
-
-        let isColor = CTFontCreatePathForGlyph(font, glyphID, nil) == nil
 
         let region: MTLRegion
         let uvRect: CGRect
@@ -524,6 +585,7 @@ public final class MarkdownGlyphAtlas {
             colorPackingX += glyphWidth + Self.glyphPadding
             colorRowHeight = max(colorRowHeight, glyphHeight)
         } else {
+            ensureAtlasPage()
             if packingX + glyphWidth + Self.glyphPadding > Self.atlasSize {
                 packingX = Self.glyphPadding
                 packingY += rowHeight + Self.glyphPadding
@@ -590,7 +652,8 @@ public final class MarkdownGlyphAtlas {
 
         if storeInVariantCache {
             let intSize = Int(fontSize * scaleFactor)
-            let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize)
+            let resolvedBaseName = baseFontName ?? (CTFontCopyPostScriptName(self.baseFont as CTFont) as String)
+            let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontName: resolvedBaseName)
             glyphCache[key] = cached
         }
 
@@ -649,39 +712,58 @@ public final class MarkdownGlyphAtlas {
         height: Int,
         padding: CGFloat
     ) -> [UInt8]? {
+        // CTFontDrawGlyphs produces zero output for sbix color emoji on a transparent
+        // background.  Work around this by rendering on both black and white opaque
+        // backgrounds, then deriving alpha:
+        //   alpha = 1 - (white_channel - black_channel) / 255   (per channel, take max)
+        //   premultiplied RGB = black render RGB  (src * alpha over black = src * alpha)
         let bitsPerComponent = 8
         let bytesPerRow = width * 4
-        var colorData = [UInt8](repeating: 0, count: width * height * 4)
+        let count = width * height * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
 
-        guard let context = CGContext(
-            data: &colorData,
-            width: width,
-            height: height,
-            bitsPerComponent: bitsPerComponent,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
+        func renderOnBackground(r: CGFloat, g: CGFloat, b: CGFloat) -> [UInt8]? {
+            var data = [UInt8](repeating: 0, count: count)
+            guard let ctx = CGContext(
+                data: &data, width: width, height: height,
+                bitsPerComponent: bitsPerComponent, bytesPerRow: bytesPerRow,
+                space: colorSpace, bitmapInfo: bitmapInfo
+            ) else { return nil }
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            ctx.setAllowsFontSmoothing(true)
+            ctx.setShouldSmoothFonts(true)
+            ctx.setShouldSubpixelPositionFonts(true)
+            ctx.setShouldSubpixelQuantizeFonts(false)
+            ctx.setFillColor(red: r, green: g, blue: b, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            ctx.translateBy(x: padding, y: padding)
+            var glyphID = glyph
+            var position = CGPoint(x: -boundingRect.origin.x, y: -boundingRect.origin.y)
+            CTFontDrawGlyphs(font, &glyphID, &position, 1, ctx)
+            return data
+        }
+
+        guard let blackData = renderOnBackground(r: 0, g: 0, b: 0),
+              let whiteData = renderOnBackground(r: 1, g: 1, b: 1) else {
             return nil
         }
 
-        context.setAllowsAntialiasing(true)
-        context.setShouldAntialias(true)
-        context.setAllowsFontSmoothing(true)
-        context.setShouldSmoothFonts(true)
-        context.setShouldSubpixelPositionFonts(true)
-        context.setShouldSubpixelQuantizeFonts(false)
+        var result = [UInt8](repeating: 0, count: count)
+        for i in stride(from: 0, to: count, by: 4) {
+            let wR = Float(whiteData[i]),   bR = Float(blackData[i])
+            let wG = Float(whiteData[i+1]), bG = Float(blackData[i+1])
+            let wB = Float(whiteData[i+2]), bB = Float(blackData[i+2])
 
-        context.setFillColor(red: 0, green: 0, blue: 0, alpha: 0)
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-
-        context.translateBy(x: padding, y: padding)
-
-        var glyphID = glyph
-        var position = CGPoint(x: -boundingRect.origin.x, y: -boundingRect.origin.y)
-        CTFontDrawGlyphs(font, &glyphID, &position, 1, context)
-
-        return colorData
+            let a = max(255 - (wR - bR), max(255 - (wG - bG), 255 - (wB - bB)))
+            guard a > 0.5 else { continue }
+            result[i]   = UInt8(min(255, max(0, bR)))   // premultiplied R
+            result[i+1] = UInt8(min(255, max(0, bG)))   // premultiplied G
+            result[i+2] = UInt8(min(255, max(0, bB)))   // premultiplied B
+            result[i+3] = UInt8(min(255, max(0, a)))     // alpha
+        }
+        return result
     }
 
     /// Update the base font
@@ -693,12 +775,18 @@ public final class MarkdownGlyphAtlas {
             self.baseFont = font
             glyphCache.removeAll()
             fontGlyphCache.removeAll()
-            fonts.removeAll()
+            variantFontCache.removeAll()
             fontCache.removeAll()
             atlasPages.removeAll()
             colorAtlasPages.removeAll()
-            setupFontVariants()
-            createNewAtlasPage()
+            currentAtlasIndex = 0
+            packingX = Self.glyphPadding
+            packingY = Self.glyphPadding
+            rowHeight = 0
+            colorAtlasIndex = 0
+            colorPackingX = Self.glyphPadding
+            colorPackingY = Self.glyphPadding
+            colorRowHeight = 0
         }
     }
 }

@@ -25,10 +25,22 @@ public protocol VVChatTimelineRenderDataSource: AnyObject {
     var viewportRect: CGRect { get }
     var backgroundColor: SIMD4<Float> { get }
     func texture(for url: String) -> MTLTexture?
+    func selectionQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive]
+}
+
+public extension VVChatTimelineRenderDataSource {
+    func selectionQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] { [] }
+}
+
+public protocol VVChatTimelineSelectionDelegate: AnyObject {
+    func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags)
+    func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDraggedTo point: CGPoint, event: NSEvent)
+    func chatTimelineMetalViewMouseUp(_ view: VVChatTimelineMetalView)
 }
 
 public final class VVChatTimelineMetalView: MTKView {
     public weak var renderDataSource: VVChatTimelineRenderDataSource?
+    public weak var selectionDelegate: VVChatTimelineSelectionDelegate?
 
     private var renderer: MarkdownMetalRenderer?
     private var currentDrawableSize: CGSize = .zero
@@ -38,36 +50,77 @@ public final class VVChatTimelineMetalView: MTKView {
     private var baseFontDescent: CGFloat = 0
 
     public override var isFlipped: Bool { true }
+    public override var acceptsFirstResponder: Bool { true }
 
-    public init(frame: CGRect, font: VVFont) {
-        let device = MTLCreateSystemDefaultDevice()
+    public override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let point = convert(event.locationInWindow, from: nil)
+        selectionDelegate?.chatTimelineMetalView(self, mouseDownAt: point, clickCount: event.clickCount, modifiers: event.modifierFlags)
+    }
+
+    public override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        selectionDelegate?.chatTimelineMetalView(self, mouseDraggedTo: point, event: event)
+    }
+
+    public override func mouseUp(with event: NSEvent) {
+        selectionDelegate?.chatTimelineMetalViewMouseUp(self)
+    }
+
+    public override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .iBeam)
+    }
+
+    private var metalContext: VVMetalContext?
+
+    public init(frame: CGRect, font: VVFont, metalContext: VVMetalContext? = nil) {
+        self.metalContext = metalContext ?? VVMetalContext.shared
+        let device = self.metalContext?.device ?? MTLCreateSystemDefaultDevice()
         super.init(frame: frame, device: device)
         configureRenderer(font: font)
     }
 
     required init(coder: NSCoder) {
+        self.metalContext = VVMetalContext.shared
         super.init(coder: coder)
-        device = MTLCreateSystemDefaultDevice()
+        device = metalContext?.device ?? MTLCreateSystemDefaultDevice()
         configureRenderer(font: .systemFont(ofSize: 14))
     }
 
     private func configureRenderer(font: VVFont) {
-        guard let device else { return }
+        guard device != nil else { return }
         baseFont = font
         baseFontAscent = CTFontGetAscent(font)
         baseFontDescent = CTFontGetDescent(font)
         framebufferOnly = true
         enableSetNeedsDisplay = true
         isPaused = true
-        do {
-            renderer = try MarkdownMetalRenderer(device: device, baseFont: font, scaleFactor: window?.backingScaleFactor ?? 2.0)
-        } catch {
+        if let ctx = metalContext {
+            renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: window?.backingScaleFactor ?? 2.0)
+        } else {
             renderer = nil
         }
     }
 
     public func updateFont(_ font: VVFont) {
         configureRenderer(font: font)
+        setNeedsDisplay(bounds)
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            releaseDrawables()
+        }
+    }
+
+    public override func viewDidHide() {
+        super.viewDidHide()
+        releaseDrawables()
+    }
+
+    public override func viewDidUnhide() {
+        super.viewDidUnhide()
         setNeedsDisplay(bounds)
     }
 
@@ -90,19 +143,45 @@ public final class VVChatTimelineMetalView: MTKView {
 
         let visibleRect = renderDataSource.viewportRect
         let viewportSize = bounds.size
+        let visibilityPadding: CGFloat = 1024
+
+        // Single beginFrame per draw — the uniform buffer is shared across all render
+        // calls in the command encoder.  Calling beginFrame per item overwrites the
+        // triple-buffered uniform after 3 items, corrupting earlier items' transforms.
+        let scrollOffset = visibleRect.origin
+        currentScrollOffset = scrollOffset
+        renderer.beginFrame(viewportSize: viewportSize, scrollOffset: scrollOffset)
 
         for index in 0..<renderDataSource.renderItemCount {
             guard let item = renderDataSource.renderItem(at: index) else { continue }
-            if item.frame.maxY < visibleRect.minY { continue }
-            if item.frame.minY > visibleRect.maxY { break }
+            if item.frame.maxY < visibleRect.minY - visibilityPadding { continue }
+            if item.frame.minY > visibleRect.maxY + visibilityPadding { continue }
 
-            let messageOrigin = CGPoint(x: item.frame.origin.x + item.contentOffset.x,
-                                        y: item.frame.origin.y + item.contentOffset.y)
-            let scrollOffset = CGPoint(x: visibleRect.origin.x - messageOrigin.x,
-                                       y: visibleRect.origin.y - messageOrigin.y)
-            currentScrollOffset = scrollOffset
-            renderer.beginFrame(viewportSize: viewportSize, scrollOffset: scrollOffset)
-            renderScene(item.scene, encoder: encoder, renderer: renderer, imageProvider: renderDataSource)
+            // Each item's scene uses local coordinates (0,0 = item top-left).
+            // Offset primitives by the item's absolute position so they render
+            // correctly under the single global projection + scroll offset.
+            let itemOffset = CGPoint(x: item.frame.origin.x + item.contentOffset.x,
+                                     y: item.frame.origin.y + item.contentOffset.y)
+
+            // Render selection highlights before scene content
+            let selQuads = renderDataSource.selectionQuads(forItemAt: index, itemOffset: itemOffset)
+            if !selQuads.isEmpty {
+                var instances: [QuadInstance] = []
+                instances.reserveCapacity(selQuads.count)
+                for quad in selQuads {
+                    instances.append(QuadInstance(
+                        position: SIMD2<Float>(Float(quad.frame.origin.x), Float(quad.frame.origin.y)),
+                        size: SIMD2<Float>(Float(quad.frame.width), Float(quad.frame.height)),
+                        color: quad.color,
+                        cornerRadius: Float(quad.cornerRadius)
+                    ))
+                }
+                if let buffer = renderer.makeBuffer(for: instances) {
+                    renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: true)
+                }
+            }
+
+            renderScene(item.scene, encoder: encoder, renderer: renderer, imageProvider: renderDataSource, itemOffset: itemOffset)
         }
 
         encoder.endEncoding()
@@ -114,8 +193,11 @@ public final class VVChatTimelineMetalView: MTKView {
         _ scene: VVScene,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
-        imageProvider: VVChatTimelineRenderDataSource
+        imageProvider: VVChatTimelineRenderDataSource,
+        itemOffset: CGPoint = .zero
     ) {
+        let ox = Float(itemOffset.x)
+        let oy = Float(itemOffset.y)
         var currentClip: CGRect? = nil
         var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
         var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
@@ -140,14 +222,15 @@ public final class VVChatTimelineMetalView: MTKView {
         }
 
         func updateClip(_ clip: CGRect?) {
-            if clip != currentClip {
+            let offsetClip = clip.map { $0.offsetBy(dx: itemOffset.x, dy: itemOffset.y) }
+            if offsetClip != currentClip {
                 flushTextBatches()
-                if let clip {
-                    encoder.setScissorRect(scissorRect(for: clip))
+                if let offsetClip {
+                    encoder.setScissorRect(scissorRect(for: offsetClip))
                 } else {
                     encoder.setScissorRect(fullScissorRect())
                 }
-                currentClip = clip
+                currentClip = offsetClip
             }
         }
 
@@ -155,10 +238,10 @@ public final class VVChatTimelineMetalView: MTKView {
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):
-                appendTextPrimitive(run, renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances, underlines: &underlines, strikethroughs: &strikethroughs)
+                appendTextPrimitive(run, offset: SIMD2(ox, oy), renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances, underlines: &underlines, strikethroughs: &strikethroughs)
             default:
                 flushTextBatches()
-                renderPrimitive(primitive, encoder: encoder, renderer: renderer, imageProvider: imageProvider)
+                renderPrimitive(primitive, offset: SIMD2(ox, oy), encoder: encoder, renderer: renderer, imageProvider: imageProvider)
             }
         }
 
@@ -168,6 +251,7 @@ public final class VVChatTimelineMetalView: MTKView {
 
     private func renderPrimitive(
         _ primitive: VVPrimitive,
+        offset o: SIMD2<Float>,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
         imageProvider: VVChatTimelineRenderDataSource
@@ -175,7 +259,7 @@ public final class VVChatTimelineMetalView: MTKView {
         switch primitive.kind {
         case .quad(let quad):
             let instance = QuadInstance(
-                position: SIMD2<Float>(Float(quad.frame.origin.x), Float(quad.frame.origin.y)),
+                position: SIMD2<Float>(Float(quad.frame.origin.x) + o.x, Float(quad.frame.origin.y) + o.y),
                 size: SIMD2<Float>(Float(quad.frame.width), Float(quad.frame.height)),
                 color: quad.color,
                 cornerRadius: Float(quad.cornerRadius)
@@ -183,6 +267,9 @@ public final class VVChatTimelineMetalView: MTKView {
             if let buffer = renderer.makeBuffer(for: [instance]) {
                 renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
             }
+
+        case .gradientQuad(let quad):
+            renderGradientQuad(quad, offset: o, encoder: encoder, renderer: renderer)
 
         case .line(let line):
             let minX = min(line.start.x, line.end.x)
@@ -192,7 +279,7 @@ public final class VVChatTimelineMetalView: MTKView {
             let rectWidth = width > 0 ? width : line.thickness
             let rectHeight = height > 0 ? height : line.thickness
             let instance = LineInstance(
-                position: SIMD2<Float>(Float(minX), Float(minY)),
+                position: SIMD2<Float>(Float(minX) + o.x, Float(minY) + o.y),
                 width: Float(rectWidth),
                 height: Float(rectHeight),
                 color: line.color
@@ -212,7 +299,7 @@ public final class VVChatTimelineMetalView: MTKView {
                 default: bulletType = 0
                 }
                 let instance = BulletInstance(
-                    position: SIMD2<Float>(Float(bullet.position.x), Float(bullet.position.y)),
+                    position: SIMD2<Float>(Float(bullet.position.x) + o.x, Float(bullet.position.y) + o.y),
                     size: SIMD2<Float>(Float(bullet.size), Float(bullet.size)),
                     color: bullet.color,
                     bulletType: bulletType
@@ -222,7 +309,7 @@ public final class VVChatTimelineMetalView: MTKView {
                 }
             case .checkbox(let checked):
                 let instance = CheckboxInstance(
-                    position: SIMD2<Float>(Float(bullet.position.x), Float(bullet.position.y)),
+                    position: SIMD2<Float>(Float(bullet.position.x) + o.x, Float(bullet.position.y) + o.y),
                     size: SIMD2<Float>(Float(bullet.size), Float(bullet.size)),
                     color: bullet.color,
                     isChecked: checked
@@ -237,7 +324,7 @@ public final class VVChatTimelineMetalView: MTKView {
         case .image(let image):
             guard let texture = imageProvider.texture(for: image.url) else { return }
             let instance = ImageInstance(
-                position: SIMD2<Float>(Float(image.frame.origin.x), Float(image.frame.origin.y)),
+                position: SIMD2<Float>(Float(image.frame.origin.x) + o.x, Float(image.frame.origin.y) + o.y),
                 size: SIMD2<Float>(Float(image.frame.width), Float(image.frame.height)),
                 cornerRadius: Float(image.cornerRadius)
             )
@@ -247,7 +334,7 @@ public final class VVChatTimelineMetalView: MTKView {
 
         case .blockQuoteBorder(let border):
             let instance = BlockQuoteBorderInstance(
-                position: SIMD2<Float>(Float(border.frame.origin.x), Float(border.frame.origin.y)),
+                position: SIMD2<Float>(Float(border.frame.origin.x) + o.x, Float(border.frame.origin.y) + o.y),
                 size: SIMD2<Float>(Float(border.frame.width), Float(border.frame.height)),
                 color: border.color,
                 borderWidth: Float(border.borderWidth)
@@ -258,8 +345,8 @@ public final class VVChatTimelineMetalView: MTKView {
 
         case .tableLine(let line):
             let instance = TableGridLineInstance(
-                start: SIMD2<Float>(Float(line.start.x), Float(line.start.y)),
-                end: SIMD2<Float>(Float(line.end.x), Float(line.end.y)),
+                start: SIMD2<Float>(Float(line.start.x) + o.x, Float(line.start.y) + o.y),
+                end: SIMD2<Float>(Float(line.end.x) + o.x, Float(line.end.y) + o.y),
                 color: line.color,
                 lineWidth: Float(line.lineWidth)
             )
@@ -269,7 +356,7 @@ public final class VVChatTimelineMetalView: MTKView {
 
         case .pieSlice(let slice):
             let instance = PieSliceInstance(
-                center: SIMD2<Float>(Float(slice.center.x), Float(slice.center.y)),
+                center: SIMD2<Float>(Float(slice.center.x) + o.x, Float(slice.center.y) + o.y),
                 radius: Float(slice.radius),
                 startAngle: Float(slice.startAngle),
                 endAngle: Float(slice.endAngle),
@@ -281,11 +368,86 @@ public final class VVChatTimelineMetalView: MTKView {
 
         case .textRun:
             break
+
+        case .underline(let underline):
+            let instance = LineInstance(
+                position: SIMD2<Float>(Float(underline.origin.x) + o.x, Float(underline.origin.y) + o.y),
+                width: Float(underline.width),
+                height: Float(underline.thickness),
+                color: underline.color
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .path:
+            break
         }
+    }
+
+    private func renderGradientQuad(
+        _ gradient: VVGradientQuadPrimitive,
+        offset o: SIMD2<Float> = .zero,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
+        let stepCount = max(2, min(36, gradient.steps))
+        let frame = gradient.frame.offsetBy(dx: CGFloat(o.x), dy: CGFloat(o.y)).integral
+        guard frame.width > 0, frame.height > 0 else { return }
+
+        var instances: [QuadInstance] = []
+        instances.reserveCapacity(stepCount)
+
+        switch gradient.direction {
+        case .horizontal:
+            let segmentWidth = frame.width / CGFloat(stepCount)
+            for index in 0..<stepCount {
+                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
+                let x = frame.minX + CGFloat(index) * segmentWidth
+                let width = index == stepCount - 1 ? max(0, frame.maxX - x) : segmentWidth + 0.75
+                guard width > 0 else { continue }
+                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
+                instances.append(
+                    QuadInstance(
+                        position: SIMD2<Float>(Float(x), Float(frame.minY)),
+                        size: SIMD2<Float>(Float(width), Float(frame.height)),
+                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
+                        cornerRadius: Float(cornerRadius)
+                    )
+                )
+            }
+
+        case .vertical:
+            let segmentHeight = frame.height / CGFloat(stepCount)
+            for index in 0..<stepCount {
+                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
+                let y = frame.minY + CGFloat(index) * segmentHeight
+                let height = index == stepCount - 1 ? max(0, frame.maxY - y) : segmentHeight + 0.75
+                guard height > 0 else { continue }
+                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
+                instances.append(
+                    QuadInstance(
+                        position: SIMD2<Float>(Float(frame.minX), Float(y)),
+                        size: SIMD2<Float>(Float(frame.width), Float(height)),
+                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
+                        cornerRadius: Float(cornerRadius)
+                    )
+                )
+            }
+        }
+
+        guard !instances.isEmpty, let buffer = renderer.makeBuffer(for: instances) else { return }
+        renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: gradient.cornerRadius > 0)
+    }
+
+    private func lerpColor(_ start: SIMD4<Float>, _ end: SIMD4<Float>, t: Float) -> SIMD4<Float> {
+        let clamped = max(0, min(1, t))
+        return start + (end - start) * clamped
     }
 
     private func appendTextPrimitive(
         _ run: VVTextRunPrimitive,
+        offset o: SIMD2<Float> = .zero,
         renderer: MarkdownMetalRenderer,
         glyphInstances: inout [Int: [MarkdownGlyphInstance]],
         colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]],
@@ -293,7 +455,7 @@ public final class VVChatTimelineMetalView: MTKView {
         strikethroughs: inout [LineInstance]
     ) {
         for glyph in run.glyphs {
-            appendGlyphInstance(glyph, renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances)
+            appendGlyphInstance(glyph, offset: o, renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances)
         }
 
         let baseSize = baseFont.pointSize
@@ -309,7 +471,7 @@ public final class VVChatTimelineMetalView: MTKView {
         if run.style.isLink {
             let underlineY = run.position.y + max(1, descent * 0.6)
             underlines.append(LineInstance(
-                position: SIMD2<Float>(Float(underlineStartX), Float(underlineY)),
+                position: SIMD2<Float>(Float(underlineStartX) + o.x, Float(underlineY) + o.y),
                 width: Float(underlineWidth),
                 height: 1,
                 color: run.style.color
@@ -319,7 +481,7 @@ public final class VVChatTimelineMetalView: MTKView {
         if run.style.isStrikethrough {
             let strikeY = run.position.y - max(1, ascent * 0.35)
             strikethroughs.append(LineInstance(
-                position: SIMD2<Float>(Float(underlineStartX), Float(strikeY)),
+                position: SIMD2<Float>(Float(underlineStartX) + o.x, Float(strikeY) + o.y),
                 width: Float(underlineWidth),
                 height: 1,
                 color: run.style.color
@@ -331,7 +493,7 @@ public final class VVChatTimelineMetalView: MTKView {
         if let fontName = glyph.fontName {
             return renderer.glyphAtlas.glyph(for: glyph.glyphID, fontName: fontName, fontSize: glyph.fontSize, variant: glyph.fontVariant)
         }
-        return renderer.glyphAtlas.glyph(for: glyph.glyphID, variant: glyph.fontVariant, fontSize: glyph.fontSize)
+        return renderer.glyphAtlas.glyph(for: glyph.glyphID, variant: glyph.fontVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
     private func cachedGlyph(for glyph: VVTextGlyph, renderer: MarkdownMetalRenderer) -> MarkdownCachedGlyph? {
@@ -340,7 +502,7 @@ public final class VVChatTimelineMetalView: MTKView {
         if let fontName = glyph.fontName {
             return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
         }
-        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize)
+        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
     private func toLayoutFontVariant(_ variant: VVFontVariant) -> FontVariant {
@@ -358,6 +520,7 @@ public final class VVChatTimelineMetalView: MTKView {
 
     private func appendGlyphInstance(
         _ glyph: LayoutGlyph,
+        offset o: SIMD2<Float> = .zero,
         renderer: MarkdownMetalRenderer,
         glyphInstances: inout [Int: [MarkdownGlyphInstance]],
         colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]]
@@ -365,7 +528,7 @@ public final class VVChatTimelineMetalView: MTKView {
         guard let cached = cachedGlyph(for: glyph, renderer: renderer) else { return }
         let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
         let instance = MarkdownGlyphInstance(
-            position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x), Float(glyph.position.y + cached.bearing.y)),
+            position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x) + o.x, Float(glyph.position.y + cached.bearing.y) + o.y),
             size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
             uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
             uvSize: SIMD2<Float>(Float(cached.uvRect.width), Float(cached.uvRect.height)),
@@ -381,6 +544,7 @@ public final class VVChatTimelineMetalView: MTKView {
 
     private func appendGlyphInstance(
         _ glyph: VVTextGlyph,
+        offset o: SIMD2<Float> = .zero,
         renderer: MarkdownMetalRenderer,
         glyphInstances: inout [Int: [MarkdownGlyphInstance]],
         colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]]
@@ -388,7 +552,7 @@ public final class VVChatTimelineMetalView: MTKView {
         guard let cached = cachedGlyph(for: glyph, renderer: renderer) else { return }
         let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
         let instance = MarkdownGlyphInstance(
-            position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x), Float(glyph.position.y + cached.bearing.y)),
+            position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x) + o.x, Float(glyph.position.y + cached.bearing.y) + o.y),
             size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
             uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
             uvSize: SIMD2<Float>(Float(cached.uvRect.width), Float(cached.uvRect.height)),

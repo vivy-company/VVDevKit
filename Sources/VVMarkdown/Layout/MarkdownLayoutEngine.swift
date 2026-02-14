@@ -285,7 +285,7 @@ public struct TextRunStyle {
     public var color: SIMD4<Float>
     public var fontVariant: FontVariant?
 
-    public init(color: SIMD4<Float> = SIMD4(1, 1, 1, 1), fontVariant: FontVariant? = nil) {
+    public init(color: SIMD4<Float> = .white, fontVariant: FontVariant? = nil) {
         self.color = color
         self.fontVariant = fontVariant
     }
@@ -519,6 +519,7 @@ public final class MarkdownLayoutEngine {
     public var currentAscent: CGFloat { ascent }
     public var currentDescent: CGFloat { descent }
     public var baseFontSize: CGFloat { baseFont.pointSize }
+    public var currentTheme: MarkdownTheme { theme }
 
     public func font(for variant: FontVariant) -> CTFont? {
         fonts[variant]
@@ -1075,8 +1076,7 @@ public final class MarkdownLayoutEngine {
             }
         }
 
-        let extraBottomPadding = max(4, codePadding * 0.5)
-        let height = CGFloat(layoutLines.count) * lineHeight + codePadding * 2 + headerHeight + extraBottomPadding
+        let height = CGFloat(layoutLines.count) * lineHeight + codePadding * 2 + headerHeight
 
         return LayoutBlock(
             blockId: id,
@@ -2618,12 +2618,12 @@ public final class MarkdownLayoutEngine {
 
     private func diagramPalette() -> [SIMD4<Float>] {
         return [
-            SIMD4(0.36, 0.64, 0.96, 1.0),
-            SIMD4(0.42, 0.78, 0.47, 1.0),
-            SIMD4(0.94, 0.55, 0.32, 1.0),
-            SIMD4(0.74, 0.56, 0.95, 1.0),
-            SIMD4(0.91, 0.75, 0.35, 1.0),
-            SIMD4(0.5, 0.82, 0.82, 1.0)
+            .rgba(0.36, 0.64, 0.96),
+            .rgba(0.42, 0.78, 0.47),
+            .rgba(0.94, 0.55, 0.32),
+            .rgba(0.74, 0.56, 0.95),
+            .rgba(0.91, 0.75, 0.35),
+            .rgba(0.5, 0.82, 0.82)
         ]
     }
 
@@ -3322,7 +3322,9 @@ public final class MarkdownLayoutEngine {
             let attributes = CTRunGetAttributes(run) as NSDictionary
             let runFont = attributes[kCTFontAttributeName] as! CTFont
             let fontName = CTFontCopyPostScriptName(runFont) as String
-            let storedFontName = isSystemUIFontName(fontName) ? nil : fontName
+            let isEmoji = fontName.contains("Emoji")
+            let storedFontName: String? = isEmoji ? nil : (isSystemUIFontName(fontName) ? nil : fontName)
+            let glyphVariant: FontVariant = isEmoji ? .emoji : variant
             let runFontSize = CTFontGetSize(runFont)
 
             var runGlyphs = [CGGlyph](repeating: 0, count: glyphCount)
@@ -3348,7 +3350,7 @@ public final class MarkdownLayoutEngine {
                     position: position,
                     size: CGSize(width: width, height: lineHeight),
                     color: color,
-                    fontVariant: variant,
+                    fontVariant: glyphVariant,
                     fontSize: runFontSize,
                     fontName: storedFontName,
                     stringIndex: Int(stringIndices[i])

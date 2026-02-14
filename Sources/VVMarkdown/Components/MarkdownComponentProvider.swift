@@ -13,7 +13,7 @@ public struct MarkdownComponentContext {
     }
 }
 
-public typealias MarkdownComponentProvider = (_ block: LayoutBlock, _ context: MarkdownComponentContext, _ defaultComponent: (LayoutBlock) -> VVComponent) -> VVComponent
+public typealias MarkdownViewProvider = (_ block: LayoutBlock, _ context: MarkdownComponentContext, _ defaultView: (LayoutBlock) -> any VVView) -> any VVView
 
 public struct MarkdownBlockStyle: Sendable {
     public var padding: VVInsets

@@ -25,10 +25,6 @@ let package = Package(
             targets: ["VVChatTimeline"]
         ),
         .executable(
-            name: "VVMarkdownDump",
-            targets: ["VVMarkdownDump"]
-        ),
-        .executable(
             name: "VVDevKitPlayground",
             targets: ["VVDevKitPlayground"]
         ),
@@ -2125,13 +2121,6 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "VVMarkdownDump",
-            dependencies: [
-                "VVMarkdown"
-            ],
-            path: "Sources/VVMarkdownDump"
-        ),
-        .executableTarget(
             name: "VVDevKitPlayground",
             dependencies: [
                 "VVCode",
@@ -2150,6 +2139,10 @@ let package = Package(
         .testTarget(
             name: "VVChatTimelineTests",
             dependencies: ["VVChatTimeline"]
+        ),
+        .testTarget(
+            name: "VVMetalPrimitivesTests",
+            dependencies: ["VVMetalPrimitives"]
         ),
     ]
 )

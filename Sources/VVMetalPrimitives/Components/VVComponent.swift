@@ -7,7 +7,7 @@ public struct VVLayoutEnvironment: Sendable {
 
     public init(
         scale: CGFloat = 1,
-        defaultTextColor: SIMD4<Float> = SIMD4(1, 1, 1, 1),
+        defaultTextColor: SIMD4<Float> = .white,
         defaultCornerRadius: CGFloat = 6
     ) {
         self.scale = scale
@@ -28,18 +28,4 @@ public struct VVInsets: Hashable, Sendable {
         self.bottom = bottom
         self.right = right
     }
-}
-
-public struct VVComponentLayout: Sendable {
-    public var size: CGSize
-    public var node: VVNode
-
-    public init(size: CGSize, node: VVNode) {
-        self.size = size
-        self.node = node
-    }
-}
-
-public protocol VVComponent: Sendable {
-    func measure(in env: VVLayoutEnvironment, width: CGFloat) -> VVComponentLayout
 }

@@ -568,39 +568,58 @@ public final class GlyphAtlasManager {
         height: Int,
         padding: CGFloat
     ) -> [UInt8]? {
+        // CTFontDrawGlyphs produces zero output for sbix color emoji on a transparent
+        // background.  Work around this by rendering on both black and white opaque
+        // backgrounds, then deriving alpha:
+        //   alpha = 1 - (white_channel - black_channel) / 255   (per channel, take max)
+        //   premultiplied RGB = black render RGB  (src * alpha over black = src * alpha)
         let bitsPerComponent = 8
         let bytesPerRow = width * 4
-        var colorData = [UInt8](repeating: 0, count: width * height * 4)
+        let count = width * height * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
 
-        guard let context = CGContext(
-            data: &colorData,
-            width: width,
-            height: height,
-            bitsPerComponent: bitsPerComponent,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
+        func renderOnBackground(r: CGFloat, g: CGFloat, b: CGFloat) -> [UInt8]? {
+            var data = [UInt8](repeating: 0, count: count)
+            guard let ctx = CGContext(
+                data: &data, width: width, height: height,
+                bitsPerComponent: bitsPerComponent, bytesPerRow: bytesPerRow,
+                space: colorSpace, bitmapInfo: bitmapInfo
+            ) else { return nil }
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            ctx.setAllowsFontSmoothing(true)
+            ctx.setShouldSmoothFonts(true)
+            ctx.setShouldSubpixelPositionFonts(true)
+            ctx.setShouldSubpixelQuantizeFonts(false)
+            ctx.setFillColor(red: r, green: g, blue: b, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            ctx.translateBy(x: padding, y: padding)
+            var glyphID = glyph
+            var position = CGPoint(x: -boundingRect.origin.x, y: -boundingRect.origin.y)
+            CTFontDrawGlyphs(font, &glyphID, &position, 1, ctx)
+            return data
+        }
+
+        guard let blackData = renderOnBackground(r: 0, g: 0, b: 0),
+              let whiteData = renderOnBackground(r: 1, g: 1, b: 1) else {
             return nil
         }
 
-        context.setAllowsAntialiasing(true)
-        context.setShouldAntialias(true)
-        context.setAllowsFontSmoothing(true)
-        context.setShouldSmoothFonts(true)
-        context.setShouldSubpixelPositionFonts(true)
-        context.setShouldSubpixelQuantizeFonts(false)
+        var result = [UInt8](repeating: 0, count: count)
+        for i in stride(from: 0, to: count, by: 4) {
+            let wR = Float(whiteData[i]),   bR = Float(blackData[i])
+            let wG = Float(whiteData[i+1]), bG = Float(blackData[i+1])
+            let wB = Float(whiteData[i+2]), bB = Float(blackData[i+2])
 
-        context.setFillColor(red: 0, green: 0, blue: 0, alpha: 0)
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-
-        context.translateBy(x: padding, y: padding)
-
-        var glyphID = glyph
-        var position = CGPoint(x: -boundingRect.origin.x, y: -boundingRect.origin.y)
-        CTFontDrawGlyphs(font, &glyphID, &position, 1, context)
-
-        return colorData
+            let a = max(255 - (wR - bR), max(255 - (wG - bG), 255 - (wB - bB)))
+            guard a > 0.5 else { continue }
+            result[i]   = UInt8(min(255, max(0, bR)))   // premultiplied R
+            result[i+1] = UInt8(min(255, max(0, bG)))   // premultiplied G
+            result[i+2] = UInt8(min(255, max(0, bB)))   // premultiplied B
+            result[i+3] = UInt8(min(255, max(0, a)))     // alpha
+        }
+        return result
     }
 
     private func rasterizeCustomGlyphToAlpha(

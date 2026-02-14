@@ -23,6 +23,15 @@ public struct VVChatTimelineState: Equatable {
     }
 
     public mutating func updatePinnedState(distanceFromBottom: CGFloat) {
-        isPinnedToBottom = distanceFromBottom <= pinThreshold
+        let distance = max(0, distanceFromBottom)
+        // Hysteresis:
+        // - unpin quickly once user moves away from bottom
+        // - repin only when truly close to bottom
+        let detachThreshold = min(pinThreshold, max(2, pinThreshold * 0.25))
+        if isPinnedToBottom {
+            isPinnedToBottom = distance <= detachThreshold
+        } else {
+            isPinnedToBottom = distance <= pinThreshold
+        }
     }
 }

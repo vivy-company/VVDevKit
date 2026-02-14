@@ -20,32 +20,9 @@ import UIKit
 
 // MARK: - Text Selection Types
 
-/// Position in the markdown text for selection
-struct TextPosition: Comparable, Equatable {
-    let blockIndex: Int
-    let runIndex: Int
-    let glyphIndex: Int
-    let characterOffset: Int
-
-    static func < (lhs: TextPosition, rhs: TextPosition) -> Bool {
-        if lhs.blockIndex != rhs.blockIndex { return lhs.blockIndex < rhs.blockIndex }
-        if lhs.runIndex != rhs.runIndex { return lhs.runIndex < rhs.runIndex }
-        return lhs.characterOffset < rhs.characterOffset
-    }
-}
-
-/// A range of selected text with associated layout information
-struct SelectionRange {
-    let start: TextPosition
-    let end: TextPosition
-    let rects: [CGRect]
-    let selectedText: String
-}
-
-private struct SelectionSegment {
-    let lineKey: Int
-    let rect: CGRect
-}
+/// MarkdownTextPosition is now defined in Selection/VVMarkdownSelectionHelper.swift
+/// and conforms to VVMetalPrimitives.VVTextPosition.
+extension MarkdownTextPosition: VVMetalPrimitives.VVTextPosition {}
 
 // MARK: - VVMarkdownView (SwiftUI)
 
@@ -54,7 +31,7 @@ public struct VVMarkdownView: View {
     private let content: String
     private let theme: MarkdownTheme
     private let font: VVFont
-    private let componentProvider: MarkdownComponentProvider?
+    private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
     @State private var scrollOffset: CGPoint = .zero
@@ -63,13 +40,13 @@ public struct VVMarkdownView: View {
         content: String,
         theme: MarkdownTheme = .dark,
         font: VVFont = .systemFont(ofSize: 14),
-        componentProvider: MarkdownComponentProvider? = nil,
+        viewProvider: MarkdownViewProvider? = nil,
         styleRegistry: MarkdownStyleRegistry? = nil
     ) {
         self.content = content
         self.theme = theme
         self.font = font
-        self.componentProvider = componentProvider
+        self.viewProvider = viewProvider
         self.styleRegistry = styleRegistry
     }
 
@@ -78,7 +55,7 @@ public struct VVMarkdownView: View {
             content: content,
             theme: theme,
             font: font,
-            componentProvider: componentProvider,
+            viewProvider: viewProvider,
             styleRegistry: styleRegistry,
             scrollOffset: $scrollOffset
         )
@@ -92,12 +69,12 @@ public struct MetalMarkdownViewRepresentable: NSViewRepresentable {
     let content: String
     let theme: MarkdownTheme
     let font: VVFont
-    let componentProvider: MarkdownComponentProvider?
+    let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
     @Binding var scrollOffset: CGPoint
 
     public func makeNSView(context: Context) -> MetalMarkdownNSView {
-        let view = MetalMarkdownNSView(frame: .zero, font: font, theme: theme, componentProvider: componentProvider, styleRegistry: styleRegistry)
+        let view = MetalMarkdownNSView(frame: .zero, font: font, theme: theme, viewProvider: viewProvider, styleRegistry: styleRegistry)
         view.setContent(content)
         return view
     }
@@ -112,12 +89,12 @@ public struct MetalMarkdownViewRepresentable: UIViewRepresentable {
     let content: String
     let theme: MarkdownTheme
     let font: VVFont
-    let componentProvider: MarkdownComponentProvider?
+    let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
     @Binding var scrollOffset: CGPoint
 
     public func makeUIView(context: Context) -> MetalMarkdownUIView {
-        let view = MetalMarkdownUIView(frame: .zero, font: font, theme: theme, componentProvider: componentProvider, styleRegistry: styleRegistry)
+        let view = MetalMarkdownUIView(frame: .zero, font: font, theme: theme, viewProvider: viewProvider, styleRegistry: styleRegistry)
         view.setContent(content)
         return view
     }
@@ -176,7 +153,7 @@ public class MetalMarkdownNSView: NSView {
 
     private var theme: MarkdownTheme
     private var baseFont: VVFont
-    private let componentProvider: MarkdownComponentProvider?
+    private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
     // Code highlighting
@@ -195,11 +172,12 @@ public class MetalMarkdownNSView: NSView {
     private var parsedMathBlocks: [String: RenderedMath] = [:]
 
     // Text selection
-    private var selectionStart: TextPosition?
-    private var selectionEnd: TextPosition?
+    private var selectionStart: MarkdownTextPosition?
+    private var selectionEnd: MarkdownTextPosition?
     private var isSelecting: Bool = false
+    private var selectionHelper: VVMarkdownSelectionHelper?
     private var lastDragPoint: CGPoint?
-    private var selectionColor: SIMD4<Float> = SIMD4(0.3, 0.5, 0.8, 0.4)
+    private var selectionColor: SIMD4<Float> = .blue.withOpacity(0.4)
     private var hoveredLinkURL: String?
     private var trackingArea: NSTrackingArea?
     private var copiedBlockId: String?
@@ -211,12 +189,12 @@ public class MetalMarkdownNSView: NSView {
 
     // MARK: - Initialization
 
-    public init(frame: CGRect, font: VVFont, theme: MarkdownTheme, componentProvider: MarkdownComponentProvider? = nil, styleRegistry: MarkdownStyleRegistry? = nil) {
+    public init(frame: CGRect, font: VVFont, theme: MarkdownTheme, viewProvider: MarkdownViewProvider? = nil, styleRegistry: MarkdownStyleRegistry? = nil, metalContext: VVMetalContext? = nil) {
         self.baseFont = font
         self.theme = theme
         self.layoutEngine = MarkdownLayoutEngine(baseFont: font, theme: theme, contentWidth: frame.width)
         self.codeHighlighter = MarkdownCodeHighlighter(theme: .defaultDark)
-        self.componentProvider = componentProvider
+        self.viewProvider = viewProvider
         self.styleRegistry = styleRegistry
         super.init(frame: frame)
         setup()
@@ -227,7 +205,7 @@ public class MetalMarkdownNSView: NSView {
         self.theme = .dark
         self.layoutEngine = MarkdownLayoutEngine(baseFont: baseFont, theme: theme, contentWidth: 600)
         self.codeHighlighter = MarkdownCodeHighlighter(theme: .defaultDark)
-        self.componentProvider = nil
+        self.viewProvider = nil
         self.styleRegistry = nil
         super.init(coder: coder)
         setup()
@@ -237,22 +215,20 @@ public class MetalMarkdownNSView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .duringViewResize
 
+        let ctx = VVMetalContext.shared
         metalLayer = CAMetalLayer()
-        metalLayer.device = MTLCreateSystemDefaultDevice()
+        metalLayer.device = ctx?.device ?? MTLCreateSystemDefaultDevice()
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
+        metalLayer.maximumDrawableCount = 2
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         // Keep the layer unflipped; renderer already uses a top-left projection.
 
         layer = metalLayer
 
-        if let device = metalLayer.device {
-            do {
-                renderer = try MarkdownMetalRenderer(device: device, baseFont: baseFont, scaleFactor: metalLayer.contentsScale)
-                imageLoader = MarkdownImageLoader(device: device)
-            } catch {
-                print("Failed to create markdown renderer: \(error)")
-            }
+        if let ctx {
+            renderer = MarkdownMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: metalLayer.contentsScale)
+            imageLoader = MarkdownImageLoader(device: ctx.device)
         }
 
         setupDisplayLink()
@@ -260,7 +236,32 @@ public class MetalMarkdownNSView: NSView {
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.acceptsMouseMovedEvents = true
+        if window != nil {
+            window?.acceptsMouseMovedEvents = true
+            startDisplayLink()
+        } else {
+            stopDisplayLink()
+        }
+    }
+
+    public override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        if superview != nil && window != nil {
+            startDisplayLink()
+            needsRedraw = true
+        }
+    }
+
+    public override func viewDidUnhide() {
+        super.viewDidUnhide()
+        startDisplayLink()
+        needsRedraw = true
+    }
+
+    public override func viewDidHide() {
+        super.viewDidHide()
+        stopDisplayLink()
+        metalLayer.drawableSize = CGSize(width: 1, height: 1)
     }
 
     public override func updateTrackingAreas() {
@@ -291,8 +292,18 @@ public class MetalMarkdownNSView: NSView {
         }
 
         CVDisplayLinkSetOutputCallback(displayLink, callback, Unmanaged.passUnretained(self).toOpaque())
-        CVDisplayLinkStart(displayLink)
+        // Don't start yet - viewDidMoveToWindow will start it when visible
         self.displayLink = displayLink
+    }
+
+    private func startDisplayLink() {
+        guard let displayLink, !CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStart(displayLink)
+    }
+
+    private func stopDisplayLink() {
+        guard let displayLink, CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStop(displayLink)
     }
 
     deinit {
@@ -305,6 +316,13 @@ public class MetalMarkdownNSView: NSView {
 
     public func setContent(_ content: String) {
         document = parser.parse(content)
+
+        // Clear stale caches from previous content
+        let currentBlockIDs = Set(document.blocks.map(\.id))
+        highlightedCodeBlocks = highlightedCodeBlocks.filter { currentBlockIDs.contains($0.key) }
+        parsedMathBlocks = parsedMathBlocks.filter { currentBlockIDs.contains($0.key) }
+        pendingHighlightTasks = pendingHighlightTasks.intersection(currentBlockIDs)
+
         rebuildLayout()
 
         // Clear selection when content changes
@@ -359,6 +377,7 @@ public class MetalMarkdownNSView: NSView {
 
         cachedLayout = layout
         contentHeight = layout.totalHeight
+        selectionHelper = VVMarkdownSelectionHelper(layout: layout, layoutEngine: layoutEngine)
         sceneDirty = true
     }
 
@@ -568,10 +587,6 @@ public class MetalMarkdownNSView: NSView {
     public override func layout() {
         super.layout()
         metalLayer.frame = bounds
-        metalLayer.drawableSize = CGSize(
-            width: bounds.width * metalLayer.contentsScale,
-            height: bounds.height * metalLayer.contentsScale
-        )
         rebuildLayout()
         needsRedraw = true
     }
@@ -615,7 +630,7 @@ public class MetalMarkdownNSView: NSView {
             return
         }
 
-        selectionStart = nearestTextPosition(to: contentPoint)
+        selectionStart = selectionHelper?.nearestTextPosition(to: contentPoint)
         selectionEnd = selectionStart
         isSelecting = true
         NSCursor.iBeam.set()
@@ -630,7 +645,7 @@ public class MetalMarkdownNSView: NSView {
         autoscrollForDrag(point)
         let contentPoint = contentPoint(from: point)
 
-        selectionEnd = nearestTextPosition(to: contentPoint) ?? selectionEnd
+        selectionEnd = selectionHelper?.nearestTextPosition(to: contentPoint) ?? selectionEnd
         NSCursor.iBeam.set()
         needsRedraw = true
     }
@@ -708,11 +723,10 @@ public class MetalMarkdownNSView: NSView {
     }
 
     private func selectAll() {
-        guard let layout = cachedLayout, !layout.blocks.isEmpty else { return }
+        guard let helper = selectionHelper else { return }
 
-        // Find first text position
-        selectionStart = findFirstPosition(in: layout)
-        selectionEnd = findLastPosition(in: layout)
+        selectionStart = helper.findFirstPosition()
+        selectionEnd = helper.findLastPosition()
         needsRedraw = true
     }
 
@@ -764,38 +778,11 @@ public class MetalMarkdownNSView: NSView {
         return slug
     }
 
-    private func findFirstPosition(in layout: MarkdownLayout) -> TextPosition? {
-        for (blockIndex, block) in layout.blocks.enumerated() {
-            if let runs = getTextRuns(from: block), let firstRun = runs.first, !firstRun.glyphs.isEmpty {
-                return TextPosition(blockIndex: blockIndex, runIndex: 0, glyphIndex: 0, characterOffset: 0)
-            }
-        }
-        return nil
-    }
-
-    private func findLastPosition(in layout: MarkdownLayout) -> TextPosition? {
-        for (blockIndex, block) in layout.blocks.enumerated().reversed() {
-            if let runs = getTextRuns(from: block), !runs.isEmpty {
-                let lastRunIndex = runs.count - 1
-                let lastRun = runs[lastRunIndex]
-                let length = (lastRun.text as NSString).length
-                if length > 0 || !lastRun.text.isEmpty {
-                    return TextPosition(
-                        blockIndex: blockIndex,
-                        runIndex: lastRunIndex,
-                        glyphIndex: length,
-                        characterOffset: length
-                    )
-                }
-            }
-        }
-        return nil
-    }
 
     private func copySelection() {
-        guard let start = selectionStart, let end = selectionEnd else { return }
+        guard let start = selectionStart, let end = selectionEnd, let helper = selectionHelper else { return }
 
-        let selectedText = getSelectedText(from: start, to: end)
+        let selectedText = helper.extractText(from: start, to: end)
         if !selectedText.isEmpty {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(selectedText, forType: .string)
@@ -856,150 +843,6 @@ public class MetalMarkdownNSView: NSView {
         )
     }
 
-    private func runBounds(_ run: LayoutTextRun) -> CGRect? {
-        return runLineBounds(run)
-    }
-
-    private func runGlyphBounds(_ run: LayoutTextRun) -> CGRect? {
-        return nil
-    }
-
-    private func runRenderedBounds(_ run: LayoutTextRun) -> CGRect? {
-        return runLineBounds(run) ?? runVisualBounds(run)
-    }
-
-    private func runHorizontalBounds(_ run: LayoutTextRun) -> (minX: CGFloat, maxX: CGFloat)? {
-        guard let metrics = lineMetrics(for: run) else { return nil }
-        let bounds = CTLineGetBoundsWithOptions(metrics.line, [.useGlyphPathBounds, .useOpticalBounds])
-        let minX = metrics.originX + bounds.origin.x
-        let maxX = minX + bounds.width
-        return (minX, maxX)
-    }
-
-    private func runLineBounds(_ run: LayoutTextRun) -> CGRect? {
-        let horizontal = runHorizontalBounds(run) ?? {
-            if let rendered = runRenderedBounds(run) {
-                return (rendered.minX, rendered.maxX)
-            }
-            return nil
-        }()
-
-        let startX = horizontal?.0 ?? run.position.x
-        let endX = horizontal?.1 ?? (run.position.x + 1)
-
-        if let lineY = run.lineY,
-           let lineHeight = run.lineHeight,
-           lineHeight > 0 {
-            return CGRect(
-                x: startX,
-                y: lineY,
-                width: max(1, endX - startX),
-                height: lineHeight
-            )
-        }
-
-        if let metrics = lineMetrics(for: run) {
-            return CGRect(
-                x: startX,
-                y: metrics.lineY,
-                width: max(1, endX - startX),
-                height: metrics.lineHeight
-            )
-        }
-
-        if let rendered = runRenderedBounds(run) {
-            return CGRect(x: rendered.minX, y: rendered.minY, width: rendered.width, height: rendered.height)
-        }
-        return nil
-    }
-
-    private func runVisualBounds(_ run: LayoutTextRun) -> CGRect? {
-        guard let metrics = lineMetrics(for: run) else { return runLineBounds(run) ?? runBounds(run) }
-        let bounds = CTLineGetBoundsWithOptions(metrics.line, [.useGlyphPathBounds, .useOpticalBounds])
-        let rect = CGRect(
-            x: metrics.originX + bounds.origin.x,
-            y: metrics.baseline + bounds.origin.y,
-            width: bounds.width,
-            height: bounds.height
-        )
-        if rect.width > 0 && rect.height > 0 {
-            return rect
-        }
-        return runLineBounds(run) ?? runBounds(run)
-    }
-
-    private func runHitBounds(_ run: LayoutTextRun) -> CGRect? {
-        guard var rect = runSelectionBounds(run) ?? runLineBounds(run) ?? runVisualBounds(run) ?? runBounds(run) else { return nil }
-        let padY = max(2, rect.height * 0.2)
-        let padX = max(2, rect.height * 0.12)
-        rect = rect.insetBy(dx: -padX, dy: -padY)
-        return rect
-    }
-
-    private func runSelectionBounds(_ run: LayoutTextRun) -> CGRect? {
-        let horizontal = runHorizontalBounds(run) ?? {
-            if let rendered = runRenderedBounds(run) {
-                return (rendered.minX, rendered.maxX)
-            }
-            return nil
-        }()
-        let startX = horizontal?.0 ?? run.position.x
-        let endX = horizontal?.1 ?? (run.position.x + 1)
-        let lineRect: CGRect?
-        if let metrics = lineMetrics(for: run) {
-            lineRect = CGRect(x: startX, y: metrics.lineY, width: max(1, endX - startX), height: metrics.lineHeight)
-        } else if let lineY = run.lineY, let lineHeight = run.lineHeight, lineHeight > 0 {
-            lineRect = CGRect(x: startX, y: lineY, width: max(1, endX - startX), height: lineHeight)
-        } else {
-            lineRect = nil
-        }
-        return lineRect
-    }
-
-    private func runTextLength(_ run: LayoutTextRun) -> Int {
-        (run.text as NSString).length
-    }
-
-    private func glyphIndexForX(_ run: LayoutTextRun, x: CGFloat) -> Int? {
-        guard let metrics = lineMetrics(for: run) else { return nil }
-        let relativeX = x - metrics.originX
-        var index = CTLineGetStringIndexForPosition(metrics.line, CGPoint(x: relativeX, y: 0))
-        if index == kCFNotFound {
-            index = relativeX <= 0 ? 0 : metrics.length
-        }
-        return max(0, min(index, metrics.length))
-    }
-
-    private func xForCharacterIndex(_ run: LayoutTextRun, index: Int, preferTrailingEdge: Bool) -> CGFloat? {
-        let length = runTextLength(run)
-        let clamped = max(0, min(index, length))
-        guard let metrics = lineMetrics(for: run) else { return nil }
-        let offset = CTLineGetOffsetForStringIndex(metrics.line, clamped, nil)
-        return metrics.originX + offset
-    }
-
-    private func runFontVariant(_ run: LayoutTextRun) -> FontVariant {
-        if run.style.isCode {
-            return .monospace
-        }
-        if run.style.isBold && run.style.isItalic {
-            return .boldItalic
-        }
-        if run.style.isBold {
-            return .bold
-        }
-        if let override = run.style.fontVariant {
-            if override == .semibold && run.style.isItalic {
-                return .semiboldItalic
-            }
-            return override
-        }
-        if run.style.isItalic {
-            return .italic
-        }
-        return .regular
-    }
-
     private func runFont(for run: LayoutTextRun) -> CTFont? {
         let baseSize = layoutEngine.baseFontSize
         let runFontSize: CGFloat
@@ -1008,145 +851,18 @@ public class MetalMarkdownNSView: NSView {
         } else {
             runFontSize = baseSize
         }
-        guard let baseFont = layoutEngine.font(for: runFontVariant(run)) else { return nil }
+        let variant: FontVariant
+        if run.style.isCode { variant = .monospace }
+        else if run.style.isBold && run.style.isItalic { variant = .boldItalic }
+        else if run.style.isBold { variant = .bold }
+        else if let override = run.style.fontVariant {
+            if override == .semibold && run.style.isItalic { variant = .semiboldItalic }
+            else { variant = override }
+        }
+        else if run.style.isItalic { variant = .italic }
+        else { variant = .regular }
+        guard let baseFont = layoutEngine.font(for: variant) else { return nil }
         return CTFontCreateCopyWithAttributes(baseFont, runFontSize, nil, nil)
-    }
-
-    private func lineMetrics(for run: LayoutTextRun) -> (line: CTLine, length: Int, originX: CGFloat, lineY: CGFloat, lineHeight: CGFloat, baseline: CGFloat, ascent: CGFloat, descent: CGFloat, lineWidth: CGFloat)? {
-        let length = runTextLength(run)
-        guard let font = runFont(for: run) else { return nil }
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .ligature: 1
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: run.text, attributes: attributes))
-        let baseline = run.position.y
-        let lineWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-
-        if let runLineY = run.lineY, let runLineHeight = run.lineHeight, runLineHeight > 0 {
-            let ascent = max(1, baseline - runLineY)
-            let descent = max(1, runLineY + runLineHeight - baseline)
-            return (line, length, run.position.x, runLineY, runLineHeight, baseline, ascent, descent, lineWidth)
-        }
-
-        let fontAscent = CTFontGetAscent(font)
-        let fontDescent = CTFontGetDescent(font)
-        let leading = CTFontGetLeading(font)
-        let ascent = fontAscent
-        let descent = fontDescent
-        let baseLineHeight = ceil((fontAscent + fontDescent + leading) * 1.05)
-        let extraLeading = max(0, baseLineHeight - (ascent + descent))
-        let lineY = baseline - ascent - extraLeading * 0.5
-        let lineHeight = baseLineHeight
-        return (line, length, run.position.x, lineY, lineHeight, baseline, ascent, descent, lineWidth)
-    }
-
-    private func hitTest(at point: CGPoint) -> TextPosition? {
-        guard let layout = cachedLayout else { return nil }
-
-        for (blockIndex, block) in layout.blocks.enumerated() {
-            guard let runs = getTextRuns(from: block) else { continue }
-            let allowHorizontalOutside: Bool
-            if case .codeBlock = block.blockType {
-                allowHorizontalOutside = true
-            } else {
-                allowHorizontalOutside = false
-            }
-
-            for (runIndex, run) in runs.enumerated() {
-                guard let metrics = lineMetrics(for: run) else { continue }
-                guard let lineRect = runHitBounds(run) else { continue }
-                let hitRect = lineRect.insetBy(dx: -4, dy: -4)
-                guard point.y >= hitRect.minY && point.y <= hitRect.maxY else { continue }
-                if !allowHorizontalOutside {
-                    guard point.x >= hitRect.minX && point.x <= hitRect.maxX else { continue }
-                }
-
-                let clamped: Int
-                if let glyphIndex = glyphIndexForX(run, x: point.x) {
-                    clamped = max(0, min(glyphIndex, metrics.length))
-                } else {
-                    let relativeX = point.x - metrics.originX
-                    var index = CTLineGetStringIndexForPosition(metrics.line, CGPoint(x: relativeX, y: 0))
-                    if index == kCFNotFound {
-                        index = relativeX <= 0 ? 0 : metrics.length
-                    }
-                    clamped = max(0, min(index, metrics.length))
-                }
-                return TextPosition(
-                    blockIndex: blockIndex,
-                    runIndex: runIndex,
-                    glyphIndex: clamped,
-                    characterOffset: clamped
-                )
-            }
-        }
-
-        return nil
-    }
-
-    private func nearestTextPosition(to point: CGPoint) -> TextPosition? {
-        guard let layout = cachedLayout, !layout.blocks.isEmpty else { return nil }
-        if let first = findFirstPosition(in: layout),
-           let last = findLastPosition(in: layout) {
-            let firstFrame = layout.blocks.first?.frame ?? .zero
-            let lastFrame = layout.blocks.last?.frame ?? .zero
-            if point.y <= firstFrame.minY { return first }
-            if point.y >= lastFrame.maxY { return last }
-        }
-
-        var closestBlockIndex: Int?
-        var closestBlockDistance = CGFloat.greatestFiniteMagnitude
-        for (index, block) in layout.blocks.enumerated() {
-            guard getTextRuns(from: block) != nil else { continue }
-            let frame = block.frame
-            let distance: CGFloat
-            if point.y < frame.minY {
-                distance = frame.minY - point.y
-            } else if point.y > frame.maxY {
-                distance = point.y - frame.maxY
-            } else {
-                distance = 0
-            }
-            if distance < closestBlockDistance {
-                closestBlockDistance = distance
-                closestBlockIndex = index
-                if distance == 0 { break }
-            }
-        }
-
-        guard let blockIndex = closestBlockIndex else { return nil }
-        guard let runs = getTextRuns(from: layout.blocks[blockIndex]), !runs.isEmpty else {
-            return nil
-        }
-
-        var closestRunIndex = 0
-        var closestRunDistance = CGFloat.greatestFiniteMagnitude
-        var closestRunRect: CGRect?
-        for (runIndex, run) in runs.enumerated() {
-            guard let lineRect = runHitBounds(run) ?? runLineBounds(run) ?? runSelectionBounds(run) else { continue }
-            let distance = abs(point.y - lineRect.midY)
-            if distance < closestRunDistance {
-                closestRunDistance = distance
-                closestRunIndex = runIndex
-                closestRunRect = lineRect
-                if distance == 0 { break }
-            }
-        }
-
-        let run = runs[closestRunIndex]
-        let rect = closestRunRect ?? runHitBounds(run) ?? runLineBounds(run) ?? CGRect(x: run.position.x, y: run.position.y, width: 1, height: 1)
-        let clampedX = min(max(point.x, rect.minX), rect.maxX)
-        let clampedIndex = glyphIndexForX(run, x: clampedX) ?? 0
-        let length = runTextLength(run)
-        let index = max(0, min(clampedIndex, length))
-        return TextPosition(
-            blockIndex: blockIndex,
-            runIndex: closestRunIndex,
-            glyphIndex: index,
-            characterOffset: index
-        )
     }
 
     private func autoscrollForDrag(_ point: CGPoint) {
@@ -1176,211 +892,6 @@ public class MetalMarkdownNSView: NSView {
         }
     }
 
-    private func getTextRuns(from block: LayoutBlock) -> [LayoutTextRun]? {
-        switch block.content {
-        case .text(let runs):
-            return runs
-        case .inline(let runs, _):
-            return runs
-        case .code(_, _, let lines):
-            return codeTextRuns(from: block, lines: lines)
-        case .imageRow:
-            return nil
-        case .listItems(let items):
-            return textRuns(in: items)
-        case .quoteBlocks(let blocks):
-            return blocks.compactMap { getTextRuns(from: $0) }.flatMap { $0 }
-        case .tableRows(let rows):
-            return rows.flatMap { $0.cells.flatMap { $0.textRuns } }
-        case .definitionList(let items):
-            var runs: [LayoutTextRun] = []
-            for item in items {
-                runs.append(contentsOf: item.termRuns)
-                for defRuns in item.definitionRuns {
-                    runs.append(contentsOf: defRuns)
-                }
-            }
-            return runs
-        case .abbreviationList(let items):
-            return items.flatMap { $0.runs }
-        case .mermaid:
-            return nil
-        default:
-            return nil
-        }
-    }
-
-    private func codeTextRuns(from block: LayoutBlock, lines: [LayoutCodeLine]) -> [LayoutTextRun] {
-        guard !lines.isEmpty else { return [] }
-
-        let padding = CGFloat(theme.codeBlockPadding)
-        let borderWidth = CGFloat(theme.codeBorderWidth)
-        let frame = block.frame
-        let contentOriginX = frame.origin.x + borderWidth
-        let contentOriginY = frame.origin.y + borderWidth
-
-        let maxLineNumber = max(lines.map(\.lineNumber).max() ?? 0, 1)
-        let gutterWidth = codeGutterWidth(for: maxLineNumber)
-        let startX = contentOriginX + padding + gutterWidth
-        let lineHeight = layoutEngine.currentLineHeight
-        let ascent = layoutEngine.currentAscent
-        let descent = layoutEngine.currentDescent
-        let extraLeading = max(0, lineHeight - (ascent + descent))
-        let baselineOffset = ascent + extraLeading * 0.5
-
-        var runs: [LayoutTextRun] = []
-        runs.reserveCapacity(lines.count)
-
-        for line in lines {
-            let lineY = contentOriginY + line.yOffset
-            let lineTop = lineY - baselineOffset
-            let glyphs = layoutEngine.layoutCodeGlyphs(line.text, at: CGPoint(x: startX, y: lineY), color: theme.codeColor)
-            var style = TextRunStyle(color: theme.codeColor)
-            style.isCode = true
-            let range = 0..<max(0, line.text.count)
-            runs.append(LayoutTextRun(
-                text: line.text,
-                position: CGPoint(x: startX, y: lineY),
-                glyphs: glyphs,
-                style: style,
-                characterRange: range,
-                lineY: lineTop,
-                lineHeight: lineHeight
-            ))
-        }
-
-        return runs
-    }
-
-    private func textRuns(in items: [LayoutListItem]) -> [LayoutTextRun] {
-        var runs: [LayoutTextRun] = []
-        for item in items {
-            runs.append(contentsOf: item.contentRuns)
-            runs.append(contentsOf: textRuns(in: item.children))
-        }
-        return runs
-    }
-
-    private func getSelectedText(from start: TextPosition, to end: TextPosition) -> String {
-        guard let layout = cachedLayout else { return "" }
-
-        let (actualStart, actualEnd) = start < end ? (start, end) : (end, start)
-        var selectedText = ""
-
-        for (blockIndex, block) in layout.blocks.enumerated() {
-            guard blockIndex >= actualStart.blockIndex && blockIndex <= actualEnd.blockIndex else { continue }
-            guard let runs = getTextRuns(from: block) else { continue }
-
-            for (runIndex, run) in runs.enumerated() {
-                let isStartBlock = blockIndex == actualStart.blockIndex
-                let isEndBlock = blockIndex == actualEnd.blockIndex
-                let isStartRun = isStartBlock && runIndex == actualStart.runIndex
-                let isEndRun = isEndBlock && runIndex == actualEnd.runIndex
-
-                if isStartBlock && runIndex < actualStart.runIndex { continue }
-                if isEndBlock && runIndex > actualEnd.runIndex { break }
-
-                let length = runTextLength(run)
-                let startIndex: Int = isStartRun ? min(actualStart.characterOffset, length) : 0
-                let endIndex: Int = isEndRun ? min(actualEnd.characterOffset, length) : length
-
-                if startIndex < endIndex {
-                    let nsText = run.text as NSString
-                    let range = NSRange(location: startIndex, length: endIndex - startIndex)
-                    selectedText += nsText.substring(with: range)
-                }
-            }
-
-            // Add newline between blocks
-            if blockIndex < actualEnd.blockIndex {
-                selectedText += "\n"
-            }
-        }
-
-        return selectedText
-    }
-
-    private func getSelectionRects() -> [CGRect] {
-        guard let start = selectionStart, let end = selectionEnd, let layout = cachedLayout else { return [] }
-
-        let (actualStart, actualEnd) = start < end ? (start, end) : (end, start)
-        var segments: [SelectionSegment] = []
-
-        for (blockIndex, block) in layout.blocks.enumerated() {
-            guard blockIndex >= actualStart.blockIndex && blockIndex <= actualEnd.blockIndex else { continue }
-            guard let runs = getTextRuns(from: block) else { continue }
-
-            for (runIndex, run) in runs.enumerated() {
-                let isStartBlock = blockIndex == actualStart.blockIndex
-                let isEndBlock = blockIndex == actualEnd.blockIndex
-                let isStartRun = isStartBlock && runIndex == actualStart.runIndex
-                let isEndRun = isEndBlock && runIndex == actualEnd.runIndex
-
-                if isStartBlock && runIndex < actualStart.runIndex { continue }
-                if isEndBlock && runIndex > actualEnd.runIndex { break }
-
-                guard let metrics = lineMetrics(for: run) else { continue }
-                let length = metrics.length
-                let startIndex = isStartRun ? min(actualStart.characterOffset, length) : 0
-                let endIndex = isEndRun ? min(actualEnd.characterOffset, length) : length
-
-                if startIndex < endIndex {
-                    let startOffset = CTLineGetOffsetForStringIndex(metrics.line, startIndex, nil)
-                    let endOffset = CTLineGetOffsetForStringIndex(metrics.line, endIndex, nil)
-                    var startX = metrics.originX + startOffset
-                    var endX = metrics.originX + endOffset
-
-                    if let glyphStartX = xForCharacterIndex(run, index: startIndex, preferTrailingEdge: false) {
-                        startX = glyphStartX
-                    }
-                    if let glyphEndX = xForCharacterIndex(run, index: endIndex, preferTrailingEdge: true) {
-                        endX = glyphEndX
-                    }
-                    if endX < startX {
-                        swap(&startX, &endX)
-                    }
-                    if endX <= startX {
-                        let fontSize = layoutEngine.baseFontSize
-                        let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(for: Character(" "), variant: .regular, fontSize: fontSize)?.advance ?? 8
-                        endX = startX + spaceWidth
-                    }
-
-                    let lineRect = runSelectionBounds(run)
-                    let selectionY = lineRect?.minY ?? metrics.lineY
-                    let selectionHeight = lineRect?.height ?? metrics.lineHeight
-                    let lineKey = Int(round((selectionY + selectionHeight * 0.5) * 0.5))
-                    segments.append(SelectionSegment(
-                        lineKey: lineKey,
-                        rect: CGRect(
-                            x: startX,
-                            y: selectionY,
-                            width: max(0, endX - startX),
-                            height: selectionHeight
-                        )
-                    ))
-                }
-            }
-        }
-
-        guard !segments.isEmpty else { return [] }
-
-        var grouped: [SelectionSegment] = []
-        let sortedSegments = segments.sorted { $0.rect.minY < $1.rect.minY }
-        for segment in sortedSegments {
-            if let index = grouped.firstIndex(where: {
-                segment.rect.maxY >= $0.rect.minY - 4 && segment.rect.minY <= $0.rect.maxY + 4
-            }) {
-                let existing = grouped[index].rect
-                let mergedRect = existing.union(segment.rect)
-                grouped[index] = SelectionSegment(lineKey: grouped[index].lineKey, rect: mergedRect)
-            } else {
-                grouped.append(segment)
-            }
-        }
-
-        let merged = grouped.map { $0.rect }
-        return merged.sorted { $0.minY < $1.minY }
-    }
 
     private func linkURL(at point: CGPoint) -> String? {
         guard let layout = cachedLayout else { return nil }
@@ -1478,7 +989,7 @@ public class MetalMarkdownNSView: NSView {
     private func linkURL(in runs: [LayoutTextRun], point: CGPoint) -> String? {
         for run in runs where run.style.isLink {
             guard let url = run.style.linkURL else { continue }
-            let baseBounds = runSelectionBounds(run) ?? runLineBounds(run) ?? runHitBounds(run)
+            let baseBounds = selectionHelper?.runSelectionBounds(run) ?? selectionHelper?.runLineBounds(run) ?? selectionHelper?.runHitBounds(run)
             guard let bounds = baseBounds else { continue }
             let hitPadY = max(2, bounds.height * 0.18)
             let hitBounds = bounds.insetBy(dx: -3, dy: -hitPadY)
@@ -1574,20 +1085,24 @@ public class MetalMarkdownNSView: NSView {
     }
 
     private func buildScene(from layout: MarkdownLayout) -> VVScene {
+        let helper = selectionHelper
         let pipeline = VVMarkdownRenderPipeline(
             theme: theme,
             layoutEngine: layoutEngine,
             scale: currentScaleFactor,
-            componentProvider: componentProvider,
+            viewProvider: viewProvider,
             styleRegistry: styleRegistry,
             highlightedCodeBlocks: highlightedCodeBlocks,
             copiedBlockId: copiedBlockId,
             copiedAt: copiedAt,
-            runLineBounds: { [weak self] run in self?.runLineBounds(run) },
-            runRenderedBounds: { [weak self] run in self?.runRenderedBounds(run) },
-            runBounds: { [weak self] run in self?.runBounds(run) },
-            runVisualBounds: { [weak self] run in self?.runVisualBounds(run) },
-            lineMetrics: { [weak self] run in self?.lineMetrics(for: run) },
+            runLineBounds: { run in helper?.runLineBounds(run) },
+            runRenderedBounds: { run in helper?.runRenderedBounds(run) },
+            runBounds: { run in helper?.runLineBounds(run) },
+            runVisualBounds: { run in helper?.runVisualBounds(run) },
+            lineMetrics: { run in
+                guard let m = helper?.lineMetrics(for: run) else { return nil }
+                return (m.line, m.length, m.originX, m.lineY, m.lineHeight, m.baseline, m.ascent, m.descent, m.lineWidth)
+            },
             runFont: { [weak self] run in self?.runFont(for: run) }
         )
         return pipeline.buildScene(from: layout)
@@ -1598,11 +1113,21 @@ public class MetalMarkdownNSView: NSView {
     private func render() {
         needsRedraw = false
 
+        // Validate drawable size before every render — self-corrects after release
+        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        let scale = metalLayer.contentsScale
+        let expectedW = max(1, bounds.width * scale)
+        let expectedH = max(1, bounds.height * scale)
+        if abs(metalLayer.drawableSize.width - expectedW) > 0.5
+            || abs(metalLayer.drawableSize.height - expectedH) > 0.5 {
+            metalLayer.drawableSize = CGSize(width: expectedW, height: expectedH)
+        }
+
         if isSelecting, let dragPoint = lastDragPoint {
             let beforeOffset = scrollOffset
             autoscrollForDrag(dragPoint)
             let contentPoint = contentPoint(from: dragPoint)
-            let newEnd = nearestTextPosition(to: contentPoint)
+            let newEnd = selectionHelper?.nearestTextPosition(to: contentPoint)
             if newEnd != selectionEnd {
                 selectionEnd = newEnd
                 needsRedraw = true
@@ -1653,7 +1178,8 @@ public class MetalMarkdownNSView: NSView {
     }
 
     private func renderSelectionHighlights(encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
-        let rects = getSelectionRects()
+        guard let start = selectionStart, let end = selectionEnd, let helper = selectionHelper else { return }
+        let rects = helper.selectionRects(from: start, to: end)
         guard !rects.isEmpty else { return }
 
         var instances: [QuadInstance] = []
@@ -1735,6 +1261,9 @@ public class MetalMarkdownNSView: NSView {
                 renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
             }
 
+        case .gradientQuad(let quad):
+            renderGradientQuad(quad, encoder: encoder, renderer: renderer)
+
         case .line(let line):
             let minX = min(line.start.x, line.end.x)
             let minY = min(line.start.y, line.end.y)
@@ -1796,8 +1325,8 @@ public class MetalMarkdownNSView: NSView {
                     renderer.renderImages(encoder: encoder, instances: buffer, instanceCount: 1, texture: texture)
                 }
             } else {
-                let borderColor = SIMD4<Float>(0.35, 0.35, 0.35, 1.0)
-                let background = SIMD4<Float>(0.12, 0.12, 0.12, 1.0)
+                let borderColor: SIMD4<Float> = .gray(0.35)
+                let background: SIMD4<Float> = .gray(0.12)
                 let border = QuadInstance(
                     position: SIMD2<Float>(Float(image.frame.origin.x), Float(image.frame.origin.y)),
                     size: SIMD2<Float>(Float(image.frame.width), Float(image.frame.height)),
@@ -1852,7 +1381,82 @@ public class MetalMarkdownNSView: NSView {
 
         case .textRun:
             break
+
+        case .underline(let underline):
+            let minX = underline.origin.x
+            let y = underline.origin.y
+            let instance = LineInstance(
+                position: SIMD2<Float>(Float(minX), Float(y)),
+                width: Float(underline.width),
+                height: Float(underline.thickness),
+                color: underline.color
+            )
+            if let buffer = renderer.makeBuffer(for: [instance]) {
+                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
+            }
+
+        case .path:
+            break
         }
+    }
+
+    private func renderGradientQuad(
+        _ gradient: VVGradientQuadPrimitive,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
+        let stepCount = max(2, min(36, gradient.steps))
+        let frame = gradient.frame.integral
+        guard frame.width > 0, frame.height > 0 else { return }
+
+        var instances: [QuadInstance] = []
+        instances.reserveCapacity(stepCount)
+
+        switch gradient.direction {
+        case .horizontal:
+            let segmentWidth = frame.width / CGFloat(stepCount)
+            for index in 0..<stepCount {
+                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
+                let x = frame.minX + CGFloat(index) * segmentWidth
+                let width = index == stepCount - 1 ? max(0, frame.maxX - x) : segmentWidth + 0.75
+                guard width > 0 else { continue }
+                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
+                instances.append(
+                    QuadInstance(
+                        position: SIMD2<Float>(Float(x), Float(frame.minY)),
+                        size: SIMD2<Float>(Float(width), Float(frame.height)),
+                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
+                        cornerRadius: Float(cornerRadius)
+                    )
+                )
+            }
+
+        case .vertical:
+            let segmentHeight = frame.height / CGFloat(stepCount)
+            for index in 0..<stepCount {
+                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
+                let y = frame.minY + CGFloat(index) * segmentHeight
+                let height = index == stepCount - 1 ? max(0, frame.maxY - y) : segmentHeight + 0.75
+                guard height > 0 else { continue }
+                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
+                instances.append(
+                    QuadInstance(
+                        position: SIMD2<Float>(Float(frame.minX), Float(y)),
+                        size: SIMD2<Float>(Float(frame.width), Float(height)),
+                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
+                        cornerRadius: Float(cornerRadius)
+                    )
+                )
+            }
+        }
+
+        guard !instances.isEmpty, let buffer = renderer.makeBuffer(for: instances) else { return }
+        renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: gradient.cornerRadius > 0)
+    }
+
+    private func lerpColor(_ start: SIMD4<Float>, _ end: SIMD4<Float>, t: Float) -> SIMD4<Float> {
+        let clamped = max(0, min(1, t))
+        return start + (end - start) * clamped
     }
 
     private func appendTextPrimitive(
@@ -1902,7 +1506,7 @@ public class MetalMarkdownNSView: NSView {
         if let fontName = glyph.fontName {
             return renderer.glyphAtlas.glyph(for: glyph.glyphID, fontName: fontName, fontSize: glyph.fontSize, variant: glyph.fontVariant)
         }
-        return renderer.glyphAtlas.glyph(for: glyph.glyphID, variant: glyph.fontVariant, fontSize: glyph.fontSize)
+        return renderer.glyphAtlas.glyph(for: glyph.glyphID, variant: glyph.fontVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
     private func toLayoutFontVariant(_ variant: VVFontVariant) -> FontVariant {
@@ -1924,7 +1528,7 @@ public class MetalMarkdownNSView: NSView {
         if let fontName = glyph.fontName {
             return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
         }
-        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize)
+        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
     private func appendGlyphInstance(
@@ -1996,10 +1600,9 @@ public class MetalMarkdownNSView: NSView {
     }
 
     private func codeGutterWidth(for maxLineNumber: Int) -> CGFloat {
-        let digitCount = max(1, String(max(1, maxLineNumber)).count)
-        let sample = String(repeating: "8", count: digitCount)
-        let textWidth = layoutEngine.measureTextWidth(sample, variant: .monospace)
-        return max(36, textWidth + 20)
+        let digits = max(1, String(maxLineNumber).count)
+        let charWidth = layoutEngine.measureTextWidth("8", variant: .monospace)
+        return max(30, (CGFloat(digits) + 1.2) * charWidth)
     }
 
     private func fullScissorRect() -> MTLScissorRect {
@@ -2047,15 +1650,15 @@ public class MetalMarkdownNSView: NSView {
 
         if debugOptions.contains(.textBaselines) {
             for block in layout.blocks {
-                guard let runs = getTextRuns(from: block) else { continue }
+                guard let runs = selectionHelper?.getTextRuns(from: block) else { continue }
                 for run in runs {
-                    guard let bounds = runBounds(run) else { continue }
+                    guard let bounds = selectionHelper?.runLineBounds(run) else { continue }
                     let baseline = run.position.y
                     lines.append(LineInstance(
                         position: SIMD2<Float>(Float(bounds.minX), Float(baseline)),
                         width: Float(bounds.width),
                         height: 1,
-                        color: SIMD4<Float>(0.3, 0.8, 0.6, 0.6)
+                        color: .teal.withOpacity(0.6)
                     ))
                 }
             }
@@ -2081,7 +1684,7 @@ public class MetalMarkdownNSView: NSView {
                     images = []
                 }
                 for image in images {
-                    appendRect(image.frame, color: SIMD4<Float>(0.9, 0.5, 0.2, 0.7))
+                    appendRect(image.frame, color: .orange.withOpacity(0.7))
                 }
             }
         }
@@ -2099,7 +1702,7 @@ public class MetalMarkdownNSView: NSView {
                     width: gutterWidth,
                     height: max(0, block.frame.height - headerHeight - borderWidth * 2)
                 )
-                appendRect(gutterFrame, color: SIMD4<Float>(0.5, 0.7, 1.0, 0.6))
+                appendRect(gutterFrame, color: .blue.withOpacity(0.6))
             }
         }
 
@@ -2159,7 +1762,7 @@ public class MetalMarkdownNSView: NSView {
         func describeRuns(_ runs: [LayoutTextRun], indent: String) -> [String] {
             var lines: [String] = []
             for (index, run) in runs.prefix(maxRunsPerBlock).enumerated() {
-                let bounds = runBounds(run) ?? .zero
+                let bounds = selectionHelper?.runLineBounds(run) ?? .zero
                 let style = describeRunStyle(run.style)
                 let text = run.text.replacingOccurrences(of: "\n", with: "\\n")
                 lines.append("\(indent)[\(index)] \"\(text)\" pos \(formatPoint(run.position)) bounds \(formatRect(bounds)) style \(style)")
@@ -2262,25 +1865,25 @@ public class MetalMarkdownNSView: NSView {
     private func debugColor(for blockType: LayoutBlockType) -> SIMD4<Float> {
         switch blockType {
         case .heading:
-            return SIMD4<Float>(0.4, 0.6, 1.0, 0.6)
+            return .blue.withOpacity(0.6)
         case .codeBlock:
-            return SIMD4<Float>(0.6, 0.9, 0.6, 0.6)
+            return .green.withOpacity(0.6)
         case .table:
-            return SIMD4<Float>(0.9, 0.6, 0.3, 0.6)
+            return .orange.withOpacity(0.6)
         case .list:
-            return SIMD4<Float>(0.7, 0.7, 0.7, 0.6)
+            return .gray70.withOpacity(0.6)
         case .blockQuote:
-            return SIMD4<Float>(0.8, 0.5, 0.8, 0.6)
+            return .purple.withOpacity(0.6)
         case .alert:
-            return SIMD4<Float>(0.9, 0.4, 0.4, 0.6)
+            return .red.withOpacity(0.6)
         case .definitionList:
-            return SIMD4<Float>(0.6, 0.8, 0.9, 0.6)
+            return .cyan.withOpacity(0.6)
         case .abbreviationList:
-            return SIMD4<Float>(0.6, 0.9, 0.8, 0.6)
+            return .teal.withOpacity(0.6)
         case .mermaid:
-            return SIMD4<Float>(0.9, 0.7, 0.4, 0.6)
+            return .amber.withOpacity(0.6)
         default:
-            return SIMD4<Float>(0.5, 0.5, 0.5, 0.4)
+            return .gray50.withOpacity(0.4)
         }
     }
 
@@ -2306,14 +1909,14 @@ public class MetalMarkdownUIView: UIView {
 
     private var theme: MarkdownTheme
     private var baseFont: VVFont
-    private let componentProvider: MarkdownComponentProvider?
+    private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
-    public init(frame: CGRect, font: VVFont, theme: MarkdownTheme, componentProvider: MarkdownComponentProvider? = nil, styleRegistry: MarkdownStyleRegistry? = nil) {
+    public init(frame: CGRect, font: VVFont, theme: MarkdownTheme, viewProvider: MarkdownViewProvider? = nil, styleRegistry: MarkdownStyleRegistry? = nil) {
         self.baseFont = font
         self.theme = theme
         self.layoutEngine = MarkdownLayoutEngine(baseFont: font, theme: theme, contentWidth: frame.width)
-        self.componentProvider = componentProvider
+        self.viewProvider = viewProvider
         self.styleRegistry = styleRegistry
         super.init(frame: frame)
         setup()
@@ -2323,27 +1926,24 @@ public class MetalMarkdownUIView: UIView {
         self.baseFont = .systemFont(ofSize: 14)
         self.theme = .dark
         self.layoutEngine = MarkdownLayoutEngine(baseFont: baseFont, theme: theme, contentWidth: 600)
-        self.componentProvider = nil
+        self.viewProvider = nil
         self.styleRegistry = nil
         super.init(coder: coder)
         setup()
     }
 
     private func setup() {
+        let ctx = VVMetalContext.shared
         metalLayer = CAMetalLayer()
-        metalLayer.device = MTLCreateSystemDefaultDevice()
+        metalLayer.device = ctx?.device ?? MTLCreateSystemDefaultDevice()
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
         metalLayer.contentsScale = UIScreen.main.scale
 
         layer.addSublayer(metalLayer)
 
-        if let device = metalLayer.device {
-            do {
-                renderer = try MarkdownMetalRenderer(device: device, baseFont: baseFont, scaleFactor: metalLayer.contentsScale)
-            } catch {
-                print("Failed to create markdown renderer: \(error)")
-            }
+        if let ctx {
+            renderer = MarkdownMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: metalLayer.contentsScale)
         }
 
         displayLink = CADisplayLink(target: self, selector: #selector(renderIfNeeded))

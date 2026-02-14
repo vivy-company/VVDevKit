@@ -4,6 +4,7 @@ public struct VVNode: Hashable, Sendable {
     public var offset: CGPoint
     public var clipRect: CGRect?
     public var zIndex: Int
+    public var transform: VVTransform2D?
     public var primitives: [VVPrimitiveKind]
     public var children: [VVNode]
 
@@ -11,12 +12,14 @@ public struct VVNode: Hashable, Sendable {
         offset: CGPoint = .zero,
         clipRect: CGRect? = nil,
         zIndex: Int = 0,
+        transform: VVTransform2D? = nil,
         primitives: [VVPrimitiveKind] = [],
         children: [VVNode] = []
     ) {
         self.offset = offset
         self.clipRect = clipRect
         self.zIndex = zIndex
+        self.transform = transform
         self.primitives = primitives
         self.children = children
     }
@@ -51,7 +54,7 @@ public struct VVNode: Hashable, Sendable {
 
         let resolvedZ = parentZ + zIndex
         for kind in primitives {
-            let offsetKind = offsetPrimitive(kind, by: combinedOffset)
+            let offsetKind = Self.offsetPrimitive(kind, by: combinedOffset)
             output.append(VVPrimitive(kind: offsetKind, clipRect: combinedClip, zIndex: resolvedZ))
         }
 
@@ -60,71 +63,60 @@ public struct VVNode: Hashable, Sendable {
         }
     }
 
-    private func offsetPrimitive(_ kind: VVPrimitiveKind, by offset: CGPoint) -> VVPrimitiveKind {
+    /// Offsets a primitive's position-related fields by the given amount, preserving all other fields.
+    static func offsetPrimitive(_ kind: VVPrimitiveKind, by offset: CGPoint) -> VVPrimitiveKind {
+        guard offset != .zero else { return kind }
         switch kind {
-        case .quad(let quad):
-            let updated = VVQuadPrimitive(
-                frame: quad.frame.offsetBy(dx: offset.x, dy: offset.y),
-                color: quad.color,
-                cornerRadius: quad.cornerRadius
-            )
-            return .quad(updated)
+        case .quad(var quad):
+            quad.frame = quad.frame.offsetBy(dx: offset.x, dy: offset.y)
+            return .quad(quad)
 
-        case .line(let line):
-            let updated = VVLinePrimitive(
-                start: CGPoint(x: line.start.x + offset.x, y: line.start.y + offset.y),
-                end: CGPoint(x: line.end.x + offset.x, y: line.end.y + offset.y),
-                thickness: line.thickness,
-                color: line.color
-            )
-            return .line(updated)
+        case .gradientQuad(var gradient):
+            gradient.frame = gradient.frame.offsetBy(dx: offset.x, dy: offset.y)
+            return .gradientQuad(gradient)
 
-        case .bullet(let bullet):
-            let updated = VVBulletPrimitive(
-                position: CGPoint(x: bullet.position.x + offset.x, y: bullet.position.y + offset.y),
-                size: bullet.size,
-                color: bullet.color,
-                type: bullet.type
-            )
-            return .bullet(updated)
+        case .line(var line):
+            line.start = CGPoint(x: line.start.x + offset.x, y: line.start.y + offset.y)
+            line.end = CGPoint(x: line.end.x + offset.x, y: line.end.y + offset.y)
+            return .line(line)
 
-        case .image(let image):
-            let updated = VVImagePrimitive(
-                url: image.url,
-                frame: image.frame.offsetBy(dx: offset.x, dy: offset.y),
-                cornerRadius: image.cornerRadius
-            )
-            return .image(updated)
+        case .underline(var underline):
+            underline.origin = CGPoint(x: underline.origin.x + offset.x, y: underline.origin.y + offset.y)
+            return .underline(underline)
 
-        case .blockQuoteBorder(let border):
-            let updated = VVBlockQuoteBorderPrimitive(
-                frame: border.frame.offsetBy(dx: offset.x, dy: offset.y),
-                color: border.color,
-                borderWidth: border.borderWidth
-            )
-            return .blockQuoteBorder(updated)
+        case .bullet(var bullet):
+            bullet.position = CGPoint(x: bullet.position.x + offset.x, y: bullet.position.y + offset.y)
+            return .bullet(bullet)
 
-        case .tableLine(let line):
-            let updated = VVTableLinePrimitive(
-                start: CGPoint(x: line.start.x + offset.x, y: line.start.y + offset.y),
-                end: CGPoint(x: line.end.x + offset.x, y: line.end.y + offset.y),
-                color: line.color,
-                lineWidth: line.lineWidth
-            )
-            return .tableLine(updated)
+        case .image(var image):
+            image.frame = image.frame.offsetBy(dx: offset.x, dy: offset.y)
+            return .image(image)
 
-        case .pieSlice(let slice):
-            let updated = VVPieSlicePrimitive(
-                center: CGPoint(x: slice.center.x + offset.x, y: slice.center.y + offset.y),
-                radius: slice.radius,
-                startAngle: slice.startAngle,
-                endAngle: slice.endAngle,
-                color: slice.color
-            )
-            return .pieSlice(updated)
+        case .blockQuoteBorder(var border):
+            border.frame = border.frame.offsetBy(dx: offset.x, dy: offset.y)
+            return .blockQuoteBorder(border)
 
-        case .textRun(let run):
-            let glyphs = run.glyphs.map { glyph -> VVTextGlyph in
+        case .tableLine(var line):
+            line.start = CGPoint(x: line.start.x + offset.x, y: line.start.y + offset.y)
+            line.end = CGPoint(x: line.end.x + offset.x, y: line.end.y + offset.y)
+            return .tableLine(line)
+
+        case .pieSlice(var slice):
+            slice.center = CGPoint(x: slice.center.x + offset.x, y: slice.center.y + offset.y)
+            return .pieSlice(slice)
+
+        case .path(var path):
+            path.bounds = path.bounds.offsetBy(dx: offset.x, dy: offset.y)
+            path.vertices = path.vertices.map {
+                VVPathVertex(
+                    position: CGPoint(x: $0.position.x + offset.x, y: $0.position.y + offset.y),
+                    stPosition: $0.stPosition
+                )
+            }
+            return .path(path)
+
+        case .textRun(var run):
+            run.glyphs = run.glyphs.map { glyph in
                 VVTextGlyph(
                     glyphID: glyph.glyphID,
                     position: CGPoint(x: glyph.position.x + offset.x, y: glyph.position.y + offset.y),
@@ -136,15 +128,10 @@ public struct VVNode: Hashable, Sendable {
                     stringIndex: glyph.stringIndex
                 )
             }
-            let updated = VVTextRunPrimitive(
-                glyphs: glyphs,
-                style: run.style,
-                lineBounds: run.lineBounds?.offsetBy(dx: offset.x, dy: offset.y),
-                runBounds: run.runBounds?.offsetBy(dx: offset.x, dy: offset.y),
-                position: CGPoint(x: run.position.x + offset.x, y: run.position.y + offset.y),
-                fontSize: run.fontSize
-            )
-            return .textRun(updated)
+            run.lineBounds = run.lineBounds?.offsetBy(dx: offset.x, dy: offset.y)
+            run.runBounds = run.runBounds?.offsetBy(dx: offset.x, dy: offset.y)
+            run.position = CGPoint(x: run.position.x + offset.x, y: run.position.y + offset.y)
+            return .textRun(run)
         }
     }
 }

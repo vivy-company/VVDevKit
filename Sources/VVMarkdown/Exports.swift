@@ -28,6 +28,7 @@
 //   - MarkdownLayoutEngine
 //
 // Metal Rendering:
+//   - VVMetalContext (shared Metal resources + SwiftUI EnvironmentKey: \.vvMetalContext)
 //   - MarkdownUniforms
 //   - MarkdownGlyphInstance, QuadInstance
 //   - BulletInstance, CheckboxInstance
@@ -48,6 +49,11 @@
 //   - MarkdownMathRenderer
 //   - RenderedMath, MathToken, MathSymbol, MathCategory
 //   - MathGlyphRun
+//
+// Selection:
+//   - MarkdownTextPosition
+//   - MarkdownLineMetrics
+//   - VVMarkdownSelectionHelper
 //
 // Views:
 //   - VVMarkdownView

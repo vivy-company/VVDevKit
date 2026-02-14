@@ -64,17 +64,20 @@ public final class MarkdownImageLoader: @unchecked Sendable {
     private let device: MTLDevice
     private var textureCache: [String: MTLTexture] = [:]
     private var loadingTasks: [String: Task<MTLTexture?, Never>] = [:]
+    private var cacheOrder: [String] = []
     private let queue = DispatchQueue(label: "com.vvmarkdown.imageloader")
     private let textureLoader: MTKTextureLoader
     private let maxImageSize: CGFloat
+    private let maxCacheEntries: Int
     private let placeholderTexture: MTLTexture?
 
     // MARK: - Initialization
 
-    public init(device: MTLDevice, maxImageSize: CGFloat = 1024) {
+    public init(device: MTLDevice, maxImageSize: CGFloat = 1024, maxCacheEntries: Int = 64) {
         self.device = device
         self.textureLoader = MTKTextureLoader(device: device)
         self.maxImageSize = maxImageSize
+        self.maxCacheEntries = maxCacheEntries
         self.placeholderTexture = Self.createPlaceholderTexture(device: device)
     }
 
@@ -117,6 +120,12 @@ public final class MarkdownImageLoader: @unchecked Sendable {
                 if let texture = await task.value {
                     self.queue.async {
                         self.textureCache[urlString] = texture
+                        self.cacheOrder.removeAll(where: { $0 == urlString })
+                        self.cacheOrder.append(urlString)
+                        while self.cacheOrder.count > self.maxCacheEntries {
+                            let evicted = self.cacheOrder.removeFirst()
+                            self.textureCache.removeValue(forKey: evicted)
+                        }
                         self.loadingTasks.removeValue(forKey: urlString)
                     }
                     let size = CGSize(width: texture.width, height: texture.height)
@@ -159,6 +168,7 @@ public final class MarkdownImageLoader: @unchecked Sendable {
     public func clearCache() {
         queue.async {
             self.textureCache.removeAll()
+            self.cacheOrder.removeAll()
         }
     }
 
