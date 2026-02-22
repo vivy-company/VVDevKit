@@ -1,0 +1,13 @@
+# Exclude vendored/generated Tree-sitter grammar sources from GitHub language stats
+Sources/Grammars/** linguist-vendored
+Sources/TreeSitterSwift/** linguist-vendored
+
+# Keep these as project-authored code
+Sources/VVCode/** -linguist-vendored
+Sources/VVDevKit/** -linguist-vendored
+Sources/VVGit/** -linguist-vendored
+Sources/VVHighlighting/** -linguist-vendored
+Sources/VVLSP/** -linguist-vendored
+Sources/VVMarkdown/** -linguist-vendored
+Sources/VVMetalPrimitives/** -linguist-vendored
+Sources/VVChatTimeline/** -linguist-vendored
