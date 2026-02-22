@@ -1,6 +1,10 @@
 # VVDevKit
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-vivy--company-ea4aaa?logo=github)](https://github.com/sponsors/vivy-company)
+[![macOS](https://img.shields.io/badge/macOS-13.0+-black?style=flat-square&logo=apple)](https://github.com/vivy-company/VVDevKit)
+[![iOS](https://img.shields.io/badge/iOS-13.0+-black?style=flat-square&logo=apple)](https://github.com/vivy-company/VVDevKit)
+[![Swift](https://img.shields.io/badge/Swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white)](https://swift.org)
+[![License](https://img.shields.io/badge/License-GPL%203.0-blue?style=flat-square)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/-Sponsor-ff69b4?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/vivy-company)
 
 VVDevKit is a Metal-based rendering framework for macOS and iOS with batteries included.
 It provides production-oriented modules for code editing, markdown rendering, syntax highlighting, and timeline-style UI, all built on top of a shared primitives layer.
