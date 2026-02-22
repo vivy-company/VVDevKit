@@ -7,7 +7,7 @@
 [![Sponsor](https://img.shields.io/badge/-Sponsor-ff69b4?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/vivy-company)
 
 VVDevKit is a Metal-based rendering framework for macOS and iOS with batteries included.
-It provides production-oriented modules for code editing, markdown rendering, syntax highlighting, and timeline-style UI, all built on top of a shared primitives layer.
+It provides production-oriented modules for code editing, diff rendering/review, markdown rendering, syntax highlighting, and timeline-style UI, all built on top of a shared primitives layer.
 
 Built for [Aizen.win](https://github.com/vivy-company/aizen).
 
@@ -16,13 +16,14 @@ Built for [Aizen.win](https://github.com/vivy-company/aizen).
 ## What Is Included
 
 - `VVDevKit` (umbrella module)
-- `VVCode` (Metal-based code editor)
+- `VVCode` (Metal-based code editor + diff UI surfaces)
 - `VVMarkdown` (Metal-based markdown renderer)
 - `VVMetalPrimitives` (scene graph, primitives, and layout/view composition)
 - `VVHighlighting` (Tree-sitter syntax highlighting)
-- `VVGit` (git parsing/integration helpers)
+- `VVGit` (git parsing/integration helpers, including unified diff parsing)
 - `VVLSP` (Language Server Protocol integration)
 - `VVChatTimeline` (timeline/chat UI module built on VVMarkdown + primitives)
+- `VVDiff` capability surface (via `VVDiffView` / `VVMultiBufferDiffView` in `VVCode` and `VVDiffParser` / `VVDiffHunk` in `VVGit`)
 
 ## Architecture
 
@@ -68,6 +69,16 @@ import VVDevKit
 ```
 
 You can also depend on individual products (`VVCode`, `VVMarkdown`, `VVMetalPrimitives`, `VVChatTimeline`) if you want a narrower integration.
+
+## Diff APIs
+
+Diff support is first-class in VVDevKit.
+
+- `VVDiffView` (`VVCode`): Metal-backed unified/split diff renderer.
+- `VVMultiDiffDocument` + `VVMultiBufferDiffView` (`VVCode`): multi-file diff projection and review surface.
+- `VVDiffParser` + `VVDiffHunk` (`VVGit`): parse unified diff text and map line-level change status.
+
+Today this is shipped as VVCode/VVGit APIs (not a separate Swift package product named `VVDiff`).
 
 ## Dynamic Grammar Loading
 
