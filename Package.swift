@@ -2,12 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "VVCode",
+    name: "VVDevKit",
     platforms: [
         .macOS(.v13),
         .iOS(.v13)
     ],
     products: [
+        .library(
+            name: "VVDevKit",
+            targets: ["VVDevKit"]
+        ),
         .library(
             name: "VVCode",
             targets: ["VVCode"]
@@ -260,6 +264,17 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-markdown", from: "0.5.0"),
     ],
     targets: [
+        // Batteries-included public surface
+        .target(
+            name: "VVDevKit",
+            dependencies: [
+                "VVCode",
+                "VVMarkdown",
+                "VVMetalPrimitives",
+                "VVChatTimeline",
+            ]
+        ),
+
         // Main public API
         .target(
             name: "VVCode",
