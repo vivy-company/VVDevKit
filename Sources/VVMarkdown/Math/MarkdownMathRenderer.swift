@@ -7,6 +7,7 @@ import Foundation
 import CoreText
 import CoreGraphics
 import simd
+import VVMetalPrimitives
 
 #if canImport(AppKit)
 import AppKit

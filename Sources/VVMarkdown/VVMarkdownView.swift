@@ -1032,21 +1032,12 @@ public class MetalMarkdownNSView: NSView {
     }
 
     private func codeCopyButtonRect(for frame: CGRect, headerHeight: CGFloat) -> CGRect? {
-        let labelWidth = max(
-            layoutEngine.measureTextWidth("Copy", variant: .regular),
-            layoutEngine.measureTextWidth("Copied", variant: .regular)
-        )
-        let horizontalPadding: CGFloat = 8
-        let buttonHeight = max(16, headerHeight - 6)
-        let buttonWidth = labelWidth + horizontalPadding * 2
         let borderWidth = CGFloat(theme.codeBorderWidth)
-
-        return CGRect(
-            x: frame.maxX - borderWidth - buttonWidth - 8,
-            y: frame.origin.y + borderWidth + (headerHeight - buttonHeight) * 0.5,
-            width: buttonWidth,
-            height: buttonHeight
-        )
+        let paddingX: CGFloat = 12
+        let iconSize: CGFloat = 14
+        let iconX = frame.maxX - borderWidth - paddingX - iconSize
+        let iconY = frame.origin.y + borderWidth + (headerHeight - iconSize) * 0.5
+        return CGRect(x: iconX - 4, y: iconY - 4, width: iconSize + 8, height: iconSize + 8)
     }
 
     private func openLink(_ urlString: String) {

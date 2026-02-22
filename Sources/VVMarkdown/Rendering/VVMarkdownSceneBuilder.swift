@@ -377,6 +377,20 @@ struct VVMarkdownSceneBuilder {
         let borderWidth = CGFloat(theme.codeBorderWidth)
         let cornerRadius = CGFloat(theme.codeBlockCornerRadius)
 
+        // Shadow
+        let shadow = VVShadowQuadPrimitive(
+            frame: frame,
+            color: SIMD4<Float>(0, 0, 0, 0.35),
+            cornerRadii: VVCornerRadii(cornerRadius),
+            spread: 10,
+            blurRadius: 8,
+            offset: CGPoint(x: 0, y: 2),
+            steps: 6
+        )
+        for quad in shadow.expandedQuads() {
+            builder.add(kind: .quad(quad))
+        }
+
         if borderWidth > 0 {
             let borderQuad = VVQuadPrimitive(frame: frame, color: theme.codeBorderColor, cornerRadius: cornerRadius)
             builder.add(kind: .quad(borderQuad))
@@ -421,56 +435,60 @@ struct VVMarkdownSceneBuilder {
         let lineCount = maxLineNumber
         let gutterWidth = codeGutterWidth(for: maxLineNumber)
 
-        let gutterFrame = CGRect(
-            x: innerFrame.minX,
-            y: innerFrame.minY + headerHeight,
-            width: gutterWidth,
-            height: max(0, innerFrame.height - headerHeight)
-        )
-        let gutterQuad = VVQuadPrimitive(frame: gutterFrame, color: theme.codeGutterBackgroundColor, cornerRadius: 0)
-        builder.add(VVPrimitive(kind: .quad(gutterQuad), clipRect: innerFrame))
-
-        let dividerWidth = max(1, CGFloat(theme.codeGutterDividerWidth))
-        let gutterDivider = VVLinePrimitive(
-            start: CGPoint(x: gutterFrame.maxX - dividerWidth, y: gutterFrame.minY),
-            end: CGPoint(x: gutterFrame.maxX - dividerWidth, y: gutterFrame.maxY),
-            thickness: dividerWidth,
-            color: theme.codeHeaderDividerColor
-        )
-        builder.add(VVPrimitive(kind: .line(gutterDivider), clipRect: innerFrame))
-
+        // Header elements
         if headerHeight > 0 {
-            let label = (language?.isEmpty == false ? language! : "Text").uppercased()
-            let lineLabel = "\(lineCount) lines"
             let paddingX: CGFloat = 12
             let labelBaselineY = frame.origin.y + borderWidth + headerHeight * 0.5 + (layoutEngine.currentAscent - layoutEngine.currentDescent) * 0.5
-            let leftGlyphs = layoutEngine.layoutTextGlyphs(label, variant: .semibold, at: CGPoint(x: frame.origin.x + paddingX + borderWidth, y: labelBaselineY), color: theme.codeHeaderTextColor)
+            let dimTextColor = theme.codeHeaderTextColor.withOpacity(0.6)
+
+            // Gear icon (left)
+            let gearText = "\u{2699}"
+            let gearWidth = layoutEngine.measureTextWidth(gearText, variant: .regular)
+            let gearX = frame.origin.x + paddingX + borderWidth
+            let gearGlyphs = layoutEngine.layoutTextGlyphs(gearText, variant: .regular, at: CGPoint(x: gearX, y: labelBaselineY), color: dimTextColor)
+            if !gearGlyphs.isEmpty {
+                let run = VVTextRunPrimitive(
+                    glyphs: gearGlyphs.map { toVVTextGlyph($0) },
+                    style: VVTextRunStyle(color: dimTextColor),
+                    position: CGPoint(x: gearX, y: labelBaselineY),
+                    fontSize: gearGlyphs.first?.fontSize ?? layoutEngine.baseFontSize
+                )
+                builder.add(kind: .textRun(run))
+            }
+
+            // Language label (left, after gear)
+            let label = (language?.isEmpty == false ? language! : "Text").uppercased()
+            let labelX = gearX + gearWidth + 6
+            let leftGlyphs = layoutEngine.layoutTextGlyphs(label, variant: .semibold, at: CGPoint(x: labelX, y: labelBaselineY), color: theme.codeHeaderTextColor)
             if !leftGlyphs.isEmpty {
                 let run = VVTextRunPrimitive(
                     glyphs: leftGlyphs.map { toVVTextGlyph($0) },
                     style: VVTextRunStyle(color: theme.codeHeaderTextColor),
-                    position: CGPoint(x: frame.origin.x + paddingX + borderWidth, y: labelBaselineY),
+                    position: CGPoint(x: labelX, y: labelBaselineY),
                     fontSize: leftGlyphs.first?.fontSize ?? layoutEngine.baseFontSize
                 )
                 builder.add(kind: .textRun(run))
             }
 
+            // Copy icon (far right)
+            let iconSize: CGFloat = 14
+            let copyIconX = frame.maxX - borderWidth - paddingX - iconSize
+            appendCodeCopyIconPrimitives(frame: frame, headerHeight: headerHeight, copyIconX: copyIconX, blockId: blockId, to: &builder)
+
+            // Line count (before copy icon)
+            let lineLabel = "\(lineCount) line\(lineCount == 1 ? "" : "s")"
             let rightTextWidth = layoutEngine.measureTextWidth(lineLabel, variant: .regular)
-            let buttonRect = codeCopyButtonRect(for: frame, headerHeight: headerHeight)
-            let rightEdge = buttonRect?.minX ?? (frame.maxX - paddingX)
-            let rightX = max(frame.origin.x + paddingX, rightEdge - rightTextWidth - 12)
-            let rightGlyphs = layoutEngine.layoutTextGlyphs(lineLabel, variant: .regular, at: CGPoint(x: rightX - borderWidth, y: labelBaselineY), color: theme.codeHeaderTextColor)
+            let lineCountX = copyIconX - rightTextWidth - 16
+            let rightGlyphs = layoutEngine.layoutTextGlyphs(lineLabel, variant: .regular, at: CGPoint(x: lineCountX, y: labelBaselineY), color: dimTextColor)
             if !rightGlyphs.isEmpty {
                 let run = VVTextRunPrimitive(
                     glyphs: rightGlyphs.map { toVVTextGlyph($0) },
-                    style: VVTextRunStyle(color: theme.codeHeaderTextColor),
-                    position: CGPoint(x: rightX - borderWidth, y: labelBaselineY),
+                    style: VVTextRunStyle(color: dimTextColor),
+                    position: CGPoint(x: lineCountX, y: labelBaselineY),
                     fontSize: rightGlyphs.first?.fontSize ?? layoutEngine.baseFontSize
                 )
                 builder.add(kind: .textRun(run))
             }
-
-            appendCodeCopyButtonPrimitives(frame: frame, headerHeight: headerHeight, blockId: blockId, to: &builder)
         }
 
         let contentOriginX = frame.origin.x + borderWidth
@@ -598,41 +616,33 @@ struct VVMarkdownSceneBuilder {
         return wrapped
     }
 
-    private func appendCodeCopyButtonPrimitives(frame: CGRect, headerHeight: CGFloat, blockId: String, to builder: inout VVSceneBuilder) {
+    private func appendCodeCopyIconPrimitives(frame: CGRect, headerHeight: CGFloat, copyIconX: CGFloat, blockId: String, to builder: inout VVSceneBuilder) {
         let now = Date.timeIntervalSinceReferenceDate
         let isCopied = copiedBlockId == blockId && (now - copiedAt) < 1.4
-        let label = isCopied ? "Copied" : "Copy"
-        let textWidth = layoutEngine.measureTextWidth(label, variant: .regular)
-        let horizontalPadding: CGFloat = 8
-        let buttonHeight = max(16, headerHeight - 6)
-        let buttonWidth = textWidth + horizontalPadding * 2
-
         let borderWidth = CGFloat(theme.codeBorderWidth)
-        let buttonFrame = CGRect(
-            x: frame.maxX - borderWidth - buttonWidth - 8,
-            y: frame.origin.y + borderWidth + (headerHeight - buttonHeight) * 0.5,
-            width: buttonWidth,
-            height: buttonHeight
-        )
+        let dimTextColor = theme.codeHeaderTextColor.withOpacity(0.6)
+        let iconColor = isCopied ? theme.codeHeaderTextColor : dimTextColor
 
-        let background = isCopied
-            ? theme.codeCopyButtonBackground.lighter(0.08)
-            : theme.codeCopyButtonBackground
-        let buttonQuad = VVQuadPrimitive(frame: buttonFrame, color: background, cornerRadius: CGFloat(theme.codeCopyButtonCornerRadius))
-        builder.add(kind: .quad(buttonQuad))
+        let iconSize: CGFloat = 14
+        let iconX = copyIconX
+        let iconY = frame.origin.y + borderWidth + (headerHeight - iconSize) * 0.5
 
-        let textX = buttonFrame.origin.x + horizontalPadding
-        let baselineY = buttonFrame.midY + (layoutEngine.currentAscent - layoutEngine.currentDescent) * 0.5
-        let glyphs = layoutEngine.layoutTextGlyphs(label, variant: .regular, at: CGPoint(x: textX, y: baselineY), color: theme.codeCopyButtonTextColor)
-        if !glyphs.isEmpty {
-            let run = VVTextRunPrimitive(
-                glyphs: glyphs.map { toVVTextGlyph($0) },
-                style: VVTextRunStyle(color: theme.codeCopyButtonTextColor),
-                position: CGPoint(x: textX, y: baselineY),
-                fontSize: glyphs.first?.fontSize ?? layoutEngine.baseFontSize
-            )
-            builder.add(kind: .textRun(run))
-        }
+        // Back document (slightly offset)
+        let backOffset: CGFloat = 3
+        let backRect = CGRect(x: iconX + backOffset, y: iconY, width: iconSize - backOffset, height: iconSize - backOffset)
+        let backBorder = VVQuadPrimitive(frame: backRect, color: iconColor, cornerRadius: 2)
+        builder.add(kind: .quad(backBorder))
+        let backInner = backRect.insetBy(dx: 1, dy: 1)
+        let backFill = VVQuadPrimitive(frame: backInner, color: theme.codeHeaderBackgroundColor, cornerRadius: 1)
+        builder.add(kind: .quad(backFill))
+
+        // Front document (main)
+        let frontRect = CGRect(x: iconX, y: iconY + backOffset, width: iconSize - backOffset, height: iconSize - backOffset)
+        let frontBorder = VVQuadPrimitive(frame: frontRect, color: iconColor, cornerRadius: 2)
+        builder.add(kind: .quad(frontBorder))
+        let frontInner = frontRect.insetBy(dx: 1, dy: 1)
+        let frontFill = VVQuadPrimitive(frame: frontInner, color: theme.codeHeaderBackgroundColor, cornerRadius: 1)
+        builder.add(kind: .quad(frontFill))
     }
 
     private func appendCodeLineNumberPrimitive(_ lineNumber: Int, at position: CGPoint, gutterWidth: CGFloat, clipRect: CGRect, to builder: inout VVSceneBuilder) {
@@ -866,21 +876,12 @@ struct VVMarkdownSceneBuilder {
     }
 
     private func codeCopyButtonRect(for frame: CGRect, headerHeight: CGFloat) -> CGRect? {
-        let labelWidth = max(
-            layoutEngine.measureTextWidth("Copy", variant: .regular),
-            layoutEngine.measureTextWidth("Copied", variant: .regular)
-        )
-        let horizontalPadding: CGFloat = 8
-        let buttonHeight = max(16, headerHeight - 6)
-        let buttonWidth = labelWidth + horizontalPadding * 2
         let borderWidth = CGFloat(theme.codeBorderWidth)
-
-        return CGRect(
-            x: frame.maxX - borderWidth - buttonWidth - 8,
-            y: frame.origin.y + borderWidth + (headerHeight - buttonHeight) * 0.5,
-            width: buttonWidth,
-            height: buttonHeight
-        )
+        let paddingX: CGFloat = 12
+        let iconSize: CGFloat = 14
+        let iconX = frame.maxX - borderWidth - paddingX - iconSize
+        let iconY = frame.origin.y + borderWidth + (headerHeight - iconSize) * 0.5
+        return CGRect(x: iconX - 4, y: iconY - 4, width: iconSize + 8, height: iconSize + 8)
     }
 
     private func codeGutterWidth(for maxLineNumber: Int) -> CGFloat {

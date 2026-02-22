@@ -1289,6 +1289,15 @@ public final class VVMetalEditorContainerView: NSView {
 
         if ranges.count == 1 {
             metalTextView.applyEdit(range: ranges[0].range, replacement: normalized)
+
+            // Shift indent guides immediately so they don't lag behind text
+            let removedNewlines = (previousText as NSString).substring(with: ranges[0].range).filter { $0 == "\n" }.count
+            let addedNewlines = normalized.filter { $0 == "\n" }.count
+            let lineDelta = addedNewlines - removedNewlines
+            if lineDelta != 0 {
+                let editLine = lineMapPosition(forOffset: ranges[0].range.location).line
+                shiftIndentGuides(editLine: editLine, lineDelta: lineDelta)
+            }
         } else {
             metalTextView.setText(newText)
         }
@@ -1421,6 +1430,12 @@ public final class VVMetalEditorContainerView: NSView {
 
         if sorted.count == 1 {
             metalTextView.applyEdit(range: sorted[0].range, replacement: "")
+
+            let removedNewlines = (previousText as NSString).substring(with: sorted[0].range).filter { $0 == "\n" }.count
+            if removedNewlines > 0 {
+                let editLine = lineMapPosition(forOffset: sorted[0].range.location).line
+                shiftIndentGuides(editLine: editLine, lineDelta: -removedNewlines)
+            }
         } else {
             metalTextView.setText(newText)
         }
@@ -1502,6 +1517,12 @@ public final class VVMetalEditorContainerView: NSView {
 
         if sorted.count == 1 {
             metalTextView.applyEdit(range: sorted[0].range, replacement: "")
+
+            let removedNewlines = (previousText as NSString).substring(with: sorted[0].range).filter { $0 == "\n" }.count
+            if removedNewlines > 0 {
+                let editLine = lineMapPosition(forOffset: sorted[0].range.location).line
+                shiftIndentGuides(editLine: editLine, lineDelta: -removedNewlines)
+            }
         } else {
             metalTextView.setText(newText)
         }
@@ -1595,7 +1616,16 @@ public final class VVMetalEditorContainerView: NSView {
         lineMap = LineMap(text: textStorage)
 
         if sorted.count == 1 {
-            metalTextView.applyEdit(range: sorted[0].range, replacement: yankRegister.values.first ?? "")
+            let yankText = yankRegister.values.first ?? ""
+            metalTextView.applyEdit(range: sorted[0].range, replacement: yankText)
+
+            let removedNewlines = (previousText as NSString).substring(with: sorted[0].range).filter { $0 == "\n" }.count
+            let addedNewlines = yankText.filter { $0 == "\n" }.count
+            let lineDelta = addedNewlines - removedNewlines
+            if lineDelta != 0 {
+                let editLine = lineMapPosition(forOffset: sorted[0].range.location).line
+                shiftIndentGuides(editLine: editLine, lineDelta: lineDelta)
+            }
         } else {
             metalTextView.setText(newText)
         }
@@ -1635,6 +1665,7 @@ public final class VVMetalEditorContainerView: NSView {
         metalTextView?.setShowsGitGutter(_configuration.showGitGutter)
         metalTextView?.setStatusBarHeight(statusBarHeight)
         metalTextView?.setBlameInfo(blameInfo, showInline: _configuration.showInlineBlame, delay: _configuration.blameDelay)
+        metalTextView?.setWrapLines(_configuration.wrapLines)
         setHelixModeEnabled(_configuration.helixModeEnabled)
 
         // Update content size after font change
@@ -1827,7 +1858,13 @@ public final class VVMetalEditorContainerView: NSView {
 
         guard lineHeight > 0, viewportHeight > 0 else { return }
 
-        let targetLineY = CGFloat(pos.line) * lineHeight
+        // Use insertionRect if available (handles wrapping), else estimate
+        let targetLineY: CGFloat
+        if let insertionRect = metalTextView.insertionRect() {
+            targetLineY = insertionRect.origin.y + metalTextView.scrollOffset.y
+        } else {
+            targetLineY = CGFloat(pos.line) * lineHeight
+        }
         let centeredY = targetLineY - (viewportHeight - lineHeight) * 0.5
         let maxY = max(0, docHeight - viewportHeight)
         let clampedY = max(0, min(centeredY, maxY))
@@ -2122,6 +2159,32 @@ public final class VVMetalEditorContainerView: NSView {
         } else {
             metalTextView.setActiveIndentGuideSegments([])
         }
+    }
+
+    /// Provisionally shift indent guide line indices when lines are inserted/deleted.
+    /// The guides will be fully recomputed once async highlighting finishes.
+    private func shiftIndentGuides(editLine: Int, lineDelta: Int) {
+        guard lineDelta != 0, !indentGuideSegments.isEmpty else { return }
+
+        var shifted: [MetalTextView.IndentGuideSegment] = []
+        shifted.reserveCapacity(indentGuideSegments.count)
+
+        for seg in indentGuideSegments {
+            if seg.startLine > editLine {
+                let newStart = max(0, seg.startLine + lineDelta)
+                let newEnd = max(newStart, seg.endLine + lineDelta)
+                shifted.append(.init(startLine: newStart, endLine: newEnd, column: seg.column))
+            } else if seg.endLine > editLine {
+                let newEnd = max(seg.startLine, seg.endLine + lineDelta)
+                shifted.append(.init(startLine: seg.startLine, endLine: newEnd, column: seg.column))
+            } else {
+                shifted.append(seg)
+            }
+        }
+
+        indentGuideSegments = shifted
+        metalTextView?.setIndentGuideSegments(shifted)
+        updateActiveIndentGuides()
     }
 
     private func isLineWhitespace(_ line: String) -> Bool {

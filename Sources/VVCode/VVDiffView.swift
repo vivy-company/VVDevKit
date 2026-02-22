@@ -88,10 +88,17 @@ private struct VVDiffSplitRow: Identifiable, Hashable {
 
 // MARK: - Text Selection Types
 
-/// Position within the diff document: row index + character offset.
+/// Position within the diff document: row index + character offset + pane.
 private struct DiffTextPosition: Sendable, Hashable, Comparable, VVMetalPrimitives.VVTextPosition {
     let rowIndex: Int      // Index into rowGeometries array
     let charOffset: Int    // Character offset within row.text
+    let paneX: CGFloat     // Pane origin X (0 for left/unified, columnWidth for right)
+
+    init(rowIndex: Int, charOffset: Int, paneX: CGFloat = 0) {
+        self.rowIndex = rowIndex
+        self.charOffset = charOffset
+        self.paneX = paneX
+    }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.rowIndex == rhs.rowIndex && lhs.charOffset == rhs.charOffset
@@ -632,7 +639,6 @@ private final class VVDiffRenderer {
     var backgroundColor: SIMD4<Float> = .gray(0.12)
     var gutterTextColor: SIMD4<Float> = .gray50
     var gutterBgColor: SIMD4<Float> = .gray(0.12)
-    var separatorColor: SIMD4<Float> = .gray30.withOpacity(0.3)
     var addedBgColor: SIMD4<Float> = .rgba(0, 0.5, 0, 0.13)
     var deletedBgColor: SIMD4<Float> = .rgba(0.5, 0, 0, 0.13)
     var hunkBgColor: SIMD4<Float> = .gray20.withOpacity(0.88)
@@ -676,7 +682,6 @@ private final class VVDiffRenderer {
         backgroundColor = theme.backgroundColor.simdColor
         gutterTextColor = theme.gutterTextColor.simdColor
         gutterBgColor = theme.gutterBackgroundColor.simdColor
-        separatorColor = withAlpha(theme.gutterSeparatorColor.simdColor, 0.3)
         addedBgColor = withAlpha(theme.gitAddedColor.simdColor, 0.13)
         deletedBgColor = withAlpha(theme.gitDeletedColor.simdColor, 0.13)
         hunkBgColor = withAlpha(theme.currentLineColor.simdColor, 0.88)
@@ -708,7 +713,7 @@ private final class VVDiffRenderer {
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * charWidth + 16
         let markerWidth = charWidth + 8
-        let codeStartX = gutterColWidth * 2 + markerWidth + 1
+        let codeStartX = gutterColWidth * 2 + markerWidth
 
         var builder = VVSceneBuilder()
         var y: CGFloat = 0
@@ -728,8 +733,9 @@ private final class VVDiffRenderer {
                 y += rowH
             }
 
-            // Section rows
+            // Section rows (skip metadata — already shown in file header)
             for row in section.rows {
+                if row.kind == .metadata { continue }
                 let rowH = lineHeight
                 if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
                     buildUnifiedRow(
@@ -763,9 +769,9 @@ private final class VVDiffRenderer {
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * charWidth + 16
         let markerWidth = charWidth + 4
-        let columnWidth = max(420, floor((width - 1) / 2))
-        let totalWidth = columnWidth * 2 + 1
-        let paneCodeStartX = markerWidth + gutterColWidth + 1
+        let columnWidth = max(420, floor(width / 2))
+        let totalWidth = columnWidth * 2
+        let paneCodeStartX = markerWidth + gutterColWidth
 
         var builder = VVSceneBuilder()
         var y: CGFloat = 0
@@ -802,19 +808,10 @@ private final class VVDiffRenderer {
                         builder: &builder
                     )
 
-                    // Center divider
-                    let divider = VVLinePrimitive(
-                        start: CGPoint(x: columnWidth, y: y),
-                        end: CGPoint(x: columnWidth, y: y + rowH),
-                        thickness: 1,
-                        color: separatorColor
-                    )
-                    builder.add(kind: .line(divider))
-
                     // Right pane
                     buildSplitCell(
                         cell: splitRow.right,
-                        y: y, paneX: columnWidth + 1, paneWidth: columnWidth, height: rowH,
+                        y: y, paneX: columnWidth, paneWidth: columnWidth, height: rowH,
                         gutterColWidth: gutterColWidth,
                         markerWidth: markerWidth,
                         codeStartX: paneCodeStartX,
@@ -855,13 +852,14 @@ private final class VVDiffRenderer {
         )
         builder.add(kind: .quad(bgQuad), zIndex: -1)
 
-        // Old line number
+        // Line numbers — use marker color for added/deleted rows
         let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
         let numFontSize = font.pointSize - 1
+        let numColor = lineNumberColor(for: row.kind)
 
         if let oldNum = row.oldLineNumber {
             let numText = String(oldNum)
-            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: gutterTextColor)
+            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
             let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let offsetX = gutterColWidth - numWidth - 4
             addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
@@ -869,28 +867,14 @@ private final class VVDiffRenderer {
 
         if let newNum = row.newLineNumber {
             let numText = String(newNum)
-            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: gutterTextColor)
+            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
             let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let offsetX = gutterColWidth * 2 - numWidth - 4
             addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
         }
 
-        // Marker
-        let markerStr = diffMarker(for: row.kind)
-        let markerColor = markerColor(for: row.kind)
-        let markerGlyphs = layoutEngine.layoutTextGlyphs(markerStr, variant: .monospace, at: .zero, color: markerColor)
-        let markerX = gutterColWidth * 2 + (markerWidth - charWidth) / 2
-        addTextGlyphs(markerGlyphs, offsetX: markerX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-
-        // Separator line
-        let sepX = codeStartX - 1
-        let sep = VVLinePrimitive(
-            start: CGPoint(x: sepX, y: y),
-            end: CGPoint(x: sepX, y: y + height),
-            thickness: 1,
-            color: separatorColor
-        )
-        builder.add(kind: .line(sep))
+        // Marker indicator (flush left)
+        buildMarkerIndicator(kind: row.kind, x: 0, y: y, width: markerWidth, height: height, builder: &builder)
 
         // Code text
         if row.kind.isCode || row.kind == .metadata {
@@ -933,15 +917,6 @@ private final class VVDiffRenderer {
             color: headerBgColor
         )
         builder.add(kind: .quad(bgQuad), zIndex: -1)
-
-        // Bottom border
-        let border = VVLinePrimitive(
-            start: CGPoint(x: 0, y: y + height - 1),
-            end: CGPoint(x: width, y: y + height - 1),
-            thickness: 1,
-            color: withAlpha(separatorColor, 0.9)
-        )
-        builder.add(kind: .line(border))
 
         let parts = pathParts(for: section.filePath)
         let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
@@ -988,15 +963,6 @@ private final class VVDiffRenderer {
             curX += 6
         }
 
-        if section.hunkCount > 0 {
-            _ = buildBadge(
-                text: "@@\(section.hunkCount)",
-                color: modifiedColor,
-                x: curX, badgeY: badgeY, badgeH: badgeH, fontSize: badgeFontSize,
-                baselineY: baselineY,
-                builder: &builder
-            )
-        }
     }
 
     private func buildSplitCell(
@@ -1031,35 +997,19 @@ private final class VVDiffRenderer {
         let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
         let numFontSize = font.pointSize - 1
 
-        // Marker
-        let markerStr: String
-        switch cell.kind {
-        case .deleted: markerStr = isLeft ? "-" : " "
-        case .added: markerStr = isLeft ? " " : "+"
-        default: markerStr = " "
-        }
-        let mColor = self.markerColor(for: cell.kind)
-        let mGlyphs = layoutEngine.layoutTextGlyphs(markerStr, variant: .monospace, at: .zero, color: mColor)
-        addTextGlyphs(mGlyphs, offsetX: paneX + 2, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
+        // Marker indicator
+        let effectiveKind: VVDiffRow.Kind = cell.kind
+        buildMarkerIndicator(kind: effectiveKind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
 
-        // Line number
+        // Line number — colored for added/deleted
+        let numColor = lineNumberColor(for: cell.kind)
         if let lineNum = cell.lineNumber {
             let numText = String(lineNum)
-            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: gutterTextColor)
+            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
             let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let numX = paneX + markerWidth + gutterColWidth - numWidth - 8
             addTextGlyphs(numGlyphs, offsetX: numX, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
         }
-
-        // Separator
-        let sepX = paneX + codeStartX - 1
-        let sep = VVLinePrimitive(
-            start: CGPoint(x: sepX, y: y),
-            end: CGPoint(x: sepX, y: y + height),
-            thickness: 1,
-            color: withAlpha(separatorColor, 0.4)
-        )
-        builder.add(kind: .line(sep))
 
         // Code text
         let codeGlyphs: [MDLayoutGlyph]
@@ -1116,6 +1066,50 @@ private final class VVDiffRenderer {
         builder.add(kind: .quad(badgeBg))
         addTextGlyphs(glyphs, offsetX: x + 6, baselineY: baselineY, fontSize: fontSize, builder: &builder)
         return x + badgeWidth
+    }
+
+    private func buildMarkerIndicator(
+        kind: VVDiffRow.Kind,
+        x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat,
+        builder: inout VVSceneBuilder
+    ) {
+        let barWidth: CGFloat = 6
+
+        switch kind {
+        case .added:
+            // Solid green bar, flush left, full height (connects between rows)
+            let bar = VVQuadPrimitive(
+                frame: CGRect(x: x, y: y, width: barWidth, height: height),
+                color: addedMarkerColor
+            )
+            builder.add(kind: .quad(bar), zIndex: 1)
+
+        case .deleted:
+            // Dashed red bar, flush left, continuous pattern across rows
+            let dashHeight: CGFloat = 1
+            let gapHeight: CGFloat = 1
+            let period = dashHeight + gapHeight
+            // Align to global Y=0 so pattern is seamless across rows
+            let phase = y.truncatingRemainder(dividingBy: period)
+            var dashY = y - phase
+            while dashY < y + height {
+                let dashBottom = dashY + dashHeight
+                // Clip to this row's bounds
+                let clippedTop = max(dashY, y)
+                let clippedBottom = min(dashBottom, y + height)
+                if clippedBottom > clippedTop {
+                    let dash = VVQuadPrimitive(
+                        frame: CGRect(x: x, y: clippedTop, width: barWidth, height: clippedBottom - clippedTop),
+                        color: deletedMarkerColor
+                    )
+                    builder.add(kind: .quad(dash), zIndex: 1)
+                }
+                dashY += period
+            }
+
+        default:
+            break
+        }
     }
 
     private func addTextGlyphs(
@@ -1188,6 +1182,14 @@ private final class VVDiffRenderer {
         }
     }
 
+    private func lineNumberColor(for kind: VVDiffRow.Kind) -> SIMD4<Float> {
+        switch kind {
+        case .added: return addedMarkerColor
+        case .deleted: return deletedMarkerColor
+        default: return gutterTextColor
+        }
+    }
+
     private func markerColor(for kind: VVDiffRow.Kind) -> SIMD4<Float> {
         switch kind {
         case .added: return addedMarkerColor
@@ -1247,13 +1249,30 @@ private final class DiffDocumentView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// MTKView subclass that forwards mouse events to VVDiffMetalView.
+private final class DiffMTKView: MTKView {
+    weak var diffView: VVDiffMetalView?
+
+    override func mouseDown(with event: NSEvent) {
+        diffView?.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        diffView?.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        diffView?.mouseUp(with: event)
+    }
+}
+
 private final class VVDiffMetalView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
     private var scrollView: NSScrollView!
     private var documentView: DiffDocumentView!
-    private var metalView: MTKView!
+    private var metalView: DiffMTKView!
     private var renderer: MarkdownMetalRenderer?
     private var diffRenderer: VVDiffRenderer?
     var metalContext: VVMetalContext?
@@ -1316,7 +1335,8 @@ private final class VVDiffMetalView: NSView {
 
         // MTKView is a sibling of the document view, always sized to the visible viewport.
         // Scroll offset is passed to beginFrame so the renderer shifts primitives.
-        metalView = MTKView(frame: bounds, device: device)
+        metalView = DiffMTKView(frame: bounds, device: device)
+        metalView.diffView = self
         metalView.isPaused = true
         metalView.enableSetNeedsDisplay = true
         metalView.framebufferOnly = true
@@ -1454,7 +1474,7 @@ private final class VVDiffMetalView: NSView {
 
         let minWidth: CGFloat
         if renderStyle == .split {
-            minWidth = 841 // 420 * 2 + 1
+            minWidth = 840 // 420 * 2
         } else {
             minWidth = max(width, 520)
         }
@@ -1484,7 +1504,7 @@ private final class VVDiffMetalView: NSView {
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
         let markerWidth = renderer.charWidth + 8
-        let codeStartX = gutterColWidth * 2 + markerWidth + 1
+        let codeStartX = gutterColWidth * 2 + markerWidth
 
         var y: CGFloat = 0
         var rowIndex = 0
@@ -1509,8 +1529,9 @@ private final class VVDiffMetalView: NSView {
                 rowIndex += 1
             }
 
-            // Section rows
+            // Section rows (skip metadata)
             for row in section.rows {
+                if row.kind == .metadata { continue }
                 let rowH = renderer.lineHeight
                 rowGeometries.append(RowGeometry(
                     rowIndex: rowIndex,
@@ -1535,8 +1556,8 @@ private final class VVDiffMetalView: NSView {
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
         let markerWidth = renderer.charWidth + 4
-        let columnWidth = max(420, floor((width - 1) / 2))
-        let paneCodeStartX = markerWidth + gutterColWidth + 1
+        let columnWidth = max(420, floor(width / 2))
+        let paneCodeStartX = markerWidth + gutterColWidth
 
         var y: CGFloat = 0
         var rowIndex = 0
@@ -1553,7 +1574,7 @@ private final class VVDiffMetalView: NSView {
                     text: header.text,
                     codeStartX: paneCodeStartX,
                     paneX: 0,
-                    paneWidth: columnWidth * 2 + 1
+                    paneWidth: columnWidth * 2
                 ))
                 y += rowH
                 rowIndex += 1
@@ -1584,7 +1605,7 @@ private final class VVDiffMetalView: NSView {
                         isCodeRow: right.kind.isCode,
                         text: right.text,
                         codeStartX: paneCodeStartX,
-                        paneX: columnWidth + 1,
+                        paneX: columnWidth,
                         paneWidth: columnWidth
                     ))
                     rowIndex += 1
@@ -1755,7 +1776,9 @@ extension VVDiffMetalView: MTKViewDelegate {
             scene = result.scene
         }
 
-        // Render selection quads first (as background highlights)
+        renderScene(scene, encoder: encoder, renderer: renderer)
+
+        // Render selection quads on top of scene (so they're visible over opaque row backgrounds)
         if let selection = selectionController.selection {
             let quads = selectionQuads(
                 from: selection.ordered.start,
@@ -1774,8 +1797,6 @@ extension VVDiffMetalView: MTKViewDelegate {
                 }
             }
         }
-
-        renderScene(scene, encoder: encoder, renderer: renderer)
 
         encoder.endEncoding()
         commandBuffer?.present(drawable)
@@ -1927,7 +1948,7 @@ extension VVDiffMetalView: MTKViewDelegate {
         return CGPoint(x: point.x + scrollOffset.x, y: point.y + scrollOffset.y)
     }
 
-    private func findRow(at y: CGFloat) -> RowGeometry? {
+    private func findRow(at y: CGFloat, x: CGFloat? = nil) -> RowGeometry? {
         guard !rowGeometries.isEmpty else { return nil }
 
         // Clamp to first/last row when outside bounds
@@ -1952,6 +1973,23 @@ extension VVDiffMetalView: MTKViewDelegate {
             } else if y >= geo.y + geo.height {
                 low = mid + 1
             } else {
+                // Found a row at this Y. If X filtering is requested (split mode),
+                // pick the row whose pane contains the X coordinate.
+                if let x = x {
+                    // Look for all rows at this same Y position
+                    var candidates: [RowGeometry] = [geo]
+                    // Check neighbors (split rows share the same Y)
+                    for offset in [mid - 1, mid + 1] {
+                        if offset >= 0 && offset < rowGeometries.count {
+                            let neighbor = rowGeometries[offset]
+                            if neighbor.y == geo.y {
+                                candidates.append(neighbor)
+                            }
+                        }
+                    }
+                    // Return the row whose pane contains the X click
+                    return candidates.first(where: { x >= $0.paneX && x < $0.paneX + $0.paneWidth }) ?? geo
+                }
                 return geo
             }
         }
@@ -2034,11 +2072,18 @@ extension VVDiffMetalView: VVTextHitTestable {
     func hitTest(at point: CGPoint) -> DiffTextPosition? {
         let docPoint = viewPointToDocumentPoint(point)
 
-        guard let geo = findRow(at: docPoint.y) else { return nil }
+        // In split mode, find the row matching both Y and the correct pane (by X)
+        let geo: RowGeometry?
+        if renderStyle == .split {
+            geo = findRow(at: docPoint.y, x: docPoint.x)
+        } else {
+            geo = findRow(at: docPoint.y)
+        }
+        guard let geo else { return nil }
 
         // For non-code rows, return position at start of row
         guard geo.isCodeRow else {
-            return DiffTextPosition(rowIndex: geo.rowIndex, charOffset: 0)
+            return DiffTextPosition(rowIndex: geo.rowIndex, charOffset: 0, paneX: geo.paneX)
         }
 
         let dr = ensureDiffRenderer()
@@ -2047,7 +2092,7 @@ extension VVDiffMetalView: VVTextHitTestable {
         let relativeX = docPoint.x - geo.paneX - geo.codeStartX - codeInsetX
         let charOffset = max(0, min(Int(relativeX / dr.charWidth), geo.text.count))
 
-        return DiffTextPosition(rowIndex: geo.rowIndex, charOffset: charOffset)
+        return DiffTextPosition(rowIndex: geo.rowIndex, charOffset: charOffset, paneX: geo.paneX)
     }
 }
 
@@ -2057,16 +2102,22 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
     func selectionQuads(from start: DiffTextPosition, to end: DiffTextPosition, color: SIMD4<Float>) -> [VVQuadPrimitive] {
         var quads: [VVQuadPrimitive] = []
         let dr = ensureDiffRenderer()
+        let selectionPane = start.paneX
 
         for geo in rowGeometries {
             guard geo.rowIndex >= start.rowIndex && geo.rowIndex <= end.rowIndex else { continue }
+
+            // In split mode, only select rows within the same pane
+            if renderStyle == .split && geo.paneX != selectionPane { continue }
 
             // For non-code rows (hunk headers, file headers), draw full-width highlight
             guard geo.isCodeRow else {
                 // Only fill non-code rows that are fully interior to the selection
                 if geo.rowIndex > start.rowIndex && geo.rowIndex < end.rowIndex {
+                    let quadPaneX = renderStyle == .split ? selectionPane : geo.paneX
+                    let quadPaneW = renderStyle == .split ? geo.paneWidth / 2 : geo.paneWidth
                     quads.append(VVQuadPrimitive(
-                        frame: CGRect(x: geo.paneX, y: geo.y, width: geo.paneWidth, height: geo.height),
+                        frame: CGRect(x: quadPaneX, y: geo.y, width: quadPaneW, height: geo.height),
                         color: color,
                         cornerRadius: 0
                     ))
@@ -2076,30 +2127,41 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
 
             let startChar: Int
             let endChar: Int
+            let extendToEnd: Bool  // extend selection to pane edge
 
             if geo.rowIndex == start.rowIndex && geo.rowIndex == end.rowIndex {
                 startChar = start.charOffset
                 endChar = end.charOffset
+                extendToEnd = false
             } else if geo.rowIndex == start.rowIndex {
                 startChar = start.charOffset
                 endChar = geo.text.count
+                extendToEnd = true
             } else if geo.rowIndex == end.rowIndex {
                 startChar = 0
                 endChar = end.charOffset
+                extendToEnd = false
             } else {
                 startChar = 0
                 endChar = geo.text.count
+                extendToEnd = true
             }
 
-            guard startChar < endChar else { continue }
+            guard extendToEnd || startChar < endChar else { continue }
 
             let startX = geo.paneX + geo.codeStartX + codeInsetX + CGFloat(startChar) * dr.charWidth
-            let endX = geo.paneX + geo.codeStartX + codeInsetX + CGFloat(endChar) * dr.charWidth
+            let endX: CGFloat
+            if extendToEnd {
+                endX = geo.paneX + geo.paneWidth
+            } else {
+                endX = geo.paneX + geo.codeStartX + codeInsetX + CGFloat(endChar) * dr.charWidth
+            }
+
+            guard endX > startX else { continue }
 
             quads.append(VVQuadPrimitive(
                 frame: CGRect(x: startX, y: geo.y, width: endX - startX, height: geo.height),
-                color: color,
-                cornerRadius: 2
+                color: color
             ))
         }
 
@@ -2112,9 +2174,12 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
 extension VVDiffMetalView: VVTextExtractor {
     func extractText(from start: DiffTextPosition, to end: DiffTextPosition) -> String {
         var lines: [String] = []
+        let selectionPane = start.paneX
 
         for geo in rowGeometries {
             guard geo.rowIndex >= start.rowIndex && geo.rowIndex <= end.rowIndex else { continue }
+            // In split mode, only extract text from the same pane
+            if renderStyle == .split && geo.paneX != selectionPane { continue }
             guard geo.isCodeRow else { continue }
 
             let text = geo.text

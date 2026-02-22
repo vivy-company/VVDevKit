@@ -23,13 +23,16 @@ public struct LineLayout {
     public let height: CGFloat
     public let baselineOffset: CGFloat
     public let glyphs: [LayoutGlyph]
+    /// Number of visual lines this document line occupies (1 when not wrapped).
+    public let wrapCount: Int
 
-    public init(lineIndex: Int, yOffset: CGFloat, height: CGFloat, baselineOffset: CGFloat, glyphs: [LayoutGlyph]) {
+    public init(lineIndex: Int, yOffset: CGFloat, height: CGFloat, baselineOffset: CGFloat, glyphs: [LayoutGlyph], wrapCount: Int = 1) {
         self.lineIndex = lineIndex
         self.yOffset = yOffset
         self.height = height
         self.baselineOffset = baselineOffset
         self.glyphs = glyphs
+        self.wrapCount = wrapCount
     }
 }
 
@@ -160,6 +163,7 @@ public final class TextLayoutEngine {
         text: String,
         lineIndex: Int,
         yOffset: CGFloat,
+        wrapWidth: CGFloat? = nil,
         coloredRanges: [ColoredRange],
         defaultColor: SIMD4<Float>
     ) -> LineLayout {
@@ -204,6 +208,19 @@ public final class TextLayoutEngine {
             if let lastGlyph = shapedGlyphs.last {
                 xPosition += lastGlyph.position.x + lastGlyph.advance
             }
+        }
+
+        // Apply word wrap if needed
+        if let wrapWidth = wrapWidth, wrapWidth > 0, !glyphs.isEmpty {
+            let (wrapped, wrapCount) = applyWordWrap(glyphs: glyphs, wrapWidth: wrapWidth)
+            return LineLayout(
+                lineIndex: lineIndex,
+                yOffset: yOffset,
+                height: lineHeight * CGFloat(wrapCount),
+                baselineOffset: baselineOffset,
+                glyphs: wrapped,
+                wrapCount: wrapCount
+            )
         }
 
         return LineLayout(
@@ -324,6 +341,122 @@ public final class TextLayoutEngine {
         }
 
         return 0
+    }
+
+    // MARK: - Word Wrap
+
+    /// Returns the visual sub-line index (0-based) that the given character offset falls on.
+    public func wrapLine(forCharacterOffset offset: Int, in line: LineLayout) -> Int {
+        guard line.wrapCount > 1 else { return 0 }
+        for glyph in line.glyphs {
+            let glyphEnd = glyph.characterIndex + glyph.characterCount
+            if offset <= glyph.characterIndex || (offset > glyph.characterIndex && offset <= glyphEnd) {
+                return Int(round(glyph.position.y / lineHeight))
+            }
+        }
+        // Past all glyphs → last visual line
+        if let last = line.glyphs.last {
+            return Int(round(last.position.y / lineHeight))
+        }
+        return 0
+    }
+
+    /// Position (x, yDelta) for a character offset in a possibly-wrapped line.
+    /// yDelta is relative to the line's yOffset.
+    public func position(forCharacterOffset offset: Int, in line: LineLayout) -> CGPoint {
+        let x = xPosition(forCharacterOffset: offset, in: line)
+        guard line.wrapCount > 1 else { return CGPoint(x: x, y: 0) }
+        let wl = wrapLine(forCharacterOffset: offset, in: line)
+        return CGPoint(x: x, y: CGFloat(wl) * lineHeight)
+    }
+
+    /// Convert a point (x, yDelta relative to line yOffset) to a character offset in a wrapped line.
+    public func characterOffset(atPoint point: CGPoint, in line: LineLayout) -> Int {
+        guard line.wrapCount > 1 else {
+            return characterOffset(forX: point.x, in: line)
+        }
+
+        let targetWrapLine = max(0, min(line.wrapCount - 1, Int(floor(point.y / lineHeight))))
+
+        // Find glyphs on this visual line
+        var bestGlyph: LayoutGlyph?
+        var bestDistance: CGFloat = .greatestFiniteMagnitude
+        for glyph in line.glyphs {
+            let glyphWrapLine = Int(round(glyph.position.y / lineHeight))
+            guard glyphWrapLine == targetWrapLine else { continue }
+            let dist = abs(glyph.position.x - point.x)
+            if dist < bestDistance {
+                bestDistance = dist
+                bestGlyph = glyph
+            }
+
+            var glyphID = glyph.glyphID
+            var advance = CGSize.zero
+            CTFontGetAdvancesForGlyphs(glyph.font, .horizontal, &glyphID, &advance, 1)
+            let glyphEnd = glyph.position.x + advance.width
+            if point.x < glyphEnd {
+                let mid = glyph.position.x + advance.width / 2
+                if point.x < mid {
+                    return glyph.characterIndex
+                } else {
+                    return glyph.characterIndex + glyph.characterCount
+                }
+            }
+        }
+
+        // Past all glyphs on this wrap line
+        let glyphsOnLine = line.glyphs.filter { Int(round($0.position.y / lineHeight)) == targetWrapLine }
+        if let last = glyphsOnLine.last {
+            return last.characterIndex + last.characterCount
+        }
+        return bestGlyph.map { $0.characterIndex } ?? 0
+    }
+
+    /// Compute the number of visual lines a line of text requires at the given wrap width.
+    /// Cheaper than full layout - uses estimated character width.
+    public func estimateWrapCount(lineUTF16Length: Int, wrapWidth: CGFloat, charWidth: CGFloat) -> Int {
+        guard wrapWidth > 0, lineUTF16Length > 0 else { return 1 }
+        let totalWidth = CGFloat(lineUTF16Length) * charWidth
+        return max(1, Int(ceil(totalWidth / wrapWidth)))
+    }
+
+    /// Reposition glyphs for word wrapping at the given width.
+    private func applyWordWrap(glyphs: [LayoutGlyph], wrapWidth: CGFloat) -> (glyphs: [LayoutGlyph], wrapCount: Int) {
+        guard !glyphs.isEmpty, wrapWidth > 0 else { return (glyphs, 1) }
+
+        var result: [LayoutGlyph] = []
+        result.reserveCapacity(glyphs.count)
+        var currentWrapLine = 0
+        var wrapLineStartX: CGFloat = 0
+
+        for glyph in glyphs {
+            var glyphID = glyph.glyphID
+            var advance = CGSize.zero
+            CTFontGetAdvancesForGlyphs(glyph.font, .horizontal, &glyphID, &advance, 1)
+
+            let glyphX = glyph.position.x
+            let glyphRight = glyphX + advance.width
+
+            // Check if this glyph exceeds the wrap width (don't wrap the first glyph on a line)
+            if glyphX > wrapLineStartX && glyphRight > wrapLineStartX + wrapWidth {
+                currentWrapLine += 1
+                wrapLineStartX = glyphX
+            }
+
+            let newX = glyphX - wrapLineStartX
+            let newY = CGFloat(currentWrapLine) * lineHeight
+
+            result.append(LayoutGlyph(
+                glyphID: glyph.glyphID,
+                position: CGPoint(x: newX, y: newY),
+                font: glyph.font,
+                color: glyph.color,
+                characterIndex: glyph.characterIndex,
+                characterCount: glyph.characterCount
+            ))
+        }
+
+        return (result, currentWrapLine + 1)
     }
 
     // MARK: - Cache Management

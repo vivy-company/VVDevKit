@@ -50,7 +50,12 @@ public final class DynamicGrammarLoader {
             searchPaths.append("\(frameworksPath)/\(dylibName)")
         }
 
-        // 2. App bundle PlugIns/Grammars folder
+        // 2. App bundle Resources folder (playground.sh copies dylibs here)
+        if let resourcesPath = Bundle.main.resourcePath {
+            searchPaths.append("\(resourcesPath)/\(dylibName)")
+        }
+
+        // 3. App bundle PlugIns/Grammars folder
         if let pluginsPath = Bundle.main.builtInPlugInsPath {
             searchPaths.append("\(pluginsPath)/Grammars/\(dylibName)")
         }

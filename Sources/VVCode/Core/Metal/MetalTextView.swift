@@ -50,6 +50,15 @@ public final class MetalTextView: MTKView {
     private var indentGuideColumnsByLine: [[Int]] = []
     private var activeIndentGuideColumnsByLine: [Int?] = []
 
+    // Word wrap
+    private var wrapLinesEnabled: Bool = false
+    private var lastWrapWidth: CGFloat = 0
+    /// Per-visible-line cumulative Y offset (used when wrapping is on and lines have variable height).
+    /// Index i = Y offset of the i-th visible line. Only populated when wrapLinesEnabled is true.
+    private var visibleLineYOffsets: [CGFloat] = []
+    /// Total content height accounting for variable-height wrapped lines.
+    private var totalWrappedHeight: CGFloat = 0
+
     // Folding (line-based)
     private var foldedLineRanges: [ClosedRange<Int>] = []
     private var visibleLineForDocumentLine: [Int] = []
@@ -138,6 +147,7 @@ public final class MetalTextView: MTKView {
     private var diffOverlayTextRuns: [VVTextRunPrimitive] = []
 
     private var gutterQuads: [VVQuadPrimitive] = []
+    private var gutterCoverQuads: [VVQuadPrimitive] = []
     private var diffOverlayGradientQuads: [VVGradientQuadPrimitive] = []
     private var diffOverlayQuads: [VVQuadPrimitive] = []
     private var diffOverlayLines: [VVLinePrimitive] = []
@@ -907,6 +917,23 @@ public final class MetalTextView: MTKView {
         scheduleRedraw()
     }
 
+    /// Enable or disable word wrapping.
+    public func setWrapLines(_ enabled: Bool) {
+        guard wrapLinesEnabled != enabled else { return }
+        wrapLinesEnabled = enabled
+        invalidateLayout()
+        rebuildVisibleLineYOffsets()
+        onContentSizeChange?()
+        scheduleRedraw()
+    }
+
+    /// The wrap width for text content (viewport width minus gutter and insets).
+    private var effectiveWrapWidth: CGFloat? {
+        guard wrapLinesEnabled else { return nil }
+        let available = bounds.width - textInsets.left - textInsets.right
+        return max(40, available)
+    }
+
     /// Set the default text color
     public func setDefaultTextColor(_ color: NSColor) {
         defaultTextColor = color.simdColor
@@ -974,13 +1001,25 @@ public final class MetalTextView: MTKView {
 
     /// Get content size
     public var contentSize: CGSize {
-        let effectiveLines = max(1, visibleLineCount)
-        let height = CGFloat(effectiveLines) * layoutEngine.calculatedLineHeight + textInsets.top + textInsets.bottom
-        let estimatedWidth = CGFloat(maxLineLength) * estimatedCharWidth
-        let contentWidth = max(maxLineWidth, estimatedWidth)
+        let height: CGFloat
+        if wrapLinesEnabled && totalWrappedHeight > 0 {
+            height = totalWrappedHeight + textInsets.top + textInsets.bottom
+        } else {
+            let effectiveLines = max(1, visibleLineCount)
+            height = CGFloat(effectiveLines) * layoutEngine.calculatedLineHeight + textInsets.top + textInsets.bottom
+        }
+
+        let contentWidth: CGFloat
+        if wrapLinesEnabled {
+            // When wrapping, content width matches viewport (no horizontal scroll)
+            contentWidth = bounds.width
+        } else {
+            let estimatedWidth = CGFloat(maxLineLength) * estimatedCharWidth
+            contentWidth = max(maxLineWidth, estimatedWidth) + textInsets.left + textInsets.right
+        }
 
         return CGSize(
-            width: contentWidth + textInsets.left + textInsets.right,
+            width: contentWidth,
             height: height
         )
     }
@@ -1062,12 +1101,13 @@ public final class MetalTextView: MTKView {
         appendQuads(bracketMatchQuads, to: &scene, zIndex: 11)
 
         appendTextRuns(contentTextRuns, to: &scene, zIndex: 12)
-        appendTextRuns(gutterTextRuns, to: &scene, zIndex: 13)
-        appendTextRuns(diffOverlayTextRuns, to: &scene, zIndex: 14)
-        appendTextRuns(blameTextRuns, to: &scene, zIndex: 15)
+        appendQuads(gutterCoverQuads, to: &scene, zIndex: 13)
+        appendTextRuns(gutterTextRuns, to: &scene, zIndex: 14)
+        appendTextRuns(diffOverlayTextRuns, to: &scene, zIndex: 15)
+        appendTextRuns(blameTextRuns, to: &scene, zIndex: 16)
 
-        appendQuads(markedTextQuads, to: &scene, zIndex: 16)
-        appendQuads(cursorQuads, to: &scene, zIndex: 17)
+        appendQuads(markedTextQuads, to: &scene, zIndex: 17)
+        appendQuads(cursorQuads, to: &scene, zIndex: 18)
 
         appendQuads(statusBarQuads, to: &scene, zIndex: 20)
         appendTextRuns(statusBarTextRuns, to: &scene, zIndex: 21)
@@ -1532,6 +1572,14 @@ public final class MetalTextView: MTKView {
     override public func layout() {
         super.layout()
         updateDrawableSize()
+        if wrapLinesEnabled {
+            let currentWW = effectiveWrapWidth ?? 0
+            if abs(currentWW - lastWrapWidth) > 1 {
+                lastWrapWidth = currentWW
+                invalidateLayout()
+                onContentSizeChange?()
+            }
+        }
     }
 
     private func updateStatusBarMetrics() {
@@ -1623,6 +1671,9 @@ public final class MetalTextView: MTKView {
         layoutEngine.invalidateCache()
         lineLayouts.removeAll()
         maxLineWidth = CGFloat(maxLineLength) * estimatedCharWidth
+        if wrapLinesEnabled {
+            rebuildVisibleLineYOffsets()
+        }
     }
 
     private func invalidateLayout(in range: NSRange) {
@@ -1639,16 +1690,24 @@ public final class MetalTextView: MTKView {
             return cached
         }
 
-        let yOffset = textInsets.top + CGFloat(visibleIndex) * layoutEngine.calculatedLineHeight
+        let yOffset: CGFloat
+        if wrapLinesEnabled, visibleIndex < visibleLineYOffsets.count {
+            yOffset = textInsets.top + visibleLineYOffsets[visibleIndex]
+        } else {
+            yOffset = textInsets.top + CGFloat(visibleIndex) * layoutEngine.calculatedLineHeight
+        }
         let layout = layoutEngine.layoutLine(
             text: lines[lineIndex],
             lineIndex: lineIndex,
             yOffset: yOffset,
+            wrapWidth: effectiveWrapWidth,
             coloredRanges: coloredRangesForLine(lineIndex),
             defaultColor: defaultTextColor
         )
         lineLayouts[lineIndex] = layout
         updateMaxLineWidth(from: layout)
+        // If actual wrap count differs from the estimated Y offset, correct the offsets
+        updateVisibleLineYOffset(visibleIndex: visibleIndex, layout: layout)
         return layout
     }
 
@@ -1720,6 +1779,60 @@ public final class MetalTextView: MTKView {
         }
     }
 
+    /// Rebuild cumulative Y offsets for visible lines when word wrap is active.
+    /// Each visible line may occupy multiple visual lines (wrapCount * lineHeight).
+    private func rebuildVisibleLineYOffsets() {
+        guard wrapLinesEnabled else {
+            visibleLineYOffsets.removeAll(keepingCapacity: true)
+            totalWrappedHeight = 0
+            return
+        }
+
+        let lh = layoutEngine.calculatedLineHeight
+        let wrapW = effectiveWrapWidth
+        visibleLineYOffsets.removeAll(keepingCapacity: true)
+        visibleLineYOffsets.reserveCapacity(visibleLineCount)
+        var cumulativeY: CGFloat = 0
+
+        for visibleIdx in 0..<visibleLineCount {
+            visibleLineYOffsets.append(cumulativeY)
+            if let docLine = documentLineIndex(forVisibleLine: visibleIdx),
+               let cached = lineLayouts[docLine] {
+                cumulativeY += cached.height
+            } else if let wrapW = wrapW, let docLine = documentLineIndex(forVisibleLine: visibleIdx) {
+                let wc = layoutEngine.estimateWrapCount(
+                    lineUTF16Length: lineUTF16Length(docLine),
+                    wrapWidth: wrapW,
+                    charWidth: estimatedCharWidth
+                )
+                cumulativeY += CGFloat(wc) * lh
+            } else {
+                cumulativeY += lh
+            }
+        }
+        totalWrappedHeight = cumulativeY
+    }
+
+    /// Update the Y offset entry for a single visible line after its layout is computed.
+    private func updateVisibleLineYOffset(visibleIndex: Int, layout: LineLayout) {
+        guard wrapLinesEnabled, visibleIndex < visibleLineYOffsets.count else { return }
+        let oldHeight: CGFloat
+        if visibleIndex + 1 < visibleLineYOffsets.count {
+            oldHeight = visibleLineYOffsets[visibleIndex + 1] - visibleLineYOffsets[visibleIndex]
+        } else {
+            oldHeight = totalWrappedHeight - visibleLineYOffsets[visibleIndex]
+        }
+        let newHeight = layout.height
+        let delta = newHeight - oldHeight
+        guard abs(delta) > 0.5 else { return }
+        // Shift all subsequent entries
+        for i in (visibleIndex + 1)..<visibleLineYOffsets.count {
+            visibleLineYOffsets[i] += delta
+        }
+        totalWrappedHeight += delta
+        onContentSizeChange?()
+    }
+
     private func visibleLineIndex(forDocumentLine lineIndex: Int) -> Int? {
         guard lineIndex >= 0 && lineIndex < visibleLineForDocumentLine.count else { return nil }
         let value = visibleLineForDocumentLine[lineIndex]
@@ -1743,13 +1856,38 @@ public final class MetalTextView: MTKView {
         guard visibleLineCount > 0 else { return (0, -1) }
         let topOffset = scrollOffset - textInsets.top
         let bottomOffset = scrollOffset + height - textInsets.top
-        let firstVisible = max(0, Int(floor(topOffset / lineHeight)))
-        let lastVisible = max(0, Int(ceil(bottomOffset / lineHeight)))
+
+        let firstVisible: Int
+        let lastVisible: Int
+
+        if wrapLinesEnabled, !visibleLineYOffsets.isEmpty {
+            firstVisible = binarySearchVisibleLine(forY: topOffset)
+            lastVisible = binarySearchVisibleLine(forY: bottomOffset)
+        } else {
+            firstVisible = max(0, Int(floor(topOffset / lineHeight)))
+            lastVisible = max(0, Int(ceil(bottomOffset / lineHeight)))
+        }
+
         let clampedLastVisible = min(max(0, visibleLineCount - 1), lastVisible)
         let clampedFirstVisible = min(max(0, visibleLineCount - 1), firstVisible)
         let firstDoc = documentLineIndex(forVisibleLine: clampedFirstVisible) ?? 0
         let lastDoc = documentLineIndex(forVisibleLine: clampedLastVisible) ?? firstDoc
         return (firstDoc, lastDoc)
+    }
+
+    /// Binary search on visibleLineYOffsets to find the visible line index at a given Y.
+    private func binarySearchVisibleLine(forY y: CGFloat) -> Int {
+        var lo = 0
+        var hi = visibleLineYOffsets.count - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if visibleLineYOffsets[mid] <= y {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return max(0, hi)
     }
 
     public func documentLineIndex(atY y: CGFloat) -> Int? {
@@ -1759,7 +1897,13 @@ public final class MetalTextView: MTKView {
         let lineHeight = layoutEngine.calculatedLineHeight
         guard lineHeight > 0 && lineHeight.isFinite else { return nil }
         let adjustedY = y + scrollOffset.y - textInsets.top
-        let visibleIndex = Int(floor(adjustedY / lineHeight))
+
+        let visibleIndex: Int
+        if wrapLinesEnabled, !visibleLineYOffsets.isEmpty {
+            visibleIndex = binarySearchVisibleLine(forY: adjustedY)
+        } else {
+            visibleIndex = Int(floor(adjustedY / lineHeight))
+        }
         return documentLineIndex(forVisibleLine: visibleIndex)
     }
 
@@ -2158,6 +2302,7 @@ public final class MetalTextView: MTKView {
 
     private func prepareGutterBatches() {
         gutterQuads.removeAll(keepingCapacity: true)
+        gutterCoverQuads.removeAll(keepingCapacity: true)
         gutterTextRuns.removeAll(keepingCapacity: true)
 
         guard showsGutter, gutterWidth > 0 else { return }
@@ -2169,6 +2314,9 @@ public final class MetalTextView: MTKView {
             height: bounds.height
         )
         gutterQuads.append(VVQuadPrimitive(frame: backgroundRect, color: gutterBackgroundColor.simdColor))
+
+        // Opaque cover above content text to prevent text bleeding under gutter on horizontal scroll
+        gutterCoverQuads.append(VVQuadPrimitive(frame: backgroundRect, color: gutterBackgroundColor.simdColor))
 
         if let highlight = currentLineHighlightInfo() {
             let highlightRect = CGRect(
@@ -2198,14 +2346,17 @@ public final class MetalTextView: MTKView {
                 case .deleted: color = gitDeletedColor
                 }
 
-                let y = textInsets.top + CGFloat(hunk.startLine) * layoutEngine.calculatedLineHeight
+                let y = layoutForLine(hunk.startLine)?.yOffset
+                    ?? (textInsets.top + CGFloat(hunk.startLine) * layoutEngine.calculatedLineHeight)
                 let quadX = indicatorX
                 let quadY = y
                 if hunk.status == .deleted {
                     let rect = CGRect(x: quadX, y: quadY, width: indicatorWidth, height: layoutEngine.calculatedLineHeight / 2)
                     gutterQuads.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                 } else {
-                    let height = CGFloat(hunk.lineCount) * layoutEngine.calculatedLineHeight
+                    let endY = layoutForLine(hunk.startLine + max(0, hunk.lineCount - 1)).map { $0.yOffset + $0.height }
+                        ?? (y + CGFloat(hunk.lineCount) * layoutEngine.calculatedLineHeight)
+                    let height = endY - y
                     let rect = CGRect(x: quadX, y: quadY + 2, width: indicatorWidth, height: max(0, height - 4))
                     gutterQuads.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                 }
@@ -2283,7 +2434,8 @@ public final class MetalTextView: MTKView {
 
             let baselineY = layout.yOffset + layout.baselineOffset
             let glyphs = layout.glyphs.compactMap { glyph -> VVTextGlyph? in
-                makeTextGlyph(from: glyph, baselineY: baselineY)
+                // For wrapped lines, glyph.position.y is the Y offset relative to the first visual line
+                makeTextGlyph(from: glyph, baselineY: baselineY + glyph.position.y)
             }
 
             if !glyphs.isEmpty {
@@ -2302,9 +2454,10 @@ public final class MetalTextView: MTKView {
                 let endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: lineLength, in: layout)
                 let spaceWidth = glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize)
                 let placeholderX = endX + spaceWidth
+                let foldBaselineY = baselineY + layoutEngine.position(forCharacterOffset: lineLength, in: layout).y
                 if let placeholderRun = makeTextRun(
                     placeholder,
-                    baselineY: baselineY,
+                    baselineY: foldBaselineY,
                     x: placeholderX,
                     color: foldPlaceholderColor.simdColor,
                     font: currentFont,
@@ -2380,15 +2533,30 @@ public final class MetalTextView: MTKView {
         let segmentWidth = max(lineWidth, 1.0 / max(1.0, backingScaleFactor))
         let pad = max(0, linePadding)
 
+        // Helper to get Y for a visible line index
+        func yForVisibleLine(_ vi: Int) -> CGFloat {
+            if wrapLinesEnabled, vi < visibleLineYOffsets.count {
+                return textInsets.top + visibleLineYOffsets[vi]
+            }
+            return textInsets.top + CGFloat(vi) * lineHeight
+        }
+        func heightForVisibleLine(_ vi: Int) -> CGFloat {
+            if wrapLinesEnabled, let docLine = documentLineIndex(forVisibleLine: vi),
+               let layout = lineLayouts[docLine] {
+                return layout.height
+            }
+            return lineHeight
+        }
+
         var currentStartVisible: Int?
         var currentEndVisible = 0
 
         for line in segment.startLine...segment.endLine {
             guard let visibleIndex = visibleLineIndex(forDocumentLine: line) else {
                 if let start = currentStartVisible {
-                    let height = CGFloat(currentEndVisible - start + 1) * lineHeight
-                    let y = textInsets.top + CGFloat(start) * lineHeight + pad
-                    let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, height - pad * 2))
+                    let y = yForVisibleLine(start) + pad
+                    let endY = yForVisibleLine(currentEndVisible) + heightForVisibleLine(currentEndVisible)
+                    let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, endY - y - pad * 2))
                     output.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                     currentStartVisible = nil
                 }
@@ -2399,9 +2567,9 @@ public final class MetalTextView: MTKView {
                 if visibleIndex == currentEndVisible + 1 {
                     currentEndVisible = visibleIndex
                 } else {
-                    let height = CGFloat(currentEndVisible - start + 1) * lineHeight
-                    let y = textInsets.top + CGFloat(start) * lineHeight + pad
-                    let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, height - pad * 2))
+                    let y = yForVisibleLine(start) + pad
+                    let endY = yForVisibleLine(currentEndVisible) + heightForVisibleLine(currentEndVisible)
+                    let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, endY - y - pad * 2))
                     output.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
                     currentStartVisible = visibleIndex
                     currentEndVisible = visibleIndex
@@ -2413,9 +2581,9 @@ public final class MetalTextView: MTKView {
         }
 
         if let start = currentStartVisible {
-            let height = CGFloat(currentEndVisible - start + 1) * lineHeight
-            let y = textInsets.top + CGFloat(start) * lineHeight + pad
-            let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, height - pad * 2))
+            let y = yForVisibleLine(start) + pad
+            let endY = yForVisibleLine(currentEndVisible) + heightForVisibleLine(currentEndVisible)
+            let rect = CGRect(x: alignedX, y: y, width: segmentWidth, height: max(0, endY - y - pad * 2))
             output.append(VVQuadPrimitive(frame: rect, color: color.simdColor))
         }
     }
@@ -2524,11 +2692,17 @@ public final class MetalTextView: MTKView {
         for position in positions {
             guard position.line >= 0 && position.line < lines.count else { continue }
             guard let layout = layoutForLine(position.line) else { continue }
-            let screenY = layout.yOffset - scrollOffset.y
+
+            let wrapDelta = layout.wrapCount > 1
+                ? layoutEngine.position(forCharacterOffset: position.column, in: layout)
+                : CGPoint(x: layoutEngine.xPosition(forCharacterOffset: position.column, in: layout), y: 0)
+
+            let cursorY = layout.yOffset + wrapDelta.y
+            let screenY = cursorY - scrollOffset.y
             if screenY > effectiveViewportHeight || (screenY + layoutEngine.calculatedLineHeight) < 0 {
                 continue
             }
-            let xPos = textInsets.left + layoutEngine.xPosition(forCharacterOffset: position.column, in: layout)
+            let xPos = textInsets.left + wrapDelta.x
             let maxColumn = lineUTF16Length(position.line)
             let nextColumn = min(position.column + 1, maxColumn)
             let xNext = textInsets.left + layoutEngine.xPosition(forCharacterOffset: nextColumn, in: layout)
@@ -2536,7 +2710,7 @@ public final class MetalTextView: MTKView {
             let blockWidth = max(2, (xNext > xPos) ? (xNext - xPos) : defaultWidth)
             let width: CGFloat = (cursorStyle == .block) ? blockWidth : 2
 
-            let rect = CGRect(x: xPos, y: layout.yOffset, width: width, height: layoutEngine.calculatedLineHeight)
+            let rect = CGRect(x: xPos, y: cursorY, width: width, height: layoutEngine.calculatedLineHeight)
             cursorQuads.append(VVQuadPrimitive(frame: rect, color: cursorColor.simdColor))
         }
     }
@@ -2544,7 +2718,7 @@ public final class MetalTextView: MTKView {
     private func prepareLineHighlightBatch() {
         lineHighlightQuads.removeAll(keepingCapacity: true)
         guard let highlight = currentLineHighlightInfo() else { return }
-        let highlightX = showsGutter ? gutterWidth : 0
+        let highlightX = textInsets.left
         let highlightWidth = max(0, bounds.width - highlightX + scrollOffset.x)
         let rect = CGRect(
             x: highlightX,
@@ -2567,10 +2741,10 @@ public final class MetalTextView: MTKView {
         }
         guard let layout = layoutForLine(cursorLine) else { return nil }
         let screenY = layout.yOffset - scrollOffset.y
-        if screenY > effectiveViewportHeight || (screenY + layoutEngine.calculatedLineHeight) < 0 {
+        if screenY > effectiveViewportHeight || (screenY + layout.height) < 0 {
             return nil
         }
-        return (cursorLine, layout.yOffset, layoutEngine.calculatedLineHeight)
+        return (cursorLine, layout.yOffset, layout.height)
     }
 
     private func prepareStatusBarBatches() {
@@ -3425,7 +3599,13 @@ public final class MetalTextView: MTKView {
 
         // Convert view-local point to document coordinates using scroll offset
         let adjustedY = point.y + scrollOffset.y - textInsets.top
-        let visibleIndex = Int(floor(adjustedY / lineHeight))
+
+        let visibleIndex: Int
+        if wrapLinesEnabled, !visibleLineYOffsets.isEmpty {
+            visibleIndex = binarySearchVisibleLine(forY: adjustedY)
+        } else {
+            visibleIndex = Int(floor(adjustedY / lineHeight))
+        }
         guard let lineIndex = documentLineIndex(forVisibleLine: visibleIndex) else { return nil }
 
         guard lineIndex >= 0 && lineIndex < lines.count else {
@@ -3434,7 +3614,16 @@ public final class MetalTextView: MTKView {
 
         guard let layout = layoutForLine(lineIndex) else { return nil }
         let adjustedX = point.x + scrollOffset.x - textInsets.left
-        let rawColumn = layoutEngine.characterOffset(forX: adjustedX, in: layout)
+
+        let rawColumn: Int
+        if layout.wrapCount > 1 {
+            // For wrapped lines, compute which visual sub-line the click is on
+            let yInLine = adjustedY - (layout.yOffset - textInsets.top)
+            let clickPoint = CGPoint(x: adjustedX, y: yInLine)
+            rawColumn = layoutEngine.characterOffset(atPoint: clickPoint, in: layout)
+        } else {
+            rawColumn = layoutEngine.characterOffset(forX: adjustedX, in: layout)
+        }
         let maxColumn = lineUTF16Length(lineIndex)
         let column = min(max(rawColumn, 0), maxColumn)
 
@@ -3445,6 +3634,8 @@ public final class MetalTextView: MTKView {
     public func rectsForRange(_ range: NSRange) -> [CGRect] {
         var rects: [CGRect] = []
         guard let lineRange = lineRangeForRange(range) else { return rects }
+
+        let lh = layoutEngine.calculatedLineHeight
 
         for lineIndex in lineRange {
             guard let layout = layoutForLine(lineIndex) else { continue }
@@ -3457,29 +3648,61 @@ public final class MetalTextView: MTKView {
                 let startCol = max(0, range.location - lineStart)
                 let endCol = min(lineLength, range.location + range.length - lineStart)
 
-                let startX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: startCol, in: layout)
-                var endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: endCol, in: layout)
+                if layout.wrapCount > 1 {
+                    // Multi-visual-line: produce one rect per visual line segment
+                    let startPos = layoutEngine.position(forCharacterOffset: startCol, in: layout)
+                    let endPos = layoutEngine.position(forCharacterOffset: endCol, in: layout)
+                    let startWL = Int(round(startPos.y / lh))
+                    let endWL = Int(round(endPos.y / lh))
 
-                if endX <= startX {
-                    let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
-                        for: Character(" "),
-                        variant: .regular,
-                        fontSize: currentFont.pointSize,
-                        baseFont: renderer?.baseFont
-                    )?.advance ?? 8
-                    endX = startX + spaceWidth
+                    for wl in startWL...endWL {
+                        let wlY = layout.yOffset + CGFloat(wl) * lh
+                        let sx: CGFloat = (wl == startWL) ? (textInsets.left + startPos.x) : textInsets.left
+                        var ex: CGFloat
+                        if wl == endWL {
+                            ex = textInsets.left + endPos.x
+                        } else {
+                            ex = bounds.width + scrollOffset.x
+                        }
+                        if ex <= sx {
+                            let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
+                                for: Character(" "),
+                                variant: .regular,
+                                fontSize: currentFont.pointSize,
+                                baseFont: renderer?.baseFont
+                            )?.advance ?? 8
+                            ex = sx + spaceWidth
+                        }
+                        if wl < endWL || (range.location + range.length > lineEnd) {
+                            ex = bounds.width + scrollOffset.x
+                        }
+                        rects.append(CGRect(x: sx, y: wlY, width: ex - sx, height: lh))
+                    }
+                } else {
+                    let startX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: startCol, in: layout)
+                    var endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: endCol, in: layout)
+
+                    if endX <= startX {
+                        let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
+                            for: Character(" "),
+                            variant: .regular,
+                            fontSize: currentFont.pointSize,
+                            baseFont: renderer?.baseFont
+                        )?.advance ?? 8
+                        endX = startX + spaceWidth
+                    }
+
+                    if range.location + range.length > lineEnd {
+                        endX = bounds.width + scrollOffset.x
+                    }
+
+                    rects.append(CGRect(
+                        x: startX,
+                        y: layout.yOffset,
+                        width: endX - startX,
+                        height: lh
+                    ))
                 }
-
-                if range.location + range.length > lineEnd {
-                    endX = bounds.width + scrollOffset.x
-                }
-
-                rects.append(CGRect(
-                    x: startX,
-                    y: layout.yOffset,
-                    width: endX - startX,
-                    height: layoutEngine.calculatedLineHeight
-                ))
             }
         }
 
@@ -3491,8 +3714,9 @@ public final class MetalTextView: MTKView {
         guard cursorLine >= 0 && cursorLine < lines.count else { return nil }
         guard let layout = layoutForLine(cursorLine) else { return nil }
         let lineHeight = layoutEngine.calculatedLineHeight
-        let xPos = textInsets.left + layoutEngine.xPosition(forCharacterOffset: cursorColumn, in: layout)
-        let yPos = layout.yOffset
+        let wrapPos = layoutEngine.position(forCharacterOffset: cursorColumn, in: layout)
+        let xPos = textInsets.left + wrapPos.x
+        let yPos = layout.yOffset + wrapPos.y
         let viewX = xPos - scrollOffset.x
         let viewY = yPos - scrollOffset.y
         return CGRect(x: viewX, y: viewY, width: 1, height: lineHeight)

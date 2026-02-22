@@ -5,6 +5,7 @@
 
 import Foundation
 import simd
+import VVMetalPrimitives
 
 #if canImport(AppKit)
 import AppKit
@@ -108,7 +109,7 @@ public struct MarkdownTheme: Sendable {
         codeCopyButtonCornerRadius: Float = 6,
         codeGutterDividerWidth: Float = 1,
         codeBlockCornerRadius: Float = 12,
-        codeBlockHeaderHeight: Float = 30,
+        codeBlockHeaderHeight: Float = 36,
         blockQuoteColor: SIMD4<Float> = .gray70,
         blockQuoteBorderColor: SIMD4<Float> = .gray40,
         listBulletColor: SIMD4<Float> = .gray60,
@@ -196,7 +197,7 @@ public struct MarkdownTheme: Sendable {
         codeGutterBackgroundColor: .gray(0.92),
         codeGutterTextColor: .gray50,
         codeBlockCornerRadius: 10,
-        codeBlockHeaderHeight: 30,
+        codeBlockHeaderHeight: 36,
         blockQuoteColor: .gray40,
         blockQuoteBorderColor: .gray70,
         listBulletColor: .gray50,

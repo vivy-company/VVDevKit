@@ -260,7 +260,20 @@ extension TreeSitterHighlighter {
             }
         }
 
-        return results
+        // Filter out child body/block ranges that are redundant with their parent.
+        // e.g. function_declaration (line 8-11) + function_body (line 9-11) -> keep only function_declaration
+        let sorted = results.sorted { $0.startLine < $1.startLine }
+        var filtered: [FoldingRange] = []
+        for range in sorted {
+            let isChildBody = filtered.contains { parent in
+                range.startLine == parent.startLine + 1 &&
+                range.endLine <= parent.endLine
+            }
+            if !isChildBody {
+                filtered.append(range)
+            }
+        }
+        return filtered
     }
 
     private func isIgnoredNodeType(_ type: String) -> Bool {

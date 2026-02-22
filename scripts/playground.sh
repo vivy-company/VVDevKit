@@ -56,11 +56,28 @@ fi
 
 cp "${EXE_PATH}" "${MACOS_DIR}/${SCHEME}"
 
+# Copy resource bundles
 for bundle in "${DERIVED_DATA}/Build/Products/${CONFIG}"/*.bundle; do
   if [[ -d "${bundle}" ]]; then
     cp -R "${bundle}" "${RES_DIR}/"
   fi
 done
+
+# Copy grammar dylibs so tree-sitter highlighting works at runtime
+for dylib in "${DERIVED_DATA}/Build/Products/${CONFIG}"/libTreeSitter*.dylib; do
+  if [[ -f "${dylib}" ]]; then
+    cp "${dylib}" "${RES_DIR}/"
+  fi
+done
+
+# Also try SPM .build directory if xcodebuild didn't produce dylibs
+if ! ls "${RES_DIR}"/libTreeSitter*.dylib &>/dev/null; then
+  for dylib in "${ROOT_DIR}/.build/debug"/libTreeSitter*.dylib; do
+    if [[ -f "${dylib}" ]]; then
+      cp "${dylib}" "${RES_DIR}/"
+    fi
+  done
+fi
 
 echo "Built app: ${APP_PATH}"
 open "${APP_PATH}"

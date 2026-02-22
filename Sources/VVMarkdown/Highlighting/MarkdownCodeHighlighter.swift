@@ -5,6 +5,7 @@
 
 import Foundation
 import VVHighlighting
+import VVMetalPrimitives
 import simd
 
 #if canImport(AppKit)
