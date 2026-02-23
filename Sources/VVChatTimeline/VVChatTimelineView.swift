@@ -45,6 +45,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     // Selection support
     private let selectionController = VVTextSelectionController<ChatTextPosition>()
     private let selectionColor: SIMD4<Float> = .blue.withOpacity(0.4)
+    public var onStateChange: ((VVChatTimelineState) -> Void)?
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -194,6 +195,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         requestImagesForVisibleItems()
         metalView.setNeedsDisplay(metalView.bounds)
+        onStateChange?(controller.state)
     }
 
     private func updateDocumentHeight(_ height: CGFloat) {
@@ -253,6 +255,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         jumpButton.isHidden = !controller.state.hasUnreadNewContent
         requestImagesForVisibleItems()
         metalView.setNeedsDisplay(metalView.bounds)
+        onStateChange?(controller.state)
     }
 
     public func scrollToBottom(animated: Bool) {
@@ -281,6 +284,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     @objc private func handleJumpToLatest() {
         controller?.jumpToLatest()
         scrollToBottom(animated: true)
+        if let controller {
+            onStateChange?(controller.state)
+        }
     }
 
     // MARK: - VVChatTimelineRenderDataSource

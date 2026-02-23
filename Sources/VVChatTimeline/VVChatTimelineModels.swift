@@ -39,3 +39,39 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
         state == .draft
     }
 }
+
+public struct VVCustomTimelineEntry: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let kind: String
+    public let payload: Data
+    public let revision: Int
+    public let timestamp: Date?
+
+    public init(
+        id: String,
+        kind: String,
+        payload: Data,
+        revision: Int = 0,
+        timestamp: Date? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.payload = payload
+        self.revision = revision
+        self.timestamp = timestamp
+    }
+}
+
+public enum VVChatTimelineEntry: Identifiable, Hashable, Sendable {
+    case message(VVChatMessage)
+    case custom(VVCustomTimelineEntry)
+
+    public var id: String {
+        switch self {
+        case .message(let message):
+            return message.id
+        case .custom(let custom):
+            return custom.id
+        }
+    }
+}

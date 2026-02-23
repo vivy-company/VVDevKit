@@ -3,6 +3,8 @@ import CoreGraphics
 
 @MainActor
 public final class VVChatTimelineController {
+    public typealias CustomEntryMessageMapper = @MainActor (VVCustomTimelineEntry) -> VVChatMessage
+
     public struct Update {
         public var insertedIndexes: IndexSet
         public var updatedIndexes: IndexSet
@@ -42,6 +44,7 @@ public final class VVChatTimelineController {
         public var revision: Int
     }
 
+    public private(set) var entries: [VVChatTimelineEntry] = []
     public private(set) var messages: [VVChatMessage] = []
     public private(set) var layouts: [ItemLayout] = []
     public private(set) var totalHeight: CGFloat = 0
@@ -56,6 +59,7 @@ public final class VVChatTimelineController {
     private var activeDraftID: String?
     private var messageImageURLs: [String: Set<String>] = [:]
     private var imageURLToMessageIDs: [String: Set<String>] = [:]
+    private var customEntryMessageMapper: CustomEntryMessageMapper?
 
     public init(style: VVChatTimelineStyle = .init(), renderWidth: CGFloat = 0) {
         self.style = style
@@ -83,20 +87,65 @@ public final class VVChatTimelineController {
     }
 
     public func setMessages(_ newMessages: [VVChatMessage], scrollToBottom: Bool = true) {
+        setEntries(
+            newMessages.map { .message($0) },
+            scrollToBottom: scrollToBottom,
+            customEntryMessageMapper: nil
+        )
+    }
+
+    public func setEntries(
+        _ newEntries: [VVChatTimelineEntry],
+        scrollToBottom: Bool = true,
+        customEntryMessageMapper: CustomEntryMessageMapper? = nil
+    ) {
         draftThrottler.cancel()
         activeDraftID = nil
-        messages = newMessages
+
+        self.customEntryMessageMapper = customEntryMessageMapper
+        entries = newEntries
+        messages = newEntries.map { materializeMessage(for: $0) }
+
         messageImageURLs.removeAll(keepingCapacity: true)
         imageURLToMessageIDs.removeAll(keepingCapacity: true)
+
         if scrollToBottom {
             state.hasUnreadNewContent = false
         }
+
         rebuildLayouts(shouldScrollToBottom: scrollToBottom)
     }
 
     public func appendMessage(_ message: VVChatMessage) {
+        entries.append(.message(message))
+
         let index = messages.count
         messages.append(message)
+        let layout = buildLayout(for: message, at: nextYPosition())
+        layouts.append(layout)
+        totalHeight = layout.frame.maxY + style.timelineInsets.bottom
+
+        let shouldFollow = state.shouldAutoFollow
+        if !shouldFollow {
+            state.hasUnreadNewContent = true
+        }
+
+        let update = Update(
+            insertedIndexes: IndexSet(integer: index),
+            totalHeight: totalHeight,
+            shouldScrollToBottom: shouldFollow,
+            hasUnreadNewContent: state.hasUnreadNewContent
+        )
+        onUpdate?(update)
+    }
+
+    public func appendCustomEntry(_ entry: VVCustomTimelineEntry) {
+        entries.append(.custom(entry))
+
+        let index = messages.count
+        let message = materializeMessage(for: .custom(entry))
+        messages.append(message)
+
         let layout = buildLayout(for: message, at: nextYPosition())
         layouts.append(layout)
         totalHeight = layout.frame.maxY + style.timelineInsets.bottom
@@ -155,6 +204,7 @@ public final class VVChatTimelineController {
         messages[index].state = .final
         messages[index].content = content
         messages[index].revision += 1
+        syncMessageBackToEntries(messages[index])
         if activeDraftID == id {
             draftThrottler.cancel()
             activeDraftID = nil
@@ -203,6 +253,11 @@ public final class VVChatTimelineController {
         return layouts[index]
     }
 
+    public func entry(at index: Int) -> VVChatTimelineEntry? {
+        guard entries.indices.contains(index) else { return nil }
+        return entries[index]
+    }
+
     public func renderedMessage(for id: String) -> VVChatRenderedMessage? {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return nil }
         return renderer.renderedMessage(for: messages[index])
@@ -213,6 +268,7 @@ public final class VVChatTimelineController {
         guard messages[index].state == .draft else { return }
         messages[index].content = content
         messages[index].revision += 1
+        syncMessageBackToEntries(messages[index])
         updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: true)
     }
 
@@ -320,5 +376,34 @@ public final class VVChatTimelineController {
         for url in imageURLs {
             imageURLToMessageIDs[url, default: []].insert(messageID)
         }
+    }
+
+    private func syncMessageBackToEntries(_ message: VVChatMessage) {
+        guard let entryIndex = entries.firstIndex(where: { $0.id == message.id }) else { return }
+        entries[entryIndex] = .message(message)
+    }
+
+    private func materializeMessage(for entry: VVChatTimelineEntry) -> VVChatMessage {
+        switch entry {
+        case .message(let message):
+            return message
+        case .custom(let custom):
+            if let customEntryMessageMapper {
+                return customEntryMessageMapper(custom)
+            }
+            return defaultMessage(for: custom)
+        }
+    }
+
+    private func defaultMessage(for custom: VVCustomTimelineEntry) -> VVChatMessage {
+        let content = String(data: custom.payload, encoding: .utf8) ?? "[\(custom.kind)]"
+        return VVChatMessage(
+            id: custom.id,
+            role: .system,
+            state: .final,
+            content: content,
+            revision: custom.revision,
+            timestamp: custom.timestamp
+        )
     }
 }

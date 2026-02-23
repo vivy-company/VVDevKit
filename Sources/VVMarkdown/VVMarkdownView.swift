@@ -31,6 +31,8 @@ public struct VVMarkdownView: View {
     private let content: String
     private let theme: MarkdownTheme
     private let font: VVFont
+    private let baseURL: URL?
+    private let linkHandler: VVMarkdownLinkHandler?
     private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
@@ -40,12 +42,16 @@ public struct VVMarkdownView: View {
         content: String,
         theme: MarkdownTheme = .dark,
         font: VVFont = .systemFont(ofSize: 14),
+        baseURL: URL? = nil,
+        linkHandler: VVMarkdownLinkHandler? = nil,
         viewProvider: MarkdownViewProvider? = nil,
         styleRegistry: MarkdownStyleRegistry? = nil
     ) {
         self.content = content
         self.theme = theme
         self.font = font
+        self.baseURL = baseURL
+        self.linkHandler = linkHandler
         self.viewProvider = viewProvider
         self.styleRegistry = styleRegistry
     }
@@ -55,6 +61,8 @@ public struct VVMarkdownView: View {
             content: content,
             theme: theme,
             font: font,
+            baseURL: baseURL,
+            linkHandler: linkHandler,
             viewProvider: viewProvider,
             styleRegistry: styleRegistry,
             scrollOffset: $scrollOffset
@@ -69,17 +77,23 @@ public struct MetalMarkdownViewRepresentable: NSViewRepresentable {
     let content: String
     let theme: MarkdownTheme
     let font: VVFont
+    let baseURL: URL?
+    let linkHandler: VVMarkdownLinkHandler?
     let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
     @Binding var scrollOffset: CGPoint
 
     public func makeNSView(context: Context) -> MetalMarkdownNSView {
         let view = MetalMarkdownNSView(frame: .zero, font: font, theme: theme, viewProvider: viewProvider, styleRegistry: styleRegistry)
+        view.baseURL = baseURL
+        view.linkHandler = linkHandler
         view.setContent(content)
         return view
     }
 
     public func updateNSView(_ nsView: MetalMarkdownNSView, context: Context) {
+        nsView.baseURL = baseURL
+        nsView.linkHandler = linkHandler
         nsView.setContent(content)
         nsView.updateTheme(theme)
     }
@@ -89,17 +103,23 @@ public struct MetalMarkdownViewRepresentable: UIViewRepresentable {
     let content: String
     let theme: MarkdownTheme
     let font: VVFont
+    let baseURL: URL?
+    let linkHandler: VVMarkdownLinkHandler?
     let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
     @Binding var scrollOffset: CGPoint
 
     public func makeUIView(context: Context) -> MetalMarkdownUIView {
         let view = MetalMarkdownUIView(frame: .zero, font: font, theme: theme, viewProvider: viewProvider, styleRegistry: styleRegistry)
+        view.baseURL = baseURL
+        view.linkHandler = linkHandler
         view.setContent(content)
         return view
     }
 
     public func updateUIView(_ uiView: MetalMarkdownUIView, context: Context) {
+        uiView.baseURL = baseURL
+        uiView.linkHandler = linkHandler
         uiView.setContent(content)
         uiView.updateTheme(theme)
     }
@@ -153,6 +173,8 @@ public class MetalMarkdownNSView: NSView {
 
     private var theme: MarkdownTheme
     private var baseFont: VVFont
+    public var baseURL: URL?
+    public var linkHandler: VVMarkdownLinkHandler?
     private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
@@ -1054,12 +1076,37 @@ public class MetalMarkdownNSView: NSView {
             }
             return
         }
-        guard let url = URL(string: urlString) else { return }
+
+        let resolvedURL = resolveLinkURL(urlString)
+        let context = VVMarkdownLinkContext(raw: urlString, resolvedURL: resolvedURL, baseURL: baseURL)
+        if let linkHandler {
+            switch linkHandler(context) {
+            case .handled, .ignore:
+                return
+            case .openExternally:
+                break
+            }
+        }
+
+        guard let url = resolvedURL else { return }
         #if canImport(AppKit)
         NSWorkspace.shared.open(url)
         #else
         UIApplication.shared.open(url, options: [:], completionHandler: nil)
         #endif
+    }
+
+    private func resolveLinkURL(_ raw: String) -> URL? {
+        if let url = URL(string: raw), url.scheme != nil {
+            return url
+        }
+        if let baseURL, let relative = URL(string: raw, relativeTo: baseURL) {
+            return relative.absoluteURL
+        }
+        if raw.hasPrefix("/") {
+            return URL(fileURLWithPath: raw)
+        }
+        return URL(string: raw)
     }
 
     // MARK: - Scene Construction
@@ -1900,6 +1947,8 @@ public class MetalMarkdownUIView: UIView {
 
     private var theme: MarkdownTheme
     private var baseFont: VVFont
+    public var baseURL: URL?
+    public var linkHandler: VVMarkdownLinkHandler?
     private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
