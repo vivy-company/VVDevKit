@@ -1,4 +1,5 @@
 import Foundation
+import CoreText
 import VVMarkdown
 import VVMetalPrimitives
 
@@ -238,16 +239,29 @@ public final class VVChatMessageRenderer {
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
-        let metaWidth = usesBubble
-            ? max(bubbleContentWidth, style.bubbleMetadataMinWidth)
-            : messageContentWidth
         let headerText = headerTitle(for: message.role)
+        let footerText: String
+        let footerMetaFont: VVFont
+        if isDraft && message.role == .assistant {
+            footerText = style.loadingIndicatorText
+            footerMetaFont = style.loadingIndicatorFont
+        } else {
+            footerText = timestampLabel(for: message)
+            footerMetaFont = style.timestampFont
+        }
+
+        let headerRequiredWidth = Self.singleLineMetaWidth(headerText, font: style.headerFont)
+        let footerRequiredWidth = Self.singleLineMetaWidth(footerText, font: footerMetaFont)
+        let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
+        let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
+        let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
+
         let headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: metaWidth)
         let footerRender: (layout: MarkdownLayout, scene: VVScene)
         if isDraft && message.role == .assistant {
-            footerRender = renderMeta(text: style.loadingIndicatorText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
+            footerRender = renderMeta(text: footerText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
         } else {
-            footerRender = renderMeta(text: timestampLabel(for: message), layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
+            footerRender = renderMeta(text: footerText, layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
         }
 
         let headerHeight = headerRender.layout.totalHeight
@@ -378,6 +392,14 @@ public final class VVChatMessageRenderer {
         let content = MarkdownInlineContent(text: text)
         let block = MarkdownBlock(.paragraph(content), index: 0)
         return ParsedMarkdownDocument(blocks: [block], footnotes: [:], isComplete: true, streamingBuffer: "")
+    }
+
+    private static func singleLineMetaWidth(_ text: String, font: VVFont) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let attributed = NSAttributedString(string: text, attributes: [.font: font])
+        let line = CTLineCreateWithAttributedString(attributed)
+        let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        return ceil(width + 2)
     }
 
     private func headerTitle(for role: VVChatMessageRole) -> String {
