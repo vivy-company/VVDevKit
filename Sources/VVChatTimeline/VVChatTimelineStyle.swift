@@ -10,6 +10,7 @@ import UIKit
 
 public enum VVChatBubbleAlignment: Sendable {
     case leading
+    case center
     case trailing
 }
 
@@ -81,6 +82,9 @@ public struct VVChatTimelineStyle {
     public var userHeaderEnabled: Bool
     public var assistantHeaderEnabled: Bool
     public var systemHeaderEnabled: Bool
+    public var userHeaderTitle: String
+    public var assistantHeaderTitle: String
+    public var systemHeaderTitle: String
     public var userTimestampEnabled: Bool
     public var assistantTimestampEnabled: Bool
     public var systemTimestampEnabled: Bool
@@ -134,6 +138,9 @@ public struct VVChatTimelineStyle {
         userHeaderEnabled: Bool = true,
         assistantHeaderEnabled: Bool = true,
         systemHeaderEnabled: Bool = true,
+        userHeaderTitle: String = "User",
+        assistantHeaderTitle: String = "Agent",
+        systemHeaderTitle: String = "System",
         userTimestampEnabled: Bool = true,
         assistantTimestampEnabled: Bool = true,
         systemTimestampEnabled: Bool = true,
@@ -200,6 +207,9 @@ public struct VVChatTimelineStyle {
         self.userHeaderEnabled = userHeaderEnabled
         self.assistantHeaderEnabled = assistantHeaderEnabled
         self.systemHeaderEnabled = systemHeaderEnabled
+        self.userHeaderTitle = userHeaderTitle
+        self.assistantHeaderTitle = assistantHeaderTitle
+        self.systemHeaderTitle = systemHeaderTitle
         self.userTimestampEnabled = userTimestampEnabled
         self.assistantTimestampEnabled = assistantTimestampEnabled
         self.systemTimestampEnabled = systemTimestampEnabled
@@ -277,6 +287,17 @@ public struct VVChatTimelineStyle {
             return assistantHeaderEnabled
         case .system:
             return systemHeaderEnabled
+        }
+    }
+
+    public func headerTitle(for role: VVChatMessageRole) -> String {
+        switch role {
+        case .user:
+            return userHeaderTitle
+        case .assistant:
+            return assistantHeaderTitle
+        case .system:
+            return systemHeaderTitle
         }
     }
 

@@ -239,7 +239,7 @@ public final class VVChatMessageRenderer {
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
-        let headerText = style.showsHeader(for: message.role) ? headerTitle(for: message.role) : ""
+        let headerText = style.showsHeader(for: message.role) ? style.headerTitle(for: message.role) : ""
         let footerText: String
         let footerMetaFont: VVFont
         if isDraft && message.role == .assistant {
@@ -343,6 +343,8 @@ public final class VVChatMessageRenderer {
             switch bubbleStyle.alignment {
             case .leading:
                 bubbleOffsetX = 0
+            case .center:
+                bubbleOffsetX = max(0, (availableWidth - bubbleWidth) / 2)
             case .trailing:
                 bubbleOffsetX = max(0, availableWidth - bubbleWidth)
             }
@@ -411,17 +413,6 @@ public final class VVChatMessageRenderer {
         let line = CTLineCreateWithAttributedString(attributed)
         let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         return ceil(width + 2)
-    }
-
-    private func headerTitle(for role: VVChatMessageRole) -> String {
-        switch role {
-        case .user:
-            return "User"
-        case .assistant:
-            return "Agent"
-        case .system:
-            return "System"
-        }
     }
 
     private func timestampLabel(for message: VVChatMessage) -> String {
