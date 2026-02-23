@@ -80,9 +80,11 @@ public final class VVChatTimelineController {
     }
 
     public func updateRenderWidth(_ width: CGFloat) {
-        guard width > 0, width != renderWidth else { return }
-        renderWidth = width
-        renderer.updateContentWidth(width)
+        guard width > 0 else { return }
+        let normalizedWidth = max(1, (width * 2).rounded() / 2)
+        guard abs(normalizedWidth - renderWidth) > 0.5 else { return }
+        renderWidth = normalizedWidth
+        renderer.updateContentWidth(normalizedWidth)
         rebuildLayouts(shouldScrollToBottom: state.shouldAutoFollow)
     }
 

@@ -1353,6 +1353,7 @@ private final class VVDiffMetalView: NSView {
 
     private var highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]] = [:]
     private var highlightGeneration: Int = 0
+    private var highlightTask: Task<Void, Never>?
 
     private var baseFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
     private var baseFontAscent: CGFloat = 0
@@ -1374,6 +1375,15 @@ private final class VVDiffMetalView: NSView {
         self.metalContext = VVMetalContext.shared
         super.init(coder: coder)
         setup()
+    }
+
+    deinit {
+        highlightTask?.cancel()
+        NotificationCenter.default.removeObserver(
+            self,
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView?.contentView
+        )
     }
 
     private func setup() {
@@ -1732,16 +1742,19 @@ private final class VVDiffMetalView: NSView {
         let currentTheme = theme
         let currentFont = configuration.font
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        highlightTask?.cancel()
+        highlightTask = Task(priority: .userInitiated) { [weak self] in
+            guard !Task.isCancelled else { return }
             let ranges = await Self.computeHighlightRanges(
                 rows: currentRows,
                 language: currentLanguage,
                 theme: currentTheme,
                 font: currentFont
             )
+            guard !Task.isCancelled else { return }
 
             await MainActor.run { [weak self] in
-                guard let self, self.highlightGeneration == generation else { return }
+                guard let self, self.highlightGeneration == generation, !Task.isCancelled else { return }
                 self.highlightedRanges = ranges
                 self.cachedScene = nil
                 self.updateContentSize()
@@ -1763,13 +1776,17 @@ private final class VVDiffMetalView: NSView {
             return [:]
         }
 
-        // Guardrail: skip expensive highlighting for very large diffs.
-        let maxHighlightRows = 5_000
-        let maxHighlightUTF16 = 250_000
+        // Guardrails: skip expensive highlighting for large or pathological diffs.
+        let maxHighlightRows = 2_000
+        let maxHighlightUTF16 = 120_000
+        let maxSingleLineUTF16 = 2_048
         guard codeRows.count <= maxHighlightRows else { return [:] }
         var totalUTF16 = 0
         for row in codeRows {
-            totalUTF16 += row.text.utf16.count + 1
+            if Task.isCancelled { return [:] }
+            let rowUTF16 = row.text.utf16.count
+            if rowUTF16 > maxSingleLineUTF16 { return [:] }
+            totalUTF16 += rowUTF16 + 1
             if totalUTF16 > maxHighlightUTF16 {
                 return [:]
             }
@@ -1784,10 +1801,13 @@ private final class VVDiffMetalView: NSView {
 
         do {
             try await highlighter.setLanguage(languageConfig)
+            if Task.isCancelled { return [:] }
             _ = try await highlighter.parse(joined.text)
+            if Task.isCancelled { return [:] }
             let sortedRanges = try await highlighter.allHighlights().sorted { lhs, rhs in
                 lhs.range.location < rhs.range.location
             }
+            if Task.isCancelled { return [:] }
 
             var result: [Int: [(NSRange, SIMD4<Float>)]] = [:]
             let sortedRows = joined.rowRanges.sorted { lhs, rhs in
@@ -1796,6 +1816,7 @@ private final class VVDiffMetalView: NSView {
             var rangeStartIndex = 0
 
             for (rowID, rowNSRange) in sortedRows {
+                if Task.isCancelled { return [:] }
                 var rowRanges: [(NSRange, SIMD4<Float>)] = []
                 while rangeStartIndex < sortedRanges.count {
                     let rangeEnd = NSMaxRange(sortedRanges[rangeStartIndex].range)
@@ -2348,19 +2369,40 @@ extension VVDiffMetalView: VVTextExtractor {
 // MARK: - VVDiffViewRepresentable
 
 private struct VVDiffViewRepresentable: NSViewRepresentable {
-    let rows: [VVDiffRow]
+    let unifiedDiff: String
     let language: VVLanguage?
     let theme: VVTheme
     let configuration: VVConfiguration
     let renderStyle: VVDiffRenderStyle
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        private var lastUnifiedDiff: String?
+        private var cachedRows: [VVDiffRow] = []
+
+        func rows(for unifiedDiff: String) -> [VVDiffRow] {
+            if let lastUnifiedDiff, lastUnifiedDiff == unifiedDiff {
+                return cachedRows
+            }
+            let parsed = parseDiffRows(unifiedDiff: unifiedDiff)
+            lastUnifiedDiff = unifiedDiff
+            cachedRows = parsed
+            return parsed
+        }
+    }
+
     func makeNSView(context: Context) -> VVDiffMetalView {
         let view = VVDiffMetalView(frame: .zero)
+        let rows = context.coordinator.rows(for: unifiedDiff)
         view.update(rows: rows, style: renderStyle, theme: theme, configuration: configuration, language: language)
         return view
     }
 
     func updateNSView(_ nsView: VVDiffMetalView, context: Context) {
+        let rows = context.coordinator.rows(for: unifiedDiff)
         nsView.update(rows: rows, style: renderStyle, theme: theme, configuration: configuration, language: language)
     }
 }
@@ -2370,7 +2412,6 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
 /// High-level diff component. Parses unified diff text and renders it through Metal.
 public struct VVDiffView: View {
     private let unifiedDiff: String
-    private let parsedRows: [VVDiffRow]
     private var language: VVLanguage?
     private var theme: VVTheme
     private var configuration: VVConfiguration
@@ -2378,7 +2419,6 @@ public struct VVDiffView: View {
 
     public init(unifiedDiff: String) {
         self.unifiedDiff = unifiedDiff
-        self.parsedRows = parseDiffRows(unifiedDiff: unifiedDiff)
         self.language = nil
         self.theme = .defaultDark
         self.configuration = .default
@@ -2387,7 +2427,7 @@ public struct VVDiffView: View {
 
     public var body: some View {
         VVDiffViewRepresentable(
-            rows: parsedRows,
+            unifiedDiff: unifiedDiff,
             language: effectiveLanguage,
             theme: theme,
             configuration: configuration,
