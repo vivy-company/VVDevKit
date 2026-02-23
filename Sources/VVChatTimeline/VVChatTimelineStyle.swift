@@ -85,6 +85,11 @@ public struct VVChatTimelineStyle {
     public var userHeaderTitle: String
     public var assistantHeaderTitle: String
     public var systemHeaderTitle: String
+    public var userHeaderIconURL: String?
+    public var assistantHeaderIconURL: String?
+    public var systemHeaderIconURL: String?
+    public var headerIconSize: CGFloat
+    public var headerIconSpacing: CGFloat
     public var userTimestampEnabled: Bool
     public var assistantTimestampEnabled: Bool
     public var systemTimestampEnabled: Bool
@@ -141,6 +146,11 @@ public struct VVChatTimelineStyle {
         userHeaderTitle: String = "User",
         assistantHeaderTitle: String = "Agent",
         systemHeaderTitle: String = "System",
+        userHeaderIconURL: String? = nil,
+        assistantHeaderIconURL: String? = nil,
+        systemHeaderIconURL: String? = nil,
+        headerIconSize: CGFloat = 14,
+        headerIconSpacing: CGFloat = 6,
         userTimestampEnabled: Bool = true,
         assistantTimestampEnabled: Bool = true,
         systemTimestampEnabled: Bool = true,
@@ -210,6 +220,11 @@ public struct VVChatTimelineStyle {
         self.userHeaderTitle = userHeaderTitle
         self.assistantHeaderTitle = assistantHeaderTitle
         self.systemHeaderTitle = systemHeaderTitle
+        self.userHeaderIconURL = userHeaderIconURL
+        self.assistantHeaderIconURL = assistantHeaderIconURL
+        self.systemHeaderIconURL = systemHeaderIconURL
+        self.headerIconSize = headerIconSize
+        self.headerIconSpacing = headerIconSpacing
         self.userTimestampEnabled = userTimestampEnabled
         self.assistantTimestampEnabled = assistantTimestampEnabled
         self.systemTimestampEnabled = systemTimestampEnabled
@@ -298,6 +313,17 @@ public struct VVChatTimelineStyle {
             return assistantHeaderTitle
         case .system:
             return systemHeaderTitle
+        }
+    }
+
+    public func headerIconURL(for role: VVChatMessageRole) -> String? {
+        switch role {
+        case .user:
+            return userHeaderIconURL
+        case .assistant:
+            return assistantHeaderIconURL
+        case .system:
+            return systemHeaderIconURL
         }
     }
 

@@ -119,6 +119,12 @@ public final class VVChatMessageRenderer {
         let isDraft: Bool
     }
 
+    private struct HeaderRender {
+        let scene: VVScene
+        let height: CGFloat
+        let imageURLs: [String]
+    }
+
     private let parser = MarkdownParser()
     private var finalLayoutEngine: MarkdownLayoutEngine
     private var draftLayoutEngine: MarkdownLayoutEngine
@@ -235,11 +241,19 @@ public final class VVChatMessageRenderer {
         let contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
         let contentMinX = min(0, contentBounds?.minX ?? 0)
         let contentMinY = min(0, contentBounds?.minY ?? 0)
-        let imageURLs = Array(collectImageURLs(from: layout))
+        var imageURLs = Set(collectImageURLs(from: layout))
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
         let headerText = style.showsHeader(for: message.role) ? style.headerTitle(for: message.role) : ""
+        let headerIconURL = style.showsHeader(for: message.role) ? style.headerIconURL(for: message.role) : nil
+        let headerHasIcon = (headerIconURL?.isEmpty == false)
+        let headerIconFootprint: CGFloat
+        if headerHasIcon {
+            headerIconFootprint = max(8, style.headerIconSize) + max(0, style.headerIconSpacing)
+        } else {
+            headerIconFootprint = 0
+        }
         let footerText: String
         let footerMetaFont: VVFont
         if isDraft && message.role == .assistant {
@@ -253,17 +267,18 @@ public final class VVChatMessageRenderer {
             footerMetaFont = style.timestampFont
         }
 
-        let headerRequiredWidth = headerText.isEmpty ? 0 : Self.singleLineMetaWidth(headerText, font: style.headerFont)
+        let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint)
         let footerRequiredWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
         let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
         let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
         let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
 
-        let headerRender: (layout: MarkdownLayout, scene: VVScene)?
+        let headerRender: HeaderRender?
         if headerText.isEmpty {
             headerRender = nil
         } else {
-            headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: metaWidth)
+            headerRender = renderHeader(text: headerText, iconURL: headerIconURL, width: metaWidth)
+            headerRender?.imageURLs.forEach { imageURLs.insert($0) }
         }
 
         let footerRender: (layout: MarkdownLayout, scene: VVScene)?
@@ -275,7 +290,7 @@ public final class VVChatMessageRenderer {
             footerRender = renderMeta(text: footerText, layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
         }
 
-        let headerHeight = headerRender?.layout.totalHeight ?? 0
+        let headerHeight = headerRender?.height ?? 0
         let contentHeight = layout.totalHeight
         let footerHeight = footerRender?.layout.totalHeight ?? 0
         let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
@@ -360,7 +375,7 @@ public final class VVChatMessageRenderer {
             height: height,
             contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
             isDraft: isDraft,
-            imageURLs: imageURLs
+            imageURLs: Array(imageURLs)
         )
         cache.set(rendered, for: key)
         return rendered
@@ -399,6 +414,48 @@ public final class VVChatMessageRenderer {
         layoutEngine.adjustParagraphImageSpacing(in: &layout)
         let scene = pipeline.buildScene(from: layout)
         return (layout, scene)
+    }
+
+    private func renderHeader(text: String, iconURL: String?, width: CGFloat) -> HeaderRender {
+        let hasIcon = (iconURL?.isEmpty == false)
+        let iconSize = hasIcon ? max(8, style.headerIconSize) : 0
+        let iconSpacing = hasIcon ? max(0, style.headerIconSpacing) : 0
+        let textWidth = max(1, width - iconSize - iconSpacing)
+        let textRender = renderMeta(
+            text: text,
+            layoutEngine: headerLayoutEngine,
+            pipeline: headerPipeline,
+            width: textWidth
+        )
+        let textHeight = textRender.layout.totalHeight
+
+        guard hasIcon, let iconURL else {
+            return HeaderRender(
+                scene: textRender.scene,
+                height: textHeight,
+                imageURLs: []
+            )
+        }
+
+        let height = max(textHeight, iconSize)
+        let iconY = max(0, (height - iconSize) * 0.5)
+
+        var builder = VVSceneBuilder()
+        let icon = VVImagePrimitive(
+            url: iconURL,
+            frame: CGRect(x: 0, y: iconY, width: iconSize, height: iconSize),
+            cornerRadius: 2
+        )
+        builder.add(kind: .image(icon), zIndex: 0)
+        builder.withOffset(CGPoint(x: iconSize + iconSpacing, y: 0)) { builder in
+            builder.add(node: VVNode.fromScene(textRender.scene))
+        }
+
+        return HeaderRender(
+            scene: builder.scene,
+            height: height,
+            imageURLs: [iconURL]
+        )
     }
 
     private func makeMetaDocument(text: String) -> ParsedMarkdownDocument {
