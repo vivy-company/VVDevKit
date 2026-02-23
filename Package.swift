@@ -261,7 +261,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", from: "0.8.0"),
         .package(url: "https://github.com/ChimeHQ/LanguageServerProtocol", from: "0.13.2"),
-        .package(url: "https://github.com/swiftlang/swift-markdown", from: "0.5.0"),
+        .package(url: "https://github.com/apple/swift-markdown", from: "0.5.0"),
     ],
     targets: [
         // Batteries-included public surface
