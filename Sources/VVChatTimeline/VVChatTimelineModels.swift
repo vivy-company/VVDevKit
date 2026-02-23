@@ -11,6 +11,28 @@ public enum VVChatMessageState: Sendable {
     case final
 }
 
+public struct VVChatMessagePresentation: Hashable, Sendable {
+    public var bubbleStyle: VVChatBubbleStyle?
+    public var showsHeader: Bool?
+    public var headerTitle: String?
+    public var headerIconURL: String?
+    public var showsTimestamp: Bool?
+
+    public init(
+        bubbleStyle: VVChatBubbleStyle? = nil,
+        showsHeader: Bool? = nil,
+        headerTitle: String? = nil,
+        headerIconURL: String? = nil,
+        showsTimestamp: Bool? = nil
+    ) {
+        self.bubbleStyle = bubbleStyle
+        self.showsHeader = showsHeader
+        self.headerTitle = headerTitle
+        self.headerIconURL = headerIconURL
+        self.showsTimestamp = showsTimestamp
+    }
+}
+
 public struct VVChatMessage: Identifiable, Hashable, Sendable {
     public let id: String
     public var role: VVChatMessageRole
@@ -18,6 +40,7 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
     public var content: String
     public var revision: Int
     public var timestamp: Date?
+    public var presentation: VVChatMessagePresentation?
 
     public init(
         id: String = UUID().uuidString,
@@ -25,7 +48,8 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
         state: VVChatMessageState,
         content: String,
         revision: Int = 0,
-        timestamp: Date? = nil
+        timestamp: Date? = nil,
+        presentation: VVChatMessagePresentation? = nil
     ) {
         self.id = id
         self.role = role
@@ -33,6 +57,7 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
         self.content = content
         self.revision = revision
         self.timestamp = timestamp
+        self.presentation = presentation
     }
 
     public var isStreaming: Bool {

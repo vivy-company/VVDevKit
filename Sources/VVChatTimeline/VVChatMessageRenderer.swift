@@ -213,7 +213,8 @@ public final class VVChatMessageRenderer {
 
     public func renderedMessage(for message: VVChatMessage) -> VVChatRenderedMessage {
         let insets = style.insets(for: message.role)
-        let bubbleStyle = style.bubbleStyle(for: message.role)
+        let presentation = message.presentation
+        let bubbleStyle = presentation?.bubbleStyle ?? style.bubbleStyle(for: message.role)
         let usesBubble = bubbleStyle != nil
         let bubbleInsets = bubbleStyle?.insets ?? VVInsets()
         let availableWidth = max(0, contentWidth - insets.left - insets.right)
@@ -245,8 +246,9 @@ public final class VVChatMessageRenderer {
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
-        let headerText = style.showsHeader(for: message.role) ? style.headerTitle(for: message.role) : ""
-        let headerIconURL = style.showsHeader(for: message.role) ? style.headerIconURL(for: message.role) : nil
+        let shouldShowHeader = presentation?.showsHeader ?? style.showsHeader(for: message.role)
+        let headerText = shouldShowHeader ? (presentation?.headerTitle ?? style.headerTitle(for: message.role)) : ""
+        let headerIconURL = shouldShowHeader ? (presentation?.headerIconURL ?? style.headerIconURL(for: message.role)) : nil
         let headerHasIcon = (headerIconURL?.isEmpty == false)
         let headerIconFootprint: CGFloat
         if headerHasIcon {
@@ -259,7 +261,7 @@ public final class VVChatMessageRenderer {
         if isDraft && message.role == .assistant {
             footerText = style.loadingIndicatorText
             footerMetaFont = style.loadingIndicatorFont
-        } else if style.showsTimestamp(for: message.role) {
+        } else if presentation?.showsTimestamp ?? style.showsTimestamp(for: message.role) {
             footerText = timestampLabel(for: message)
             footerMetaFont = style.timestampFont
         } else {

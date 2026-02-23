@@ -14,7 +14,7 @@ public enum VVChatBubbleAlignment: Sendable {
     case trailing
 }
 
-public struct VVChatBubbleStyle: Sendable {
+public struct VVChatBubbleStyle: Hashable, Sendable {
     public var isEnabled: Bool
     public var color: SIMD4<Float>
     public var borderColor: SIMD4<Float>
