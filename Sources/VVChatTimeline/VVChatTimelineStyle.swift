@@ -78,6 +78,12 @@ public struct VVChatTimelineStyle {
     public var systemBubbleInsets: VVInsets
     public var systemBubbleMaxWidth: CGFloat
     public var systemBubbleAlignment: VVChatBubbleAlignment
+    public var userHeaderEnabled: Bool
+    public var assistantHeaderEnabled: Bool
+    public var systemHeaderEnabled: Bool
+    public var userTimestampEnabled: Bool
+    public var assistantTimestampEnabled: Bool
+    public var systemTimestampEnabled: Bool
     public var bubbleMetadataMinWidth: CGFloat
     public var headerSpacing: CGFloat
     public var footerSpacing: CGFloat
@@ -125,6 +131,12 @@ public struct VVChatTimelineStyle {
         systemBubbleInsets: VVInsets = .init(top: 8, left: 10, bottom: 8, right: 10),
         systemBubbleMaxWidth: CGFloat = 620,
         systemBubbleAlignment: VVChatBubbleAlignment = .leading,
+        userHeaderEnabled: Bool = true,
+        assistantHeaderEnabled: Bool = true,
+        systemHeaderEnabled: Bool = true,
+        userTimestampEnabled: Bool = true,
+        assistantTimestampEnabled: Bool = true,
+        systemTimestampEnabled: Bool = true,
         bubbleMetadataMinWidth: CGFloat = 88,
         headerSpacing: CGFloat = 6,
         footerSpacing: CGFloat = 6,
@@ -185,6 +197,12 @@ public struct VVChatTimelineStyle {
         self.systemBubbleInsets = systemBubbleInsets
         self.systemBubbleMaxWidth = systemBubbleMaxWidth
         self.systemBubbleAlignment = systemBubbleAlignment
+        self.userHeaderEnabled = userHeaderEnabled
+        self.assistantHeaderEnabled = assistantHeaderEnabled
+        self.systemHeaderEnabled = systemHeaderEnabled
+        self.userTimestampEnabled = userTimestampEnabled
+        self.assistantTimestampEnabled = assistantTimestampEnabled
+        self.systemTimestampEnabled = systemTimestampEnabled
         self.bubbleMetadataMinWidth = max(1, bubbleMetadataMinWidth)
         self.headerSpacing = headerSpacing
         self.footerSpacing = footerSpacing
@@ -248,6 +266,28 @@ public struct VVChatTimelineStyle {
                 alignment: systemBubbleAlignment
             )
             return bubble.isEnabled ? bubble : nil
+        }
+    }
+
+    public func showsHeader(for role: VVChatMessageRole) -> Bool {
+        switch role {
+        case .user:
+            return userHeaderEnabled
+        case .assistant:
+            return assistantHeaderEnabled
+        case .system:
+            return systemHeaderEnabled
+        }
+    }
+
+    public func showsTimestamp(for role: VVChatMessageRole) -> Bool {
+        switch role {
+        case .user:
+            return userTimestampEnabled
+        case .assistant:
+            return assistantTimestampEnabled
+        case .system:
+            return systemTimestampEnabled
         }
     }
 }

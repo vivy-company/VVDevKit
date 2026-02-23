@@ -239,34 +239,45 @@ public final class VVChatMessageRenderer {
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
-        let headerText = headerTitle(for: message.role)
+        let headerText = style.showsHeader(for: message.role) ? headerTitle(for: message.role) : ""
         let footerText: String
         let footerMetaFont: VVFont
         if isDraft && message.role == .assistant {
             footerText = style.loadingIndicatorText
             footerMetaFont = style.loadingIndicatorFont
-        } else {
+        } else if style.showsTimestamp(for: message.role) {
             footerText = timestampLabel(for: message)
+            footerMetaFont = style.timestampFont
+        } else {
+            footerText = ""
             footerMetaFont = style.timestampFont
         }
 
-        let headerRequiredWidth = Self.singleLineMetaWidth(headerText, font: style.headerFont)
-        let footerRequiredWidth = Self.singleLineMetaWidth(footerText, font: footerMetaFont)
+        let headerRequiredWidth = headerText.isEmpty ? 0 : Self.singleLineMetaWidth(headerText, font: style.headerFont)
+        let footerRequiredWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
         let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
         let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
         let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
 
-        let headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: metaWidth)
-        let footerRender: (layout: MarkdownLayout, scene: VVScene)
+        let headerRender: (layout: MarkdownLayout, scene: VVScene)?
+        if headerText.isEmpty {
+            headerRender = nil
+        } else {
+            headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: metaWidth)
+        }
+
+        let footerRender: (layout: MarkdownLayout, scene: VVScene)?
         if isDraft && message.role == .assistant {
             footerRender = renderMeta(text: footerText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
+        } else if footerText.isEmpty {
+            footerRender = nil
         } else {
             footerRender = renderMeta(text: footerText, layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
         }
 
-        let headerHeight = headerRender.layout.totalHeight
+        let headerHeight = headerRender?.layout.totalHeight ?? 0
         let contentHeight = layout.totalHeight
-        let footerHeight = footerRender.layout.totalHeight
+        let footerHeight = footerRender?.layout.totalHeight ?? 0
         let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
         let footerBlockHeight = footerHeight > 0 ? style.footerSpacing + footerHeight : 0
         let contentBlockHeight = usesBubble
@@ -277,7 +288,7 @@ public final class VVChatMessageRenderer {
 
         var builder = VVSceneBuilder()
         var currentY: CGFloat = 0
-        if headerHeight > 0 {
+        if let headerRender, headerHeight > 0 {
             builder.add(node: VVNode.fromScene(headerRender.scene))
             currentY += headerHeight + style.headerSpacing
         }
@@ -313,7 +324,7 @@ public final class VVChatMessageRenderer {
         }
 
         currentY += contentBlockHeight
-        if footerHeight > 0 {
+        if let footerRender, footerHeight > 0 {
             currentY += style.footerSpacing
             builder.withOffset(CGPoint(x: 0, y: currentY)) { builder in
                 builder.add(node: VVNode.fromScene(footerRender.scene))
