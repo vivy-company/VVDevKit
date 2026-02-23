@@ -244,6 +244,8 @@ public class MetalMarkdownNSView: NSView {
         metalLayer.framebufferOnly = true
         metalLayer.maximumDrawableCount = 2
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        metalLayer.isOpaque = false
+        metalLayer.backgroundColor = CGColor.clear
         // Keep the layer unflipped; renderer already uses a top-left projection.
 
         layer = metalLayer
@@ -617,8 +619,9 @@ public class MetalMarkdownNSView: NSView {
 
     public override func scrollWheel(with event: NSEvent) {
         let maxScrollY = max(0, contentHeight + topInset - bounds.height)
+        let maxScrollX = max(0, (cachedLayout?.contentWidth ?? bounds.width) - bounds.width)
         scrollOffset.y = max(0, min(maxScrollY, scrollOffset.y - event.scrollingDeltaY))
-        scrollOffset.x = max(0, scrollOffset.x - event.scrollingDeltaX)
+        scrollOffset.x = max(0, min(maxScrollX, scrollOffset.x - event.scrollingDeltaX))
         needsRedraw = true
     }
 
@@ -1188,10 +1191,10 @@ public class MetalMarkdownNSView: NSView {
         passDescriptor.colorAttachments[0].loadAction = .clear
         passDescriptor.colorAttachments[0].storeAction = .store
         passDescriptor.colorAttachments[0].clearColor = MTLClearColor(
-            red: Double(theme.codeBackgroundColor.x),
-            green: Double(theme.codeBackgroundColor.y),
-            blue: Double(theme.codeBackgroundColor.z),
-            alpha: 1.0
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0
         )
 
         guard let encoder = commandBuffer?.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
@@ -1979,6 +1982,8 @@ public class MetalMarkdownUIView: UIView {
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
         metalLayer.contentsScale = UIScreen.main.scale
+        metalLayer.isOpaque = false
+        metalLayer.backgroundColor = CGColor.clear
 
         layer.addSublayer(metalLayer)
 
@@ -2039,7 +2044,7 @@ public class MetalMarkdownUIView: UIView {
         passDescriptor.colorAttachments[0].texture = drawable.texture
         passDescriptor.colorAttachments[0].loadAction = .clear
         passDescriptor.colorAttachments[0].storeAction = .store
-        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 1.0)
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
 
         guard let encoder = commandBuffer?.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
 
