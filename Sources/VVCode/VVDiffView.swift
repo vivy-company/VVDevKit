@@ -699,6 +699,31 @@ private final class VVDiffRenderer {
         layoutEngine.updateContentWidth(width)
     }
 
+    private func wrapCapacity(totalWidth: CGFloat, codeStartX: CGFloat) -> Int {
+        let available = max(0, totalWidth - codeStartX - codeInsetX - 12)
+        guard available > 0 else { return 1 }
+        return max(1, Int(floor(available / max(charWidth, 1))))
+    }
+
+    private func wrappedTextSegments(_ text: String, maxChars: Int) -> [String] {
+        guard maxChars > 0 else { return [text] }
+        var result: [String] = []
+        let logicalLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        for line in logicalLines {
+            if line.isEmpty {
+                result.append("")
+                continue
+            }
+            var start = line.startIndex
+            while start < line.endIndex {
+                let end = line.index(start, offsetBy: maxChars, limitedBy: line.endIndex) ?? line.endIndex
+                result.append(String(line[start..<end]))
+                start = end
+            }
+        }
+        return result.isEmpty ? [""] : result
+    }
+
     // MARK: - Unified Scene
 
     func buildUnifiedScene(
@@ -706,7 +731,8 @@ private final class VVDiffRenderer {
         rows: [VVDiffRow],
         width: CGFloat,
         viewport: CGRect,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
+        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
+        wrapLines: Bool = false
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
         let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
@@ -714,6 +740,7 @@ private final class VVDiffRenderer {
         let gutterColWidth = CGFloat(gutterDigits) * charWidth + 16
         let markerWidth = charWidth + 8
         let codeStartX = gutterColWidth * 2 + markerWidth
+        let maxCharsPerVisualLine = wrapCapacity(totalWidth: width, codeStartX: codeStartX)
 
         var builder = VVSceneBuilder()
         var y: CGFloat = 0
@@ -736,7 +763,14 @@ private final class VVDiffRenderer {
             // Section rows (skip metadata — already shown in file header)
             for row in section.rows {
                 if row.kind == .metadata { continue }
-                let rowH = lineHeight
+                let wrappedLines: [String]?
+                if wrapLines && (row.kind.isCode || row.kind == .hunkHeader) {
+                    wrappedLines = wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
+                } else {
+                    wrappedLines = nil
+                }
+                let visualLines = wrappedLines?.count ?? 1
+                let rowH = lineHeight * CGFloat(max(1, visualLines))
                 if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
                     buildUnifiedRow(
                         row: row,
@@ -745,6 +779,7 @@ private final class VVDiffRenderer {
                         markerWidth: markerWidth,
                         codeStartX: codeStartX,
                         highlightedRanges: highlightedRanges,
+                        wrappedLines: wrappedLines,
                         builder: &builder
                     )
                 }
@@ -836,11 +871,13 @@ private final class VVDiffRenderer {
         markerWidth: CGFloat,
         codeStartX: CGFloat,
         highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
+        wrappedLines: [String]?,
         builder: inout VVSceneBuilder
     ) {
         // Hunk headers handle their own background
         if row.kind == .hunkHeader {
-            buildHunkHeaderRow(text: row.text, y: y, width: width, height: height, builder: &builder)
+            let lines = wrappedLines ?? [row.text]
+            buildHunkHeaderRow(lines: lines, y: y, width: width, height: height, builder: &builder)
             return
         }
 
@@ -853,7 +890,7 @@ private final class VVDiffRenderer {
         builder.add(kind: .quad(bgQuad), zIndex: -1)
 
         // Line numbers — use marker color for added/deleted rows
-        let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
+        let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
         let numFontSize = font.pointSize - 1
         let numColor = lineNumberColor(for: row.kind)
 
@@ -862,7 +899,7 @@ private final class VVDiffRenderer {
             let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
             let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let offsetX = gutterColWidth - numWidth - 4
-            addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
+            addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: firstBaselineY, fontSize: numFontSize, builder: &builder)
         }
 
         if let newNum = row.newLineNumber {
@@ -870,7 +907,7 @@ private final class VVDiffRenderer {
             let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
             let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let offsetX = gutterColWidth * 2 - numWidth - 4
-            addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
+            addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: firstBaselineY, fontSize: numFontSize, builder: &builder)
         }
 
         // Marker indicator (flush left)
@@ -879,13 +916,17 @@ private final class VVDiffRenderer {
         // Code text
         if row.kind.isCode || row.kind == .metadata {
             let codeColor = row.kind == .metadata ? gutterTextColor : textColor
-            let codeGlyphs = layoutEngine.layoutTextGlyphs(row.text, variant: .monospace, at: .zero, color: codeColor)
-
-            if let ranges = highlightedRanges[row.id], !ranges.isEmpty {
-                let coloredGlyphs = applyHighlightColors(codeGlyphs, ranges: ranges)
-                addTextGlyphs(coloredGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-            } else {
-                addTextGlyphs(codeGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
+            let lines = wrappedLines ?? [row.text]
+            let wrapped = wrappedLines != nil
+            for (lineIndex, lineText) in lines.enumerated() {
+                let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+                let codeGlyphs = layoutEngine.layoutTextGlyphs(lineText, variant: .monospace, at: .zero, color: codeColor)
+                if !wrapped, let ranges = highlightedRanges[row.id], !ranges.isEmpty {
+                    let coloredGlyphs = applyHighlightColors(codeGlyphs, ranges: ranges)
+                    addTextGlyphs(coloredGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
+                } else {
+                    addTextGlyphs(codeGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
+                }
             }
         }
     }
@@ -895,15 +936,25 @@ private final class VVDiffRenderer {
         y: CGFloat, width: CGFloat, height: CGFloat,
         builder: inout VVSceneBuilder
     ) {
+        buildHunkHeaderRow(lines: [text], y: y, width: width, height: height, builder: &builder)
+    }
+
+    private func buildHunkHeaderRow(
+        lines: [String],
+        y: CGFloat, width: CGFloat, height: CGFloat,
+        builder: inout VVSceneBuilder
+    ) {
         let bgQuad = VVQuadPrimitive(
             frame: CGRect(x: 0, y: y, width: width, height: height),
             color: hunkBgColor
         )
         builder.add(kind: .quad(bgQuad), zIndex: -1)
 
-        let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
-        let glyphs = layoutEngine.layoutTextGlyphs(text, variant: .monospace, at: .zero, color: modifiedColor)
-        addTextGlyphs(glyphs, offsetX: 12, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
+        for (lineIndex, lineText) in lines.enumerated() {
+            let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+            let glyphs = layoutEngine.layoutTextGlyphs(lineText, variant: .monospace, at: .zero, color: modifiedColor)
+            addTextGlyphs(glyphs, offsetX: 12, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
+        }
     }
 
     private func buildFileHeader(
@@ -1398,6 +1449,7 @@ private final class VVDiffMetalView: NSView {
         self.theme = theme
         self.configuration = configuration
         self.language = language
+        scrollView?.hasHorizontalScroller = !(configuration.wrapLines && style == .unifiedTable)
 
         if fontChanged {
             baseFont = configuration.font
@@ -1441,6 +1493,7 @@ private final class VVDiffMetalView: NSView {
         let width = scrollView?.bounds.width ?? bounds.width
         let dr = ensureDiffRenderer()
         dr.updateContentWidth(width)
+        let wrapsUnified = configuration.wrapLines && renderStyle == .unifiedTable
 
         // Compute content height (no culling — infinite viewport)
         let viewport = CGRect(x: 0, y: 0, width: width, height: CGFloat.greatestFiniteMagnitude)
@@ -1451,7 +1504,8 @@ private final class VVDiffMetalView: NSView {
             result = dr.buildUnifiedScene(
                 sections: sections, rows: rows,
                 width: width, viewport: viewport,
-                highlightedRanges: highlightedRanges
+                highlightedRanges: highlightedRanges,
+                wrapLines: wrapsUnified
             )
         case .split:
             result = dr.buildSplitScene(
@@ -1468,19 +1522,26 @@ private final class VVDiffMetalView: NSView {
         buildRowGeometries(width: width)
 
         // Compute max line width for horizontal scrolling
-        let maxLineWidth = rowGeometries.map { geo in
-            geo.codeStartX + codeInsetX + CGFloat(geo.text.count) * dr.charWidth + 20
-        }.max() ?? width
+        let maxLineWidth: CGFloat
+        if wrapsUnified {
+            maxLineWidth = width
+        } else {
+            maxLineWidth = rowGeometries.map { geo in
+                geo.codeStartX + codeInsetX + CGFloat(geo.text.count) * dr.charWidth + 20
+            }.max() ?? width
+        }
 
         let minWidth: CGFloat
         if renderStyle == .split {
             minWidth = 840 // 420 * 2
+        } else if wrapsUnified {
+            minWidth = width
         } else {
             minWidth = max(width, 520)
         }
 
         // Size the document view for scroll bars; MTKView stays viewport-sized
-        let docWidth = max(maxLineWidth, minWidth, width)
+        let docWidth = wrapsUnified ? width : max(maxLineWidth, minWidth, width)
         let docHeight = max(contentHeight, scrollView.bounds.height)
         documentView.frame = CGRect(x: 0, y: 0, width: docWidth, height: docHeight)
         updateMetalViewport()
@@ -1492,19 +1553,21 @@ private final class VVDiffMetalView: NSView {
 
         switch renderStyle {
         case .unifiedTable:
-            buildRowGeometriesUnified(width: width, renderer: dr)
+            let wrapsUnified = configuration.wrapLines && renderStyle == .unifiedTable
+            buildRowGeometriesUnified(width: width, renderer: dr, wrapLines: wrapsUnified)
         case .split:
             buildRowGeometriesSplit(width: width, renderer: dr)
         }
     }
 
-    private func buildRowGeometriesUnified(width: CGFloat, renderer: VVDiffRenderer) {
+    private func buildRowGeometriesUnified(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
         let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
         let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
         let markerWidth = renderer.charWidth + 8
         let codeStartX = gutterColWidth * 2 + markerWidth
+        let maxCharsPerVisualLine = wrapCapacity(totalWidth: width, codeStartX: codeStartX, charWidth: renderer.charWidth)
 
         var y: CGFloat = 0
         var rowIndex = 0
@@ -1532,22 +1595,56 @@ private final class VVDiffMetalView: NSView {
             // Section rows (skip metadata)
             for row in section.rows {
                 if row.kind == .metadata { continue }
-                let rowH = renderer.lineHeight
-                rowGeometries.append(RowGeometry(
-                    rowIndex: rowIndex,
-                    rowID: row.id,
-                    y: y,
-                    height: rowH,
-                    isCodeRow: row.kind.isCode,
-                    text: row.text,
-                    codeStartX: codeStartX,
-                    paneX: 0,
-                    paneWidth: width
-                ))
-                y += rowH
-                rowIndex += 1
+                let wrappedLines: [String]
+                if wrapLines && (row.kind.isCode || row.kind == .hunkHeader) {
+                    wrappedLines = wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
+                } else {
+                    wrappedLines = [row.text]
+                }
+
+                for line in wrappedLines {
+                    let rowH = renderer.lineHeight
+                    rowGeometries.append(RowGeometry(
+                        rowIndex: rowIndex,
+                        rowID: row.id,
+                        y: y,
+                        height: rowH,
+                        isCodeRow: row.kind.isCode,
+                        text: line,
+                        codeStartX: codeStartX,
+                        paneX: 0,
+                        paneWidth: width
+                    ))
+                    y += rowH
+                    rowIndex += 1
+                }
             }
         }
+    }
+
+    private func wrapCapacity(totalWidth: CGFloat, codeStartX: CGFloat, charWidth: CGFloat) -> Int {
+        let available = max(0, totalWidth - codeStartX - codeInsetX - 12)
+        guard available > 0 else { return 1 }
+        return max(1, Int(floor(available / max(charWidth, 1))))
+    }
+
+    private func wrappedTextSegments(_ text: String, maxChars: Int) -> [String] {
+        guard maxChars > 0 else { return [text] }
+        var result: [String] = []
+        let logicalLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        for line in logicalLines {
+            if line.isEmpty {
+                result.append("")
+                continue
+            }
+            var start = line.startIndex
+            while start < line.endIndex {
+                let end = line.index(start, offsetBy: maxChars, limitedBy: line.endIndex) ?? line.endIndex
+                result.append(String(line[start..<end]))
+                start = end
+            }
+        }
+        return result.isEmpty ? [""] : result
     }
 
     private func buildRowGeometriesSplit(width: CGFloat, renderer: VVDiffRenderer) {
@@ -1754,7 +1851,8 @@ extension VVDiffMetalView: MTKViewDelegate {
         if let cached = cachedScene {
             scene = cached
         } else {
-            let renderWidth = max(scrollView.bounds.width, documentView.frame.width)
+            let wrapsUnified = configuration.wrapLines && renderStyle == .unifiedTable
+            let renderWidth = wrapsUnified ? scrollView.bounds.width : max(scrollView.bounds.width, documentView.frame.width)
             dr.updateContentWidth(scrollView.bounds.width)
             let result: (scene: VVScene, contentHeight: CGFloat)
             switch renderStyle {
@@ -1763,7 +1861,8 @@ extension VVDiffMetalView: MTKViewDelegate {
                     sections: sections, rows: rows,
                     width: renderWidth,
                     viewport: visibleRect,
-                    highlightedRanges: highlightedRanges
+                    highlightedRanges: highlightedRanges,
+                    wrapLines: wrapsUnified
                 )
             case .split:
                 result = dr.buildSplitScene(
