@@ -1345,6 +1345,7 @@ private final class VVDiffMetalView: NSView {
     private var theme: VVTheme = .defaultDark
     private var configuration: VVConfiguration = .default
     private var language: VVLanguage?
+    private var syntaxHighlightingEnabled: Bool = true
 
     private var cachedScene: VVScene?
     private var contentHeight: CGFloat = 0
@@ -1456,19 +1457,22 @@ private final class VVDiffMetalView: NSView {
         style: VVDiffRenderStyle,
         theme: VVTheme,
         configuration: VVConfiguration,
-        language: VVLanguage?
+        language: VVLanguage?,
+        syntaxHighlightingEnabled: Bool
     ) {
         let rowsChanged = self.rows != rows
         let styleChanged = self.renderStyle != style
         let themeChanged = self.theme != theme
         let fontChanged = self.configuration.font != configuration.font
         let langChanged = self.language?.identifier != language?.identifier
+        let syntaxHighlightingChanged = self.syntaxHighlightingEnabled != syntaxHighlightingEnabled
 
         self.rows = rows
         self.renderStyle = style
         self.theme = theme
         self.configuration = configuration
         self.language = language
+        self.syntaxHighlightingEnabled = syntaxHighlightingEnabled
         scrollView?.hasHorizontalScroller = !(configuration.wrapLines && style == .unifiedTable)
 
         if fontChanged {
@@ -1492,8 +1496,13 @@ private final class VVDiffMetalView: NSView {
             diffRenderer = nil
         }
 
-        if rowsChanged || langChanged || fontChanged {
-            rebuildHighlightsAsync()
+        if rowsChanged || langChanged || fontChanged || syntaxHighlightingChanged {
+            if syntaxHighlightingEnabled {
+                rebuildHighlightsAsync()
+            } else {
+                highlightTask?.cancel()
+                highlightedRanges = [:]
+            }
         }
 
         cachedScene = nil
@@ -1735,6 +1744,12 @@ private final class VVDiffMetalView: NSView {
     // MARK: - Syntax Highlighting
 
     private func rebuildHighlightsAsync() {
+        guard syntaxHighlightingEnabled else {
+            highlightTask?.cancel()
+            highlightedRanges = [:]
+            return
+        }
+
         highlightGeneration += 1
         let generation = highlightGeneration
         let currentRows = rows
@@ -2374,6 +2389,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
     let theme: VVTheme
     let configuration: VVConfiguration
     let renderStyle: VVDiffRenderStyle
+    let syntaxHighlightingEnabled: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -2397,13 +2413,27 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> VVDiffMetalView {
         let view = VVDiffMetalView(frame: .zero)
         let rows = context.coordinator.rows(for: unifiedDiff)
-        view.update(rows: rows, style: renderStyle, theme: theme, configuration: configuration, language: language)
+        view.update(
+            rows: rows,
+            style: renderStyle,
+            theme: theme,
+            configuration: configuration,
+            language: language,
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled
+        )
         return view
     }
 
     func updateNSView(_ nsView: VVDiffMetalView, context: Context) {
         let rows = context.coordinator.rows(for: unifiedDiff)
-        nsView.update(rows: rows, style: renderStyle, theme: theme, configuration: configuration, language: language)
+        nsView.update(
+            rows: rows,
+            style: renderStyle,
+            theme: theme,
+            configuration: configuration,
+            language: language,
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled
+        )
     }
 }
 
@@ -2416,6 +2446,7 @@ public struct VVDiffView: View {
     private var theme: VVTheme
     private var configuration: VVConfiguration
     private var renderStyle: VVDiffRenderStyle
+    private var syntaxHighlightingEnabled: Bool
 
     public init(unifiedDiff: String) {
         self.unifiedDiff = unifiedDiff
@@ -2423,6 +2454,7 @@ public struct VVDiffView: View {
         self.theme = .defaultDark
         self.configuration = .default
         self.renderStyle = .unifiedTable
+        self.syntaxHighlightingEnabled = true
     }
 
     public var body: some View {
@@ -2431,7 +2463,8 @@ public struct VVDiffView: View {
             language: effectiveLanguage,
             theme: theme,
             configuration: configuration,
-            renderStyle: renderStyle
+            renderStyle: renderStyle,
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled
         )
     }
 
@@ -2485,6 +2518,13 @@ extension VVDiffView {
     public func renderStyle(_ style: VVDiffRenderStyle) -> VVDiffView {
         var view = self
         view.renderStyle = style
+        return view
+    }
+
+    /// Enable or disable syntax highlighting for diff code rows.
+    public func syntaxHighlighting(_ enabled: Bool) -> VVDiffView {
+        var view = self
+        view.syntaxHighlightingEnabled = enabled
         return view
     }
 
