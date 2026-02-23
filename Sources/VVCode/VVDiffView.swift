@@ -608,15 +608,25 @@ private func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int)? 
 }
 
 private func makeJoinedCodeBuffer(from rows: [VVDiffRow]) -> (text: String, rowRanges: [Int: NSRange]) {
-    var text = ""
-    var rowRanges: [Int: NSRange] = [:]
+    let codeRows = rows.filter { $0.kind.isCode }
+    var totalUTF16 = 0
+    for row in codeRows {
+        totalUTF16 += row.text.utf16.count + 1
+    }
 
-    for row in rows where row.kind.isCode {
-        let start = text.utf16.count
-        text.append(row.text)
+    var text = ""
+    text.reserveCapacity(totalUTF16)
+
+    var rowRanges: [Int: NSRange] = [:]
+    rowRanges.reserveCapacity(codeRows.count)
+
+    var offset = 0
+    for row in codeRows {
         let length = row.text.utf16.count
-        rowRanges[row.id] = NSRange(location: start, length: length)
+        rowRanges[row.id] = NSRange(location: offset, length: length)
+        text.append(row.text)
         text.append("\n")
+        offset += length + 1
     }
 
     return (text: text, rowRanges: rowRanges)
@@ -1753,6 +1763,18 @@ private final class VVDiffMetalView: NSView {
             return [:]
         }
 
+        // Guardrail: skip expensive highlighting for very large diffs.
+        let maxHighlightRows = 5_000
+        let maxHighlightUTF16 = 250_000
+        guard codeRows.count <= maxHighlightRows else { return [:] }
+        var totalUTF16 = 0
+        for row in codeRows {
+            totalUTF16 += row.text.utf16.count + 1
+            if totalUTF16 > maxHighlightUTF16 {
+                return [:]
+            }
+        }
+
         let highlightTheme: HighlightTheme = theme.backgroundColor.brightnessComponent < 0.5
             ? .defaultDark
             : .defaultLight
@@ -1763,24 +1785,46 @@ private final class VVDiffMetalView: NSView {
         do {
             try await highlighter.setLanguage(languageConfig)
             _ = try await highlighter.parse(joined.text)
-            let ranges = try await highlighter.allHighlights()
+            let sortedRanges = try await highlighter.allHighlights().sorted { lhs, rhs in
+                lhs.range.location < rhs.range.location
+            }
 
             var result: [Int: [(NSRange, SIMD4<Float>)]] = [:]
+            let sortedRows = joined.rowRanges.sorted { lhs, rhs in
+                lhs.value.location < rhs.value.location
+            }
+            var rangeStartIndex = 0
 
-            for (rowID, rowNSRange) in joined.rowRanges {
+            for (rowID, rowNSRange) in sortedRows {
                 var rowRanges: [(NSRange, SIMD4<Float>)] = []
-                for range in ranges {
+                while rangeStartIndex < sortedRanges.count {
+                    let rangeEnd = NSMaxRange(sortedRanges[rangeStartIndex].range)
+                    if rangeEnd <= rowNSRange.location {
+                        rangeStartIndex += 1
+                        continue
+                    }
+                    break
+                }
+
+                var index = rangeStartIndex
+                while index < sortedRanges.count {
+                    let range = sortedRanges[index]
+                    if range.range.location >= NSMaxRange(rowNSRange) {
+                        break
+                    }
+
                     let intersection = NSIntersectionRange(range.range, rowNSRange)
-                    guard intersection.length > 0 else { continue }
+                    if intersection.length > 0 {
+                        let localStart = intersection.location - rowNSRange.location
+                        let localRange = NSRange(location: localStart, length: intersection.length)
 
-                    let localStart = intersection.location - rowNSRange.location
-                    let localRange = NSRange(location: localStart, length: intersection.length)
+                        let attrs = range.style.attributes(baseFont: font)
+                        let nsColor = attrs[.foregroundColor] as? NSColor ?? NSColor.white
+                        let color = nsColor.simdColor
 
-                    let attrs = range.style.attributes(baseFont: font)
-                    let nsColor = attrs[.foregroundColor] as? NSColor ?? NSColor.white
-                    let color = nsColor.simdColor
-
-                    rowRanges.append((localRange, color))
+                        rowRanges.append((localRange, color))
+                    }
+                    index += 1
                 }
                 if !rowRanges.isEmpty {
                     result[rowID] = rowRanges
