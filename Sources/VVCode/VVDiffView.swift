@@ -123,6 +123,14 @@ private struct RowGeometry {
     let paneWidth: CGFloat  // For split mode: width of the pane containing this row
 }
 
+private struct RowGeometryCacheKey: Equatable {
+    let rowsSignature: Int
+    let style: VVDiffRenderStyle
+    let widthBucket: Int
+    let wrapsUnified: Bool
+    let fontSignature: Int
+}
+
 // MARK: - Diff Computation Helpers
 
 /// Computes word-level inline change ranges between two lines.
@@ -734,6 +742,20 @@ private final class VVDiffRenderer {
         return result.isEmpty ? [""] : result
     }
 
+    private func wrappedTextSegmentCount(_ text: String, maxChars: Int) -> Int {
+        guard maxChars > 0 else { return 1 }
+        var count = 0
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byLines, .substringNotRequired]) { _, range, _, _ in
+            let length = text.distance(from: range.lowerBound, to: range.upperBound)
+            if length == 0 {
+                count += 1
+            } else {
+                count += max(1, Int(ceil(Double(length) / Double(maxChars))))
+            }
+        }
+        return max(count, 1)
+    }
+
     // MARK: - Unified Scene
 
     func buildUnifiedScene(
@@ -742,7 +764,8 @@ private final class VVDiffRenderer {
         width: CGFloat,
         viewport: CGRect,
         highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
-        wrapLines: Bool = false
+        wrapLines: Bool = false,
+        measureFullHeight: Bool = true
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
         let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
@@ -773,15 +796,15 @@ private final class VVDiffRenderer {
             // Section rows (skip metadata — already shown in file header)
             for row in section.rows {
                 if row.kind == .metadata { continue }
-                let wrappedLines: [String]?
-                if wrapLines && (row.kind.isCode || row.kind == .hunkHeader) {
-                    wrappedLines = wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
-                } else {
-                    wrappedLines = nil
-                }
-                let visualLines = wrappedLines?.count ?? 1
+                let shouldWrap = wrapLines && (row.kind.isCode || row.kind == .hunkHeader)
+                let visualLines = shouldWrap
+                    ? wrappedTextSegmentCount(row.text, maxChars: maxCharsPerVisualLine)
+                    : 1
                 let rowH = lineHeight * CGFloat(max(1, visualLines))
                 if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
+                    let wrappedLines = shouldWrap
+                        ? wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
+                        : nil
                     buildUnifiedRow(
                         row: row,
                         y: y, width: width, height: rowH,
@@ -795,6 +818,10 @@ private final class VVDiffRenderer {
                 }
                 y += rowH
             }
+
+            if !measureFullHeight, y > viewport.maxY + 200 {
+                break
+            }
         }
 
         return (scene: builder.scene, contentHeight: y)
@@ -807,7 +834,8 @@ private final class VVDiffRenderer {
         rows: [VVDiffRow],
         width: CGFloat,
         viewport: CGRect,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
+        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
+        measureFullHeight: Bool = true
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
         let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
@@ -866,6 +894,10 @@ private final class VVDiffRenderer {
                     )
                 }
                 y += rowH
+            }
+
+            if !measureFullHeight, y > viewport.maxY + 200 {
+                break
             }
         }
 
@@ -1364,6 +1396,10 @@ private final class VVDiffMetalView: NSView {
     private let selectionController = VVTextSelectionController<DiffTextPosition>()
     private let selectionColor: SIMD4<Float> = .rgba(0.24, 0.40, 0.65, 0.55)
     private var rowGeometries: [RowGeometry] = []
+    private var rowGeometryCacheKey: RowGeometryCacheKey?
+    private var rowGeometriesContentHeight: CGFloat = 0
+    private var rowsSignature: Int = 0
+    private var fastPlainModeEnabled: Bool = false
     private let codeInsetX: CGFloat = 10
 
     init(frame: CGRect, metalContext: VVMetalContext? = nil) {
@@ -1452,6 +1488,54 @@ private final class VVDiffMetalView: NSView {
         metalView.frame = CGRect(origin: viewportOrigin, size: viewportSize)
     }
 
+    private var wrapsUnified: Bool {
+        configuration.wrapLines && renderStyle == .unifiedTable && !fastPlainModeEnabled
+    }
+
+    private static func computeRowsSignature(_ rows: [VVDiffRow]) -> Int {
+        var hasher = Hasher()
+        hasher.combine(rows.count)
+        for row in rows {
+            hasher.combine(row.id)
+            hasher.combine(row.kind.rawValue)
+            hasher.combine(row.oldLineNumber ?? -1)
+            hasher.combine(row.newLineNumber ?? -1)
+            hasher.combine(row.text.utf16.count)
+        }
+        return hasher.finalize()
+    }
+
+    private static func fontSignature(_ font: NSFont) -> Int {
+        var hasher = Hasher()
+        hasher.combine(font.fontName)
+        hasher.combine(font.pointSize)
+        return hasher.finalize()
+    }
+
+    private static func shouldUseFastPlainMode(rows: [VVDiffRow]) -> Bool {
+        let maxRows = 3_500
+        let maxTotalUTF16 = 200_000
+        let maxChangedRows = 1_800
+
+        if rows.count > maxRows {
+            return true
+        }
+
+        var totalUTF16 = 0
+        var changedRows = 0
+        for row in rows where row.kind.isCode {
+            totalUTF16 += row.text.utf16.count + 1
+            if row.kind == .added || row.kind == .deleted {
+                changedRows += 1
+            }
+            if totalUTF16 > maxTotalUTF16 || changedRows > maxChangedRows {
+                return true
+            }
+        }
+
+        return false
+    }
+
     func update(
         rows: [VVDiffRow],
         style: VVDiffRenderStyle,
@@ -1460,20 +1544,44 @@ private final class VVDiffMetalView: NSView {
         language: VVLanguage?,
         syntaxHighlightingEnabled: Bool
     ) {
+        let nextFastPlainMode = Self.shouldUseFastPlainMode(rows: rows)
+        let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled && !nextFastPlainMode
+        let fastPlainModeChanged = fastPlainModeEnabled != nextFastPlainMode
         let rowsChanged = self.rows != rows
         let styleChanged = self.renderStyle != style
         let themeChanged = self.theme != theme
         let fontChanged = self.configuration.font != configuration.font
+        let wrapsChanged = self.configuration.wrapLines != configuration.wrapLines
         let langChanged = self.language?.identifier != language?.identifier
-        let syntaxHighlightingChanged = self.syntaxHighlightingEnabled != syntaxHighlightingEnabled
+        let syntaxHighlightingChanged = self.syntaxHighlightingEnabled != effectiveSyntaxHighlightingEnabled
+        let effectiveWrapChanged = wrapsChanged || styleChanged || fastPlainModeChanged
 
+        if !rowsChanged,
+           !styleChanged,
+           !themeChanged,
+           !fontChanged,
+           !langChanged,
+           !syntaxHighlightingChanged,
+           !effectiveWrapChanged,
+           rowGeometryCacheKey != nil {
+            return
+        }
+
+        fastPlainModeEnabled = nextFastPlainMode
         self.rows = rows
         self.renderStyle = style
         self.theme = theme
         self.configuration = configuration
         self.language = language
-        self.syntaxHighlightingEnabled = syntaxHighlightingEnabled
-        scrollView?.hasHorizontalScroller = !(configuration.wrapLines && style == .unifiedTable)
+        self.syntaxHighlightingEnabled = effectiveSyntaxHighlightingEnabled
+        rowsSignature = rowsChanged ? Self.computeRowsSignature(rows) : rowsSignature
+        rowGeometryCacheKey = nil
+
+        if style == .split {
+            scrollView?.hasHorizontalScroller = true
+        } else {
+            scrollView?.hasHorizontalScroller = !wrapsUnified && !fastPlainModeEnabled
+        }
 
         if fontChanged {
             baseFont = configuration.font
@@ -1489,6 +1597,8 @@ private final class VVDiffMetalView: NSView {
             sections = makeSections(from: rows)
             if style == .split {
                 splitRows = makeSplitRows(from: rows)
+            } else {
+                splitRows = []
             }
         }
 
@@ -1522,37 +1632,15 @@ private final class VVDiffMetalView: NSView {
         let width = scrollView?.bounds.width ?? bounds.width
         let dr = ensureDiffRenderer()
         dr.updateContentWidth(width)
-        let wrapsUnified = configuration.wrapLines && renderStyle == .unifiedTable
-
-        // Compute content height (no culling — infinite viewport)
-        let viewport = CGRect(x: 0, y: 0, width: width, height: CGFloat.greatestFiniteMagnitude)
-        let result: (scene: VVScene, contentHeight: CGFloat)
-
-        switch renderStyle {
-        case .unifiedTable:
-            result = dr.buildUnifiedScene(
-                sections: sections, rows: rows,
-                width: width, viewport: viewport,
-                highlightedRanges: highlightedRanges,
-                wrapLines: wrapsUnified
-            )
-        case .split:
-            result = dr.buildSplitScene(
-                splitRows: splitRows, rows: rows,
-                width: width, viewport: viewport,
-                highlightedRanges: highlightedRanges
-            )
-        }
-
-        contentHeight = result.contentHeight
-        cachedScene = result.scene
-
-        // Build row geometries for hit testing
         buildRowGeometries(width: width)
+        contentHeight = rowGeometriesContentHeight
+        cachedScene = nil
+
+        let wrapsUnified = self.wrapsUnified
 
         // Compute max line width for horizontal scrolling
         let maxLineWidth: CGFloat
-        if wrapsUnified {
+        if wrapsUnified || fastPlainModeEnabled {
             maxLineWidth = width
         } else {
             maxLineWidth = rowGeometries.map { geo in
@@ -1563,30 +1651,44 @@ private final class VVDiffMetalView: NSView {
         let minWidth: CGFloat
         if renderStyle == .split {
             minWidth = 840 // 420 * 2
-        } else if wrapsUnified {
+        } else if wrapsUnified || fastPlainModeEnabled {
             minWidth = width
         } else {
             minWidth = max(width, 520)
         }
 
         // Size the document view for scroll bars; MTKView stays viewport-sized
-        let docWidth = wrapsUnified ? width : max(maxLineWidth, minWidth, width)
+        let docWidth = (wrapsUnified || fastPlainModeEnabled) ? width : max(maxLineWidth, minWidth, width)
         let docHeight = max(contentHeight, scrollView.bounds.height)
         documentView.frame = CGRect(x: 0, y: 0, width: docWidth, height: docHeight)
         updateMetalViewport()
     }
 
     private func buildRowGeometries(width: CGFloat) {
+        let widthBucket = Int((width * 2).rounded())
+        let cacheKey = RowGeometryCacheKey(
+            rowsSignature: rowsSignature,
+            style: renderStyle,
+            widthBucket: widthBucket,
+            wrapsUnified: wrapsUnified,
+            fontSignature: Self.fontSignature(configuration.font)
+        )
+        if rowGeometryCacheKey == cacheKey {
+            return
+        }
+
         rowGeometries.removeAll(keepingCapacity: true)
         let dr = ensureDiffRenderer()
 
         switch renderStyle {
         case .unifiedTable:
-            let wrapsUnified = configuration.wrapLines && renderStyle == .unifiedTable
             buildRowGeometriesUnified(width: width, renderer: dr, wrapLines: wrapsUnified)
         case .split:
             buildRowGeometriesSplit(width: width, renderer: dr)
         }
+
+        rowGeometriesContentHeight = rowGeometries.last.map { $0.y + $0.height } ?? 0
+        rowGeometryCacheKey = cacheKey
     }
 
     private func buildRowGeometriesUnified(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
@@ -1931,8 +2033,10 @@ extension VVDiffMetalView: MTKViewDelegate {
         if let cached = cachedScene {
             scene = cached
         } else {
-            let wrapsUnified = configuration.wrapLines && renderStyle == .unifiedTable
-            let renderWidth = wrapsUnified ? scrollView.bounds.width : max(scrollView.bounds.width, documentView.frame.width)
+            let wrapsUnified = self.wrapsUnified
+            let renderWidth = (wrapsUnified || fastPlainModeEnabled)
+                ? scrollView.bounds.width
+                : max(scrollView.bounds.width, documentView.frame.width)
             dr.updateContentWidth(scrollView.bounds.width)
             let result: (scene: VVScene, contentHeight: CGFloat)
             switch renderStyle {
@@ -1942,17 +2046,20 @@ extension VVDiffMetalView: MTKViewDelegate {
                     width: renderWidth,
                     viewport: visibleRect,
                     highlightedRanges: highlightedRanges,
-                    wrapLines: wrapsUnified
+                    wrapLines: wrapsUnified,
+                    measureFullHeight: false
                 )
             case .split:
                 result = dr.buildSplitScene(
                     splitRows: splitRows, rows: rows,
                     width: renderWidth,
                     viewport: visibleRect,
-                    highlightedRanges: highlightedRanges
+                    highlightedRanges: highlightedRanges,
+                    measureFullHeight: false
                 )
             }
             scene = result.scene
+            cachedScene = scene
         }
 
         renderScene(scene, encoder: encoder, renderer: renderer)

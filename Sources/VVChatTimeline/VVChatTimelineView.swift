@@ -82,6 +82,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     private func setup() {
         wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
 
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true

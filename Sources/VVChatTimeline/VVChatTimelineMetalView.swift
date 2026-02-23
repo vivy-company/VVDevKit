@@ -50,6 +50,7 @@ public final class VVChatTimelineMetalView: MTKView {
     private var baseFontDescent: CGFloat = 0
 
     public override var isFlipped: Bool { true }
+    public override var isOpaque: Bool { false }
     public override var acceptsFirstResponder: Bool { true }
 
     public override func mouseDown(with event: NSEvent) {
@@ -92,6 +93,8 @@ public final class VVChatTimelineMetalView: MTKView {
         baseFont = font
         baseFontAscent = CTFontGetAscent(font)
         baseFontDescent = CTFontGetDescent(font)
+        layer?.isOpaque = false
+        clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         framebufferOnly = true
         enableSetNeedsDisplay = true
         isPaused = true
