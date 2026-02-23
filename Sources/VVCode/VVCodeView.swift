@@ -212,24 +212,42 @@ struct VVCodeViewRepresentable: NSViewRepresentable {
         }
 
         // Update theme
-        nsView.setTheme(theme)
+        if context.coordinator.lastTheme != theme {
+            nsView.setTheme(theme)
+            context.coordinator.lastTheme = theme
+        }
 
         // Update configuration
-        nsView.setConfiguration(configuration)
+        if context.coordinator.lastConfiguration != configuration {
+            nsView.setConfiguration(configuration)
+            context.coordinator.lastConfiguration = configuration
+        }
 
         // Update git data
-        let hunks: [VVDiffHunk] = gitDiff.map { VVDiffParser.parse(unifiedDiff: $0) } ?? []
-        nsView.setGitHunks(hunks)
+        if context.coordinator.lastGitDiff != gitDiff {
+            context.coordinator.lastGitDiff = gitDiff
+            let hunks: [VVDiffHunk] = gitDiff.map { VVDiffParser.parse(unifiedDiff: $0) } ?? []
+            nsView.setGitHunks(hunks)
+        }
 
         let blame: [VVBlameInfo] = gitBlame ?? []
-        nsView.setBlameInfo(blame)
+        if context.coordinator.lastGitBlame != blame {
+            nsView.setBlameInfo(blame)
+            context.coordinator.lastGitBlame = blame
+        }
 
         // Update LSP client
-        if let client = lspClient {
-            let uri = document.fileURL?.absoluteString ?? "untitled:\(UUID().uuidString)"
-            nsView.setLSPClient(client, documentURI: uri)
-        } else {
-            nsView.setLSPClient(nil, documentURI: nil)
+        let resolvedURI = document.fileURL?.absoluteString ?? context.coordinator.untitledDocumentURI
+        let incomingClientID = lspClient.map(ObjectIdentifier.init)
+
+        if context.coordinator.lastLSPClientID != incomingClientID || context.coordinator.lastLSPDocumentURI != resolvedURI {
+            if let client = lspClient {
+                nsView.setLSPClient(client, documentURI: resolvedURI)
+            } else {
+                nsView.setLSPClient(nil, documentURI: nil)
+            }
+            context.coordinator.lastLSPClientID = incomingClientID
+            context.coordinator.lastLSPDocumentURI = lspClient == nil ? nil : resolvedURI
         }
     }
 
@@ -249,6 +267,13 @@ struct VVCodeViewRepresentable: NSViewRepresentable {
         var onTextChange: ((String) -> Void)?
         var onSelectionChange: ((NSRange) -> Void)?
         var onCursorPositionChange: ((VVTextPosition) -> Void)?
+        var lastTheme: VVTheme?
+        var lastConfiguration: VVConfiguration?
+        var lastGitDiff: String?
+        var lastGitBlame: [VVBlameInfo] = []
+        var lastLSPClientID: ObjectIdentifier?
+        var lastLSPDocumentURI: String?
+        let untitledDocumentURI = "untitled:\(UUID().uuidString)"
 
         init(document: Binding<VVDocument>,
              onTextChange: ((String) -> Void)?,

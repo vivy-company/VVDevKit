@@ -136,6 +136,7 @@ public final class VVMetalEditorContainerView: NSView {
 
     // Git blame
     private var blameInfo: [VVBlameInfo] = []
+    private var gitHunks: [VVDiffHunk] = []
 
     // Line map for position calculations
     private var lineMap: LineMap?
@@ -2235,12 +2236,14 @@ public final class VVMetalEditorContainerView: NSView {
 
     /// Set the theme
     public func setTheme(_ theme: VVTheme) {
+        guard self._theme != theme else { return }
         self._theme = theme
         applyTheme()
     }
 
     /// Set the configuration
     public func setConfiguration(_ configuration: VVConfiguration) {
+        guard self._configuration != configuration else { return }
         self._configuration = configuration
         applyConfiguration()
     }
@@ -2260,6 +2263,8 @@ public final class VVMetalEditorContainerView: NSView {
 
     /// Set git hunks (VVDiffHunk version for compatibility)
     public func setGitHunks(_ hunks: [VVDiffHunk]) {
+        guard gitHunks != hunks else { return }
+        gitHunks = hunks
         let metalHunks = hunks.map { hunk -> MetalGutterGitHunk in
             let status: MetalGutterGitHunk.Status
             switch hunk.changeType {
@@ -2278,12 +2283,19 @@ public final class VVMetalEditorContainerView: NSView {
 
     /// Set blame info
     public func setBlameInfo(_ blame: [VVBlameInfo]) {
+        guard blameInfo != blame else { return }
         blameInfo = blame
         metalTextView?.setBlameInfo(blame, showInline: _configuration.showInlineBlame, delay: _configuration.blameDelay)
     }
 
     /// Set LSP client
     public func setLSPClient(_ client: (any VVLSPClient)?, documentURI: String?) {
+        let previousClientID = lspClient.map(ObjectIdentifier.init)
+        let incomingClientID = client.map(ObjectIdentifier.init)
+        if previousClientID == incomingClientID, self.documentURI == documentURI {
+            return
+        }
+
         if lspClient != nil, client == nil, let oldURI = self.documentURI {
             Task { [oldURI] in
                 await lspClient?.documentClosed(oldURI)
