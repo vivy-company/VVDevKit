@@ -238,7 +238,9 @@ public final class VVChatMessageRenderer {
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
-        let metaWidth = usesBubble ? max(bubbleContentWidth, 1) : messageContentWidth
+        let metaWidth = usesBubble
+            ? max(bubbleContentWidth, style.bubbleMetadataMinWidth)
+            : messageContentWidth
         let headerText = headerTitle(for: message.role)
         let headerRender = renderMeta(text: headerText, layoutEngine: headerLayoutEngine, pipeline: headerPipeline, width: metaWidth)
         let footerRender: (layout: MarkdownLayout, scene: VVScene)

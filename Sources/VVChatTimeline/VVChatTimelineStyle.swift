@@ -78,6 +78,7 @@ public struct VVChatTimelineStyle {
     public var systemBubbleInsets: VVInsets
     public var systemBubbleMaxWidth: CGFloat
     public var systemBubbleAlignment: VVChatBubbleAlignment
+    public var bubbleMetadataMinWidth: CGFloat
     public var headerSpacing: CGFloat
     public var footerSpacing: CGFloat
     public var loadingIndicatorText: String
@@ -124,6 +125,7 @@ public struct VVChatTimelineStyle {
         systemBubbleInsets: VVInsets = .init(top: 8, left: 10, bottom: 8, right: 10),
         systemBubbleMaxWidth: CGFloat = 620,
         systemBubbleAlignment: VVChatBubbleAlignment = .leading,
+        bubbleMetadataMinWidth: CGFloat = 88,
         headerSpacing: CGFloat = 6,
         footerSpacing: CGFloat = 6,
         loadingIndicatorText: String = "Typing…",
@@ -183,6 +185,7 @@ public struct VVChatTimelineStyle {
         self.systemBubbleInsets = systemBubbleInsets
         self.systemBubbleMaxWidth = systemBubbleMaxWidth
         self.systemBubbleAlignment = systemBubbleAlignment
+        self.bubbleMetadataMinWidth = max(1, bubbleMetadataMinWidth)
         self.headerSpacing = headerSpacing
         self.footerSpacing = footerSpacing
         self.loadingIndicatorText = loadingIndicatorText
