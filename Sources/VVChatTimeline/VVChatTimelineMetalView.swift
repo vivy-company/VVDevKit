@@ -166,7 +166,9 @@ public final class VVChatTimelineMetalView: MTKView {
             let itemOffset = CGPoint(x: item.frame.origin.x + item.contentOffset.x,
                                      y: item.frame.origin.y + item.contentOffset.y)
 
-            // Render selection highlights before scene content
+            renderScene(item.scene, encoder: encoder, renderer: renderer, imageProvider: renderDataSource, itemOffset: itemOffset)
+
+            // Draw selection after scene so bubbles do not occlude highlight quads.
             let selQuads = renderDataSource.selectionQuads(forItemAt: index, itemOffset: itemOffset)
             if !selQuads.isEmpty {
                 var instances: [QuadInstance] = []
@@ -183,8 +185,6 @@ public final class VVChatTimelineMetalView: MTKView {
                     renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: true)
                 }
             }
-
-            renderScene(item.scene, encoder: encoder, renderer: renderer, imageProvider: renderDataSource, itemOffset: itemOffset)
         }
 
         encoder.endEncoding()
