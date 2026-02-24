@@ -148,6 +148,7 @@ public final class MetalTextView: MTKView {
 
     private var gutterQuads: [VVQuadPrimitive] = []
     private var gutterLines: [VVLinePrimitive] = []
+    private var gutterChevronLines: [VVTableLinePrimitive] = []
     private var gutterCoverQuads: [VVQuadPrimitive] = []
     private var diffOverlayGradientQuads: [VVGradientQuadPrimitive] = []
     private var diffOverlayQuads: [VVQuadPrimitive] = []
@@ -1104,6 +1105,7 @@ public final class MetalTextView: MTKView {
         appendTextRuns(contentTextRuns, to: &scene, zIndex: 12)
         appendQuads(gutterCoverQuads, to: &scene, zIndex: 13)
         appendLines(gutterLines, to: &scene, zIndex: 14)
+        appendTableLines(gutterChevronLines, to: &scene, zIndex: 14)
         appendTextRuns(gutterTextRuns, to: &scene, zIndex: 14)
         appendTextRuns(diffOverlayTextRuns, to: &scene, zIndex: 15)
         appendTextRuns(blameTextRuns, to: &scene, zIndex: 16)
@@ -1138,6 +1140,12 @@ public final class MetalTextView: MTKView {
     private func appendLines(_ lines: [VVLinePrimitive], to scene: inout VVScene, zIndex: Int) {
         for line in lines {
             scene.add(kind: .line(line), zIndex: zIndex)
+        }
+    }
+
+    private func appendTableLines(_ lines: [VVTableLinePrimitive], to scene: inout VVScene, zIndex: Int) {
+        for line in lines {
+            scene.add(kind: .tableLine(line), zIndex: zIndex)
         }
     }
 
@@ -2305,6 +2313,7 @@ public final class MetalTextView: MTKView {
     private func prepareGutterBatches() {
         gutterQuads.removeAll(keepingCapacity: true)
         gutterLines.removeAll(keepingCapacity: true)
+        gutterChevronLines.removeAll(keepingCapacity: true)
         gutterCoverQuads.removeAll(keepingCapacity: true)
         gutterTextRuns.removeAll(keepingCapacity: true)
 
@@ -3307,7 +3316,7 @@ public final class MetalTextView: MTKView {
 
     private func foldIconMetrics() -> FoldIconMetrics {
         let iconSide = max(6, min(foldMarkerAreaWidth - 2, layoutEngine.calculatedLineHeight * foldMarkerIconScale))
-        let lineWidth = max(1, min(foldMarkerIconLineWidth, iconSide * 0.25))
+        let lineWidth = max(1.2, min(foldMarkerIconLineWidth, iconSide * 0.25))
         let hoverPadding = max(1, foldMarkerHoverPadding)
         let hoverSide = min(foldMarkerAreaWidth, layoutEngine.calculatedLineHeight - 2, iconSide + hoverPadding * 2)
         let hoverCorner = min(foldMarkerHoverCornerRadius, hoverSide * 0.45)
@@ -3337,23 +3346,23 @@ public final class MetalTextView: MTKView {
         let p3: CGPoint
 
         if isFolded {
-            // Down-pointing chevron (expanded range)
-            p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
-            p2 = CGPoint(x: iconRect.midX, y: iconRect.maxY)
-            p3 = CGPoint(x: iconRect.maxX, y: iconRect.minY)
-        } else {
             // Right-pointing chevron (collapsed range)
             p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
             p2 = CGPoint(x: iconRect.maxX, y: iconRect.midY)
             p3 = CGPoint(x: iconRect.minX, y: iconRect.maxY)
+        } else {
+            // Down-pointing chevron (expanded range)
+            p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
+            p2 = CGPoint(x: iconRect.midX, y: iconRect.maxY)
+            p3 = CGPoint(x: iconRect.maxX, y: iconRect.minY)
         }
 
         let strokeColor = color.simdColor
-        gutterLines.append(
-            VVLinePrimitive(start: p1, end: p2, thickness: metrics.lineWidth, color: strokeColor)
+        gutterChevronLines.append(
+            VVTableLinePrimitive(start: p1, end: p2, color: strokeColor, lineWidth: metrics.lineWidth)
         )
-        gutterLines.append(
-            VVLinePrimitive(start: p2, end: p3, thickness: metrics.lineWidth, color: strokeColor)
+        gutterChevronLines.append(
+            VVTableLinePrimitive(start: p2, end: p3, color: strokeColor, lineWidth: metrics.lineWidth)
         )
     }
 
