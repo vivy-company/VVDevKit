@@ -93,6 +93,9 @@ public struct VVChatTimelineStyle {
     public var userTimestampEnabled: Bool
     public var assistantTimestampEnabled: Bool
     public var systemTimestampEnabled: Bool
+    public var userTimestampSuffix: String
+    public var assistantTimestampSuffix: String
+    public var systemTimestampSuffix: String
     public var bubbleMetadataMinWidth: CGFloat
     public var headerSpacing: CGFloat
     public var footerSpacing: CGFloat
@@ -154,6 +157,9 @@ public struct VVChatTimelineStyle {
         userTimestampEnabled: Bool = true,
         assistantTimestampEnabled: Bool = true,
         systemTimestampEnabled: Bool = true,
+        userTimestampSuffix: String = "",
+        assistantTimestampSuffix: String = "",
+        systemTimestampSuffix: String = "",
         bubbleMetadataMinWidth: CGFloat = 88,
         headerSpacing: CGFloat = 6,
         footerSpacing: CGFloat = 6,
@@ -228,6 +234,9 @@ public struct VVChatTimelineStyle {
         self.userTimestampEnabled = userTimestampEnabled
         self.assistantTimestampEnabled = assistantTimestampEnabled
         self.systemTimestampEnabled = systemTimestampEnabled
+        self.userTimestampSuffix = userTimestampSuffix
+        self.assistantTimestampSuffix = assistantTimestampSuffix
+        self.systemTimestampSuffix = systemTimestampSuffix
         self.bubbleMetadataMinWidth = max(1, bubbleMetadataMinWidth)
         self.headerSpacing = headerSpacing
         self.footerSpacing = footerSpacing
@@ -335,6 +344,17 @@ public struct VVChatTimelineStyle {
             return assistantTimestampEnabled
         case .system:
             return systemTimestampEnabled
+        }
+    }
+
+    public func timestampSuffix(for role: VVChatMessageRole) -> String {
+        switch role {
+        case .user:
+            return userTimestampSuffix
+        case .assistant:
+            return assistantTimestampSuffix
+        case .system:
+            return systemTimestampSuffix
         }
     }
 }

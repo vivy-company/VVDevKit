@@ -359,7 +359,16 @@ public final class VVChatMessageRenderer {
         currentY += contentBlockHeight
         if let footerRender, footerHeight > 0 {
             currentY += style.footerSpacing
-            builder.withOffset(CGPoint(x: 0, y: currentY)) { builder in
+            let footerOffsetX: CGFloat
+            if message.role == .user {
+                let footerBounds = sceneBounds(for: footerRender.scene, layoutEngine: timestampLayoutEngine)
+                let footerWidth = max(0, footerBounds?.width ?? 0)
+                footerOffsetX = max(0, metaWidth - footerWidth)
+            } else {
+                footerOffsetX = 0
+            }
+
+            builder.withOffset(CGPoint(x: footerOffsetX, y: currentY)) { builder in
                 builder.add(node: VVNode.fromScene(footerRender.scene))
             }
         }
@@ -572,7 +581,7 @@ public final class VVChatMessageRenderer {
 
     private func timestampLabel(for message: VVChatMessage) -> String {
         let timestamp = message.timestamp ?? Date()
-        return Self.timeFormatter.string(from: timestamp)
+        return Self.timeFormatter.string(from: timestamp) + style.timestampSuffix(for: message.role)
     }
 
     private static func makeMetaTheme(base: MarkdownTheme, textColor: SIMD4<Float>) -> MarkdownTheme {
