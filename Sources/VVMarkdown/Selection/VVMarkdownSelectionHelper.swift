@@ -582,32 +582,24 @@ public final class VVMarkdownSelectionHelper {
                     let atStartEdge = isStartRun && startIndex <= 1
                     let atEndEdge = isEndRun && endIndex >= max(0, length - 1)
 
-                    if let horizontal = runHorizontalBounds(run) {
-                        if atStartEdge {
-                            startX = min(startX, horizontal.minX)
-                        }
-                        if atEndEdge {
-                            endX = max(endX, horizontal.maxX)
-                        }
-                    }
+                    let horizontal = runHorizontalBounds(run)
+                    let minVisualX = horizontal?.minX ?? min(startX, endX)
+                    var maxVisualX = horizontal?.maxX ?? max(startX, endX)
+                    let typographicWidth = CGFloat(CTLineGetTypographicBounds(metrics.line, nil, nil, nil))
+                    let typographicMaxX = metrics.originX + max(0, typographicWidth)
+                    maxVisualX = max(maxVisualX, typographicMaxX)
 
-                    if atEndEdge {
-                        let typographicWidth = CGFloat(CTLineGetTypographicBounds(metrics.line, nil, nil, nil))
-                        let typographicMaxX = metrics.originX + max(0, typographicWidth)
-                        endX = max(endX, typographicMaxX)
-                    }
-
-                    // Visual overdraw prevents clipped trailing glyph highlight on heavy headers.
-                    startX -= 0.4
-                    endX += 0.95
-
-                    let edgePad: CGFloat = 1.45
                     if atStartEdge {
-                        startX -= edgePad
+                        startX = min(startX, minVisualX) - min(0.9, metrics.lineHeight * 0.05)
                     }
                     if atEndEdge {
-                        endX += edgePad
+                        endX = max(endX, maxVisualX) + min(1.2, metrics.lineHeight * 0.06)
                     }
+
+                    // Clamp overshoot so selection does not visibly exceed glyph bounds in non-edge cases.
+                    let maxVisualOvershoot = max(0.75, min(1.8, metrics.lineHeight * 0.08))
+                    startX = max(startX, minVisualX - maxVisualOvershoot)
+                    endX = min(endX, maxVisualX + maxVisualOvershoot)
 
                     if endX < startX {
                         swap(&startX, &endX)
