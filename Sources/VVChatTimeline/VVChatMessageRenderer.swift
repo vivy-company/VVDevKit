@@ -220,7 +220,9 @@ public final class VVChatMessageRenderer {
         let hasLeadingIcon = leadingIconURL != nil
         let leadingIconSize = hasLeadingIcon ? max(8, presentation?.leadingIconSize ?? style.headerIconSize) : 0
         let leadingIconSpacing = hasLeadingIcon ? max(0, presentation?.leadingIconSpacing ?? style.headerIconSpacing) : 0
-        let leadingLaneWidth = hasLeadingIcon ? (leadingIconSize + leadingIconSpacing) : 0
+        let explicitLaneWidth = max(0, presentation?.leadingLaneWidth ?? 0)
+        let implicitLaneWidth = hasLeadingIcon ? (leadingIconSize + leadingIconSpacing) : 0
+        let leadingLaneWidth = max(explicitLaneWidth, implicitLaneWidth)
         let bubbleStyle = presentation?.bubbleStyle ?? style.bubbleStyle(for: message.role)
         let usesBubble = bubbleStyle != nil
         let bubbleInsets = bubbleStyle?.insets ?? VVInsets()
@@ -499,18 +501,19 @@ public final class VVChatMessageRenderer {
         }
 
         var scene = builder.scene
-        if hasLeadingIcon, let leadingIconURL {
-            if !leadingIconURL.isEmpty {
-                imageURLs.insert(leadingIconURL)
-            }
-
+        if leadingLaneWidth > 0 {
             var laneBuilder = VVSceneBuilder()
-            let icon = VVImagePrimitive(
-                url: leadingIconURL,
-                frame: CGRect(x: 0, y: contentStartY, width: leadingIconSize, height: leadingIconSize),
-                cornerRadius: 0
-            )
-            laneBuilder.add(kind: .image(icon), zIndex: 0)
+            if hasLeadingIcon, let leadingIconURL {
+                if !leadingIconURL.isEmpty {
+                    imageURLs.insert(leadingIconURL)
+                }
+                let icon = VVImagePrimitive(
+                    url: leadingIconURL,
+                    frame: CGRect(x: 0, y: contentStartY, width: leadingIconSize, height: leadingIconSize),
+                    cornerRadius: 0
+                )
+                laneBuilder.add(kind: .image(icon), zIndex: 0)
+            }
             laneBuilder.withOffset(CGPoint(x: leadingLaneWidth, y: 0)) { builder in
                 builder.add(node: VVNode.fromScene(scene))
             }
