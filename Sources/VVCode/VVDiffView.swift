@@ -1085,19 +1085,23 @@ private final class VVDiffRenderer {
         centerY: CGFloat,
         builder: inout VVSceneBuilder
     ) -> CGFloat {
-        let iconHeight = min(max(font.pointSize * 0.95, 10), 15)
-        let iconWidth = iconHeight * 0.82
+        let iconHeight = min(max(font.pointSize * 1.05, 12), 16)
+        let iconWidth = iconHeight * 0.78
         let originY = centerY - iconHeight * 0.5
         let frame = CGRect(x: x, y: originY, width: iconWidth, height: iconHeight)
 
-        let borderColor = withAlpha(textColor, 0.9)
-        let foldColor = withAlpha(textColor, 0.58)
-        let fillColor = withAlpha(textColor, 0.12)
-        let line = max(1, floor(iconHeight * 0.13))
+        let borderColor = withAlpha(textColor, 0.94)
+        let foldLineColor = withAlpha(textColor, 0.66)
+        let fillColor = withAlpha(textColor, 0.16)
+        let line = max(1, floor(iconHeight * 0.12))
+        let foldSize = max(3, floor(iconWidth * 0.34))
 
+        // Body fill
         builder.add(kind: .quad(VVQuadPrimitive(frame: frame, color: fillColor, cornerRadius: 2)))
+
+        // Border with folded-corner cutout on top-right
         builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: line),
+            frame: CGRect(x: frame.minX, y: frame.minY, width: frame.width - foldSize, height: line),
             color: borderColor
         )))
         builder.add(kind: .quad(VVQuadPrimitive(
@@ -1109,15 +1113,40 @@ private final class VVDiffRenderer {
             color: borderColor
         )))
         builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.maxX - line, y: frame.minY, width: line, height: frame.height),
+            frame: CGRect(x: frame.maxX - line, y: frame.minY + foldSize, width: line, height: frame.height - foldSize),
             color: borderColor
         )))
 
-        let foldSize = max(2, iconWidth * 0.3)
+        // Fold corner
+        let foldX = frame.maxX - foldSize
         builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.maxX - foldSize, y: frame.minY, width: foldSize, height: foldSize),
-            color: foldColor
+            frame: CGRect(x: foldX, y: frame.minY, width: foldSize, height: foldSize),
+            color: headerBgColor
         )))
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: foldX, y: frame.minY + foldSize - line, width: foldSize, height: line),
+            color: foldLineColor
+        )))
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: foldX, y: frame.minY, width: line, height: foldSize),
+            color: foldLineColor
+        )))
+
+        // Inner "text line" hints so the icon reads as file, not checkbox.
+        let innerInset = line * 2
+        let innerWidth = max(2, frame.width - innerInset * 2 - 1)
+        let innerY0 = frame.minY + foldSize + line + 1
+        let innerY1 = innerY0 + line + 2
+        if innerY1 < frame.maxY - line - 1 {
+            builder.add(kind: .quad(VVQuadPrimitive(
+                frame: CGRect(x: frame.minX + innerInset, y: innerY0, width: innerWidth, height: line),
+                color: withAlpha(textColor, 0.42)
+            )))
+            builder.add(kind: .quad(VVQuadPrimitive(
+                frame: CGRect(x: frame.minX + innerInset, y: innerY1, width: innerWidth * 0.82, height: line),
+                color: withAlpha(textColor, 0.34)
+            )))
+        }
 
         return iconWidth
     }
