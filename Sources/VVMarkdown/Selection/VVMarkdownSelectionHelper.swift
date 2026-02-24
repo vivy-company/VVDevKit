@@ -245,7 +245,9 @@ public final class VVMarkdownSelectionHelper {
         let length = runTextLength(run)
         let clamped = max(0, min(index, length))
         guard let metrics = lineMetrics(for: run) else { return nil }
-        let offset = CTLineGetOffsetForStringIndex(metrics.line, clamped, nil)
+        var secondary: CGFloat = 0
+        let primary = CTLineGetOffsetForStringIndex(metrics.line, clamped, &secondary)
+        let offset = preferTrailingEdge ? max(primary, secondary) : min(primary, secondary)
         return metrics.originX + offset
     }
 
@@ -570,6 +572,24 @@ public final class VVMarkdownSelectionHelper {
                     if let glyphEndX = xForCharacterIndex(run, index: endIndex, preferTrailingEdge: true) {
                         endX = glyphEndX
                     }
+
+                    if let horizontal = runHorizontalBounds(run) {
+                        if startIndex == 0 {
+                            startX = min(startX, horizontal.minX)
+                        }
+                        if endIndex == length {
+                            endX = max(endX, horizontal.maxX)
+                        }
+                    }
+
+                    let edgePad: CGFloat = 0.75
+                    if startIndex == 0 {
+                        startX -= edgePad
+                    }
+                    if endIndex == length {
+                        endX += edgePad
+                    }
+
                     if endX < startX {
                         swap(&startX, &endX)
                     }
