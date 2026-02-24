@@ -578,9 +578,8 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
         if handleFooterActionTap(at: point) {
             return
         }
-        if clickCount >= 2, let entryID = timelineEntryID(at: point) {
+        if clickCount >= 1, let entryID = timelineEntryID(at: point) {
             onEntryActivate?(entryID)
-            return
         }
         selectionController.handleMouseDown(at: point, clickCount: clickCount, modifiers: modifiers, hitTester: self)
         metalView.setNeedsDisplay(metalView.bounds)

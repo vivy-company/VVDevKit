@@ -29,6 +29,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
     public var timestampSuffixIconURL: String?
     public var timestampIconSize: CGFloat?
     public var timestampIconSpacing: CGFloat?
+    public var contentFontScale: CGFloat?
     public var textOpacityMultiplier: Float?
     public var prefixGlyphColor: SIMD4<Float>?
     public var prefixGlyphCount: Int?
@@ -49,6 +50,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         timestampSuffixIconURL: String? = nil,
         timestampIconSize: CGFloat? = nil,
         timestampIconSpacing: CGFloat? = nil,
+        contentFontScale: CGFloat? = nil,
         textOpacityMultiplier: Float? = nil,
         prefixGlyphColor: SIMD4<Float>? = nil,
         prefixGlyphCount: Int? = nil
@@ -68,6 +70,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         self.timestampSuffixIconURL = timestampSuffixIconURL
         self.timestampIconSize = timestampIconSize
         self.timestampIconSpacing = timestampIconSpacing
+        self.contentFontScale = contentFontScale
         self.textOpacityMultiplier = textOpacityMultiplier
         self.prefixGlyphColor = prefixGlyphColor
         self.prefixGlyphCount = prefixGlyphCount

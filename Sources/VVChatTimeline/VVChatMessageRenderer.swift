@@ -119,6 +119,7 @@ public final class VVChatMessageRenderer {
         let revision: Int
         let widthKey: Int
         let isDraft: Bool
+        let contentScaleKey: Int
     }
 
     private struct HeaderRender {
@@ -126,6 +127,8 @@ public final class VVChatMessageRenderer {
         let height: CGFloat
         let imageURLs: [String]
     }
+
+    private typealias ContentResources = (layoutEngine: MarkdownLayoutEngine, pipeline: VVMarkdownRenderPipeline)
 
     private let parser = MarkdownParser()
     private var finalLayoutEngine: MarkdownLayoutEngine
@@ -138,6 +141,8 @@ public final class VVChatMessageRenderer {
     private var timestampPipeline: VVMarkdownRenderPipeline
     private var loadingLayoutEngine: MarkdownLayoutEngine
     private var loadingPipeline: VVMarkdownRenderPipeline
+    private var scaledFinalResources: [Int: ContentResources] = [:]
+    private var scaledDraftResources: [Int: ContentResources] = [:]
     private var cache: LRUCache<CacheKey, VVChatRenderedMessage>
     private var contentWidth: CGFloat
     private var style: VVChatTimelineStyle
@@ -183,6 +188,8 @@ public final class VVChatMessageRenderer {
         timestampPipeline = VVMarkdownRenderPipeline(theme: timestampTheme, layoutEngine: timestampLayoutEngine)
         loadingLayoutEngine = MarkdownLayoutEngine(baseFont: style.loadingIndicatorFont, theme: loadingTheme, contentWidth: contentWidth)
         loadingPipeline = VVMarkdownRenderPipeline(theme: loadingTheme, layoutEngine: loadingLayoutEngine)
+        scaledFinalResources.removeAll(keepingCapacity: true)
+        scaledDraftResources.removeAll(keepingCapacity: true)
         cache.updateLimit(style.renderedCacheLimit)
         cache.removeAll()
     }
@@ -198,6 +205,8 @@ public final class VVChatMessageRenderer {
         headerLayoutEngine.updateContentWidth(width)
         timestampLayoutEngine.updateContentWidth(width)
         loadingLayoutEngine.updateContentWidth(width)
+        scaledFinalResources.removeAll(keepingCapacity: true)
+        scaledDraftResources.removeAll(keepingCapacity: true)
         cache.removeAll()
     }
 
@@ -232,13 +241,21 @@ public final class VVChatMessageRenderer {
         let messageContentWidth = max(0, maxContentWidth)
         let widthKey = Self.widthKey(for: messageContentWidth)
         let isDraft = message.state == .draft
-        let key = CacheKey(id: message.id, revision: message.revision, widthKey: widthKey, isDraft: isDraft)
+        let contentScale = normalizedContentScale(presentation?.contentFontScale)
+        let contentScaleKey = Self.contentScaleKey(for: contentScale)
+        let key = CacheKey(
+            id: message.id,
+            revision: message.revision,
+            widthKey: widthKey,
+            isDraft: isDraft,
+            contentScaleKey: contentScaleKey
+        )
         if let cached = cache.value(for: key) {
             return cached
         }
 
         let document = isDraft ? makeStreamingDocument(text: message.content) : parser.parse(message.content)
-        let (layoutEngine, pipeline) = isDraft ? (draftLayoutEngine, draftPipeline) : (finalLayoutEngine, finalPipeline)
+        let (layoutEngine, pipeline) = contentResources(isDraft: isDraft, scale: contentScale)
 
         layoutEngine.updateImageSizeProvider { [weak self] url in
             self?.imageSizes[url]
@@ -432,7 +449,8 @@ public final class VVChatMessageRenderer {
             let footerVisualTextHeight = max(1, footerBounds?.height ?? footerTextHeight)
             let footerOffsetX: CGFloat
             if message.role == .user {
-                footerOffsetX = max(0, metaWidth - footerRowWidth)
+                let footerRowContainerWidth = usesBubble ? bubbleWidth : metaWidth
+                footerOffsetX = max(0, footerRowContainerWidth - footerRowWidth)
             } else {
                 footerOffsetX = 0
             }
@@ -730,6 +748,59 @@ public final class VVChatMessageRenderer {
         let line = CTLineCreateWithAttributedString(attributed)
         let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         return ceil(width + 2)
+    }
+
+    private static func contentScaleKey(for scale: CGFloat) -> Int {
+        Int((scale * 100).rounded())
+    }
+
+    private func normalizedContentScale(_ requested: CGFloat?) -> CGFloat {
+        guard let requested, requested.isFinite else { return 1 }
+        return max(0.72, min(1.6, requested))
+    }
+
+    private func contentResources(isDraft: Bool, scale: CGFloat) -> ContentResources {
+        let normalizedScale = normalizedContentScale(scale)
+        let scaleKey = Self.contentScaleKey(for: normalizedScale)
+        if scaleKey == Self.contentScaleKey(for: 1) {
+            return isDraft ? (draftLayoutEngine, draftPipeline) : (finalLayoutEngine, finalPipeline)
+        }
+
+        if isDraft {
+            if let cached = scaledDraftResources[scaleKey] {
+                return cached
+            }
+            let created = makeScaledContentResources(
+                baseFont: style.draftFont,
+                theme: style.draftTheme,
+                scale: normalizedScale
+            )
+            scaledDraftResources[scaleKey] = created
+            return created
+        }
+
+        if let cached = scaledFinalResources[scaleKey] {
+            return cached
+        }
+        let created = makeScaledContentResources(
+            baseFont: style.baseFont,
+            theme: style.theme,
+            scale: normalizedScale
+        )
+        scaledFinalResources[scaleKey] = created
+        return created
+    }
+
+    private func makeScaledContentResources(
+        baseFont: VVFont,
+        theme: MarkdownTheme,
+        scale: CGFloat
+    ) -> ContentResources {
+        let scaledSize = max(8, baseFont.pointSize * scale)
+        let scaledFont = CTFontCreateCopyWithAttributes(baseFont, scaledSize, nil, nil) as VVFont
+        let layoutEngine = MarkdownLayoutEngine(baseFont: scaledFont, theme: theme, contentWidth: contentWidth)
+        let pipeline = VVMarkdownRenderPipeline(theme: theme, layoutEngine: layoutEngine)
+        return (layoutEngine, pipeline)
     }
 
     private func timestampCoreLabel(for message: VVChatMessage) -> String {
