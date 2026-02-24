@@ -208,7 +208,7 @@ public final class MetalTextView: MTKView {
     public var foldPlaceholderColor: NSColor = NSColor.secondaryLabelColor {
         didSet { scheduleRedraw() }
     }
-    public var foldPlaceholder: String = "⋯" {
+    public var foldPlaceholder: String = "..." {
         didSet { scheduleRedraw() }
     }
 
@@ -2457,7 +2457,7 @@ public final class MetalTextView: MTKView {
             }
 
             if foldedRangeByStartLine[lineIndex] != nil {
-                let placeholder = resolvedFoldPlaceholder()
+                let placeholder = foldPlaceholderText(forLine: lineIndex)
                 let lineLength = lineUTF16Length(lineIndex)
                 let endX = textInsets.left + layoutEngine.xPosition(forCharacterOffset: lineLength, in: layout)
                 let spaceWidth = glyphAdvance(for: Character(" "), fontSize: currentFont.pointSize)
@@ -2601,6 +2601,27 @@ public final class MetalTextView: MTKView {
             return foldPlaceholder
         }
         return "..."
+    }
+
+    private func foldPlaceholderText(forLine lineIndex: Int) -> String {
+        let body = resolvedFoldPlaceholder()
+        guard lineIndex >= 0 && lineIndex < lines.count else {
+            return "{ \(body) }"
+        }
+
+        let trimmed = lines[lineIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix("{") {
+            // Common brace-style blocks: `if ... {` => `if ... { ... }`
+            return "\(body) }"
+        }
+        if trimmed.hasSuffix("[") {
+            return "\(body) ]"
+        }
+        if trimmed.hasSuffix("(") {
+            return "\(body) )"
+        }
+
+        return "{ \(body) }"
     }
 
     private func placeholderGlyphsAvailable(_ text: String) -> Bool {
