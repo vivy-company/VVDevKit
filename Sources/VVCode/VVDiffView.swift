@@ -1041,16 +1041,15 @@ private final class VVDiffRenderer {
         }
 
         // Stat badges
-        let badgeY = baselineY - font.pointSize * 0.7
-        let badgeH = font.pointSize + 4
-        let badgeFontSize = font.pointSize - 1
+        let badgeFontSize = max(10, font.pointSize - 1)
+        let badgeH = max(14, badgeFontSize + 6)
+        let badgeY = y + (height - badgeH) * 0.5
 
         if section.addedCount > 0 {
             curX = buildBadge(
                 text: "+\(section.addedCount)",
                 color: addedMarkerColor,
                 x: curX, badgeY: badgeY, badgeH: badgeH, fontSize: badgeFontSize,
-                baselineY: baselineY,
                 builder: &builder
             )
             curX += 6
@@ -1061,7 +1060,6 @@ private final class VVDiffRenderer {
                 text: "-\(section.deletedCount)",
                 color: deletedMarkerColor,
                 x: curX, badgeY: badgeY, badgeH: badgeH, fontSize: badgeFontSize,
-                baselineY: baselineY,
                 builder: &builder
             )
             curX += 6
@@ -1080,9 +1078,10 @@ private final class VVDiffRenderer {
         let originY = centerY - iconHeight * 0.5
         let frame = CGRect(x: x, y: originY, width: iconWidth, height: iconHeight)
 
-        let borderColor = gutterTextColor
-        let fillColor = withAlpha(gutterTextColor, 0.10)
-        let line = max(1, floor(iconHeight * 0.11))
+        let borderColor = withAlpha(textColor, 0.9)
+        let foldColor = withAlpha(textColor, 0.58)
+        let fillColor = withAlpha(textColor, 0.12)
+        let line = max(1, floor(iconHeight * 0.13))
 
         builder.add(kind: .quad(VVQuadPrimitive(frame: frame, color: fillColor, cornerRadius: 2)))
         builder.add(kind: .quad(VVQuadPrimitive(
@@ -1105,7 +1104,7 @@ private final class VVDiffRenderer {
         let foldSize = max(2, iconWidth * 0.3)
         builder.add(kind: .quad(VVQuadPrimitive(
             frame: CGRect(x: frame.maxX - foldSize, y: frame.minY, width: foldSize, height: foldSize),
-            color: withAlpha(borderColor, 0.35)
+            color: foldColor
         )))
 
         return iconWidth
@@ -1198,7 +1197,6 @@ private final class VVDiffRenderer {
         text: String,
         color: SIMD4<Float>,
         x: CGFloat, badgeY: CGFloat, badgeH: CGFloat, fontSize: CGFloat,
-        baselineY: CGFloat,
         builder: inout VVSceneBuilder
     ) -> CGFloat {
         let glyphs = layoutEngine.layoutTextGlyphs(text, variant: .monospace, at: .zero, color: color)
@@ -1210,7 +1208,9 @@ private final class VVDiffRenderer {
             cornerRadius: 5
         )
         builder.add(kind: .quad(badgeBg))
-        addTextGlyphs(glyphs, offsetX: x + 6, baselineY: baselineY, fontSize: fontSize, builder: &builder)
+        let textX = x + max(0, (badgeWidth - textWidth) * 0.5)
+        let textBaselineY = badgeY + (badgeH + fontSize) * 0.5 - fontSize * 0.16
+        addTextGlyphs(glyphs, offsetX: textX, baselineY: textBaselineY, fontSize: fontSize, builder: &builder)
         return x + badgeWidth
     }
 
