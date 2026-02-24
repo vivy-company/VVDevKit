@@ -36,6 +36,13 @@ public protocol VVChatTimelineSelectionDelegate: AnyObject {
     func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags)
     func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDraggedTo point: CGPoint, event: NSEvent)
     func chatTimelineMetalViewMouseUp(_ view: VVChatTimelineMetalView)
+    func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseMovedTo point: CGPoint)
+    func chatTimelineMetalViewMouseExited(_ view: VVChatTimelineMetalView)
+}
+
+public extension VVChatTimelineSelectionDelegate {
+    func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseMovedTo point: CGPoint) {}
+    func chatTimelineMetalViewMouseExited(_ view: VVChatTimelineMetalView) {}
 }
 
 public final class VVChatTimelineMetalView: MTKView {
@@ -48,6 +55,7 @@ public final class VVChatTimelineMetalView: MTKView {
     private var baseFont: VVFont = .systemFont(ofSize: 14)
     private var baseFontAscent: CGFloat = 0
     private var baseFontDescent: CGFloat = 0
+    private var trackingAreaRef: NSTrackingArea?
 
     public override var isFlipped: Bool { true }
     public override var isOpaque: Bool { false }
@@ -68,8 +76,35 @@ public final class VVChatTimelineMetalView: MTKView {
         selectionDelegate?.chatTimelineMetalViewMouseUp(self)
     }
 
+    public override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        selectionDelegate?.chatTimelineMetalView(self, mouseMovedTo: point)
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        selectionDelegate?.chatTimelineMetalViewMouseExited(self)
+    }
+
     public override func resetCursorRects() {
         addCursorRect(bounds, cursor: .iBeam)
+    }
+
+    public override func updateTrackingAreas() {
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+
+        let options: NSTrackingArea.Options = [
+            .mouseMoved,
+            .mouseEnteredAndExited,
+            .activeInActiveApp,
+            .inVisibleRect
+        ]
+        let tracking = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
+        addTrackingArea(tracking)
+        trackingAreaRef = tracking
+
+        super.updateTrackingAreas()
     }
 
     private var metalContext: VVMetalContext?

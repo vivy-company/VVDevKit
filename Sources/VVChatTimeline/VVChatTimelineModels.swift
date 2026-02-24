@@ -19,6 +19,10 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
     public var showsTimestamp: Bool?
     public var timestampPrefix: String?
     public var timestampSuffix: String?
+    public var timestampPrefixIconURL: String?
+    public var timestampSuffixIconURL: String?
+    public var timestampIconSize: CGFloat?
+    public var timestampIconSpacing: CGFloat?
     public var textOpacityMultiplier: Float?
     public var prefixGlyphColor: SIMD4<Float>?
     public var prefixGlyphCount: Int?
@@ -31,6 +35,10 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         showsTimestamp: Bool? = nil,
         timestampPrefix: String? = nil,
         timestampSuffix: String? = nil,
+        timestampPrefixIconURL: String? = nil,
+        timestampSuffixIconURL: String? = nil,
+        timestampIconSize: CGFloat? = nil,
+        timestampIconSpacing: CGFloat? = nil,
         textOpacityMultiplier: Float? = nil,
         prefixGlyphColor: SIMD4<Float>? = nil,
         prefixGlyphCount: Int? = nil
@@ -42,6 +50,10 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         self.showsTimestamp = showsTimestamp
         self.timestampPrefix = timestampPrefix
         self.timestampSuffix = timestampSuffix
+        self.timestampPrefixIconURL = timestampPrefixIconURL
+        self.timestampSuffixIconURL = timestampSuffixIconURL
+        self.timestampIconSize = timestampIconSize
+        self.timestampIconSpacing = timestampIconSpacing
         self.textOpacityMultiplier = textOpacityMultiplier
         self.prefixGlyphColor = prefixGlyphColor
         self.prefixGlyphCount = prefixGlyphCount

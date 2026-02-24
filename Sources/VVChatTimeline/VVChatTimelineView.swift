@@ -47,6 +47,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private let selectionColor: SIMD4<Float> = .blue.withOpacity(0.4)
     public var onStateChange: ((VVChatTimelineState) -> Void)?
     public var onUserMessageCopyAction: ((String) -> Void)?
+    public var onUserMessageCopyHoverChange: ((String?) -> Void)?
+    private var hoveredFooterActionMessageID: String?
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -504,6 +506,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
 extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags) {
+        updateFooterActionHover(at: point)
         if handleFooterActionTap(at: point) {
             return
         }
@@ -512,6 +515,7 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     }
 
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDraggedTo point: CGPoint, event: NSEvent) {
+        updateFooterActionHover(at: point)
         selectionController.handleMouseDragged(to: point, hitTester: self)
         metalView.setNeedsDisplay(metalView.bounds)
     }
@@ -519,37 +523,53 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     public func chatTimelineMetalViewMouseUp(_ view: VVChatTimelineMetalView) {
         selectionController.handleMouseUp()
     }
+
+    public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseMovedTo point: CGPoint) {
+        updateFooterActionHover(at: point)
+    }
+
+    public func chatTimelineMetalViewMouseExited(_ view: VVChatTimelineMetalView) {
+        updateFooterActionHover(at: nil)
+    }
 }
 
 private extension VVChatTimelineView {
     func handleFooterActionTap(at point: CGPoint) -> Bool {
-        guard let controller else { return false }
+        guard let messageID = footerActionMessageID(at: point) else { return false }
+        onUserMessageCopyAction?(messageID)
+        return true
+    }
 
+    func updateFooterActionHover(at point: CGPoint?) {
+        let hoveredID = point.flatMap { footerActionMessageID(at: $0) }
+        guard hoveredID != hoveredFooterActionMessageID else { return }
+        hoveredFooterActionMessageID = hoveredID
+        onUserMessageCopyHoverChange?(hoveredID)
+    }
+
+    func footerActionMessageID(at point: CGPoint) -> String? {
+        guard let controller else { return nil }
         let docPoint = viewPointToDocumentPoint(point)
+
         for (index, layout) in controller.layouts.enumerated() {
             if docPoint.y < layout.frame.minY || docPoint.y > layout.frame.maxY {
                 continue
             }
             guard index < controller.messages.count else { continue }
-
             let message = controller.messages[index]
             guard message.role == .user else { continue }
             guard let rendered = controller.renderedMessage(for: layout.id),
-                  let actionFrame = rendered.footerTrailingActionFrame else {
-                continue
-            }
+                  let actionFrame = rendered.footerTrailingActionFrame else { continue }
 
             let frameInDocument = actionFrame.offsetBy(
                 dx: layout.frame.origin.x + layout.contentOffset.x,
                 dy: layout.frame.origin.y + layout.contentOffset.y
             )
             if frameInDocument.contains(docPoint) {
-                onUserMessageCopyAction?(message.id)
-                return true
+                return message.id
             }
         }
-
-        return false
+        return nil
     }
 }
 

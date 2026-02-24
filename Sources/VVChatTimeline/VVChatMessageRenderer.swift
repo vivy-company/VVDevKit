@@ -273,25 +273,60 @@ public final class VVChatMessageRenderer {
         } else {
             headerIconFootprint = 0
         }
-        let footerText: String
         let footerMetaFont: VVFont
-        let footerSuffixText: String?
+        let footerText: String
+        let footerSuffixTextForAction: String?
+        let footerPrefixIconURL: String?
+        let footerSuffixIconURL: String?
+        let footerIconSize: CGFloat
+        let footerIconSpacing: CGFloat
+
         if isDraft && message.role == .assistant {
-            footerText = style.loadingIndicatorText
             footerMetaFont = style.loadingIndicatorFont
-            footerSuffixText = nil
+            footerText = style.loadingIndicatorText
+            footerSuffixTextForAction = nil
+            footerPrefixIconURL = nil
+            footerSuffixIconURL = nil
+            footerIconSize = 0
+            footerIconSpacing = 0
         } else if presentation?.showsTimestamp ?? style.showsTimestamp(for: message.role) {
-            footerText = timestampLabel(for: message, presentation: presentation)
             footerMetaFont = style.timestampFont
-            footerSuffixText = presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role)
+            footerPrefixIconURL = normalizedAssetURL(presentation?.timestampPrefixIconURL)
+            footerSuffixIconURL = normalizedAssetURL(presentation?.timestampSuffixIconURL)
+            let hasPrefixIcon = footerPrefixIconURL != nil
+            let hasSuffixIcon = footerSuffixIconURL != nil
+            let prefixText = hasPrefixIcon ? "" : (presentation?.timestampPrefix ?? "")
+            let suffixText = hasSuffixIcon ? "" : (presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role))
+            footerText = prefixText + timestampCoreLabel(for: message) + suffixText
+            footerSuffixTextForAction = hasSuffixIcon ? nil : suffixText
+            footerIconSize = max(10, presentation?.timestampIconSize ?? ceil(footerMetaFont.pointSize))
+            footerIconSpacing = max(0, presentation?.timestampIconSpacing ?? 5)
         } else {
-            footerText = ""
             footerMetaFont = style.timestampFont
-            footerSuffixText = nil
+            footerText = ""
+            footerSuffixTextForAction = nil
+            footerPrefixIconURL = nil
+            footerSuffixIconURL = nil
+            footerIconSize = 0
+            footerIconSpacing = 0
+        }
+
+        let footerTextWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
+        let hasFooterPrefixIcon = footerPrefixIconURL != nil
+        let hasFooterSuffixIcon = footerSuffixIconURL != nil
+        let hasFooterText = footerTextWidth > 0
+        let prefixIconFootprint = hasFooterPrefixIcon ? (footerIconSize + (hasFooterText ? footerIconSpacing : 0)) : 0
+        let suffixIconFootprint = hasFooterSuffixIcon ? ((hasFooterText ? footerIconSpacing : 0) + footerIconSize) : 0
+        let footerRowWidth = footerTextWidth + prefixIconFootprint + suffixIconFootprint
+        let footerRequiredWidth = footerRowWidth
+        if let footerPrefixIconURL {
+            imageURLs.insert(footerPrefixIconURL)
+        }
+        if let footerSuffixIconURL {
+            imageURLs.insert(footerSuffixIconURL)
         }
 
         let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint)
-        let footerRequiredWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
         let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
         let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
         let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
@@ -305,17 +340,22 @@ public final class VVChatMessageRenderer {
         }
 
         let footerRender: (layout: MarkdownLayout, scene: VVScene)?
+        let footerLayoutEngineForBounds: MarkdownLayoutEngine
         if isDraft && message.role == .assistant {
             footerRender = renderMeta(text: footerText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
+            footerLayoutEngineForBounds = loadingLayoutEngine
         } else if footerText.isEmpty {
             footerRender = nil
+            footerLayoutEngineForBounds = timestampLayoutEngine
         } else {
             footerRender = renderMeta(text: footerText, layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
+            footerLayoutEngineForBounds = timestampLayoutEngine
         }
 
         let headerHeight = headerRender?.height ?? 0
-        let contentHeight = layout.totalHeight
-        let footerHeight = footerRender?.layout.totalHeight ?? 0
+        let contentHeight = max(1, contentBounds?.height ?? layout.totalHeight)
+        let footerTextHeight = footerRender?.layout.totalHeight ?? 0
+        let footerHeight = max(footerTextHeight, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
         let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
         let footerBlockHeight = footerHeight > 0 ? style.footerSpacing + footerHeight : 0
         let contentBlockHeight = usesBubble
@@ -363,35 +403,84 @@ public final class VVChatMessageRenderer {
         }
 
         currentY += contentBlockHeight
-        if let footerRender, footerHeight > 0 {
+        if footerHeight > 0 {
             currentY += style.footerSpacing
-            let footerBounds = sceneBounds(for: footerRender.scene, layoutEngine: timestampLayoutEngine)
-            let footerWidth = max(0, footerBounds?.width ?? 0)
+            let footerBounds: CGRect?
+            if let footerRender {
+                footerBounds = sceneBounds(for: footerRender.scene, layoutEngine: footerLayoutEngineForBounds)
+            } else {
+                footerBounds = nil
+            }
             let footerMinX = footerBounds?.minX ?? 0
             let footerMinY = footerBounds?.minY ?? 0
-            let footerVisualHeight = max(1, footerBounds?.height ?? footerHeight)
+            let footerVisualTextHeight = max(1, footerBounds?.height ?? footerTextHeight)
             let footerOffsetX: CGFloat
             if message.role == .user {
-                footerOffsetX = max(0, metaWidth - footerWidth)
+                footerOffsetX = max(0, metaWidth - footerRowWidth)
             } else {
                 footerOffsetX = 0
             }
 
-            if message.role == .user,
-               let suffix = footerSuffixText?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !suffix.isEmpty {
-                let iconWidth = max(10, Self.singleLineMetaWidth(suffix, font: footerMetaFont))
-                let hitPaddingX: CGFloat = 6
-                let hitPaddingY: CGFloat = 3
-                let actionWidth = max(18, iconWidth + hitPaddingX * 2)
-                let actionHeight = max(16, footerVisualHeight + hitPaddingY * 2)
-                let actionX = footerOffsetX + footerMinX + max(0, footerWidth - iconWidth) - hitPaddingX
-                let actionY = currentY + footerMinY - hitPaddingY
-                footerTrailingActionFrame = CGRect(x: actionX, y: actionY, width: actionWidth, height: actionHeight)
+            var rowCursorX = footerOffsetX
+            let iconY = currentY + max(0, (footerHeight - footerIconSize) * 0.5)
+
+            if let footerPrefixIconURL {
+                let icon = VVImagePrimitive(
+                    url: footerPrefixIconURL,
+                    frame: CGRect(x: rowCursorX, y: iconY, width: footerIconSize, height: footerIconSize),
+                    cornerRadius: 0
+                )
+                builder.add(kind: .image(icon), zIndex: 0)
+                rowCursorX += footerIconSize
+                if hasFooterText {
+                    rowCursorX += footerIconSpacing
+                }
             }
 
-            builder.withOffset(CGPoint(x: footerOffsetX, y: currentY)) { builder in
-                builder.add(node: VVNode.fromScene(footerRender.scene))
+            if let footerRender, hasFooterText {
+                let textOffsetY = currentY + max(0, (footerHeight - footerVisualTextHeight) * 0.5) - footerMinY
+                builder.withOffset(CGPoint(x: rowCursorX - footerMinX, y: textOffsetY)) { builder in
+                    builder.add(node: VVNode.fromScene(footerRender.scene))
+                }
+                rowCursorX += footerTextWidth
+            }
+
+            if let footerSuffixIconURL {
+                if hasFooterText {
+                    rowCursorX += footerIconSpacing
+                }
+                let iconX = rowCursorX
+                let icon = VVImagePrimitive(
+                    url: footerSuffixIconURL,
+                    frame: CGRect(x: iconX, y: iconY, width: footerIconSize, height: footerIconSize),
+                    cornerRadius: 0
+                )
+                builder.add(kind: .image(icon), zIndex: 0)
+
+                if message.role == .user {
+                    let hitPaddingX: CGFloat = 6
+                    let hitPaddingY: CGFloat = 3
+                    let actionWidth = max(20, footerIconSize + hitPaddingX * 2)
+                    let actionHeight = max(18, footerIconSize + hitPaddingY * 2)
+                    footerTrailingActionFrame = CGRect(
+                        x: iconX - hitPaddingX,
+                        y: iconY - hitPaddingY,
+                        width: actionWidth,
+                        height: actionHeight
+                    )
+                }
+            } else if message.role == .user,
+                      let suffix = footerSuffixTextForAction?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !suffix.isEmpty {
+                let suffixWidth = max(10, Self.singleLineMetaWidth(suffix, font: footerMetaFont))
+                let hitPaddingX: CGFloat = 6
+                let hitPaddingY: CGFloat = 3
+                let actionWidth = max(18, suffixWidth + hitPaddingX * 2)
+                let actionHeight = max(16, footerVisualTextHeight + hitPaddingY * 2)
+                let textOffsetY = currentY + max(0, (footerHeight - footerVisualTextHeight) * 0.5)
+                let actionX = footerOffsetX + max(0, footerRowWidth - suffixWidth) - hitPaddingX
+                let actionY = textOffsetY + footerMinY - hitPaddingY
+                footerTrailingActionFrame = CGRect(x: actionX, y: actionY, width: actionWidth, height: actionHeight)
             }
         }
 
@@ -602,11 +691,17 @@ public final class VVChatMessageRenderer {
         return ceil(width + 2)
     }
 
-    private func timestampLabel(for message: VVChatMessage, presentation: VVChatMessagePresentation?) -> String {
+    private func timestampCoreLabel(for message: VVChatMessage) -> String {
         let timestamp = message.timestamp ?? Date()
-        let prefix = presentation?.timestampPrefix ?? ""
-        let suffix = presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role)
-        return prefix + Self.timeFormatter.string(from: timestamp) + suffix
+        return Self.timeFormatter.string(from: timestamp)
+    }
+
+    private func normalizedAssetURL(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     private static func makeMetaTheme(base: MarkdownTheme, textColor: SIMD4<Float>) -> MarkdownTheme {
