@@ -49,6 +49,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public var onStateChange: ((VVChatTimelineState) -> Void)?
     public var onUserMessageCopyAction: ((String) -> Void)?
     public var onUserMessageCopyHoverChange: ((String?) -> Void)?
+    public var onEntryActivate: ((String) -> Void)?
     private var hoveredFooterActionMessageID: String?
     private var jumpAnimationToken = UUID()
 
@@ -577,6 +578,10 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
         if handleFooterActionTap(at: point) {
             return
         }
+        if clickCount >= 2, let entryID = timelineEntryID(at: point) {
+            onEntryActivate?(entryID)
+            return
+        }
         selectionController.handleMouseDown(at: point, clickCount: clickCount, modifiers: modifiers, hitTester: self)
         metalView.setNeedsDisplay(metalView.bounds)
     }
@@ -634,6 +639,17 @@ private extension VVChatTimelineView {
             )
             if frameInDocument.contains(docPoint) {
                 return message.id
+            }
+        }
+        return nil
+    }
+
+    func timelineEntryID(at point: CGPoint) -> String? {
+        guard let controller else { return nil }
+        let docPoint = viewPointToDocumentPoint(point)
+        for layout in controller.layouts {
+            if layout.frame.contains(docPoint) {
+                return layout.id
             }
         }
         return nil
