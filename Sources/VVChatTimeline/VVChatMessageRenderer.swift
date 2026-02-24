@@ -430,16 +430,24 @@ public final class VVChatMessageRenderer {
             width: textWidth
         )
         let textHeight = textRender.layout.totalHeight
+        let textBounds = sceneBounds(for: textRender.scene, layoutEngine: headerLayoutEngine)
+        let textMinY = textBounds?.minY ?? 0
+        let textVisualHeight = max(1, textBounds?.height ?? textHeight)
+        let height = max(textVisualHeight, iconSize)
+        let textOffsetY = max(0, (height - textVisualHeight) * 0.5 - textMinY)
 
         guard hasIcon, let iconURL else {
+            var builder = VVSceneBuilder()
+            builder.withOffset(CGPoint(x: 0, y: textOffsetY)) { builder in
+                builder.add(node: VVNode.fromScene(textRender.scene))
+            }
             return HeaderRender(
-                scene: textRender.scene,
-                height: textHeight,
+                scene: builder.scene,
+                height: height,
                 imageURLs: []
             )
         }
 
-        let height = max(textHeight, iconSize)
         let iconY = max(0, (height - iconSize) * 0.5)
 
         var builder = VVSceneBuilder()
@@ -449,7 +457,7 @@ public final class VVChatMessageRenderer {
             cornerRadius: 2
         )
         builder.add(kind: .image(icon), zIndex: 0)
-        builder.withOffset(CGPoint(x: iconSize + iconSpacing, y: 0)) { builder in
+        builder.withOffset(CGPoint(x: iconSize + iconSpacing, y: textOffsetY)) { builder in
             builder.add(node: VVNode.fromScene(textRender.scene))
         }
 
