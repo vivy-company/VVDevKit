@@ -1018,7 +1018,13 @@ private final class VVDiffRenderer {
 
         let parts = pathParts(for: section.filePath)
         let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
-        var curX: CGFloat = 12
+        let iconX: CGFloat = 12
+        let iconWidth = buildFileHeaderIcon(
+            x: iconX,
+            centerY: y + height * 0.5,
+            builder: &builder
+        )
+        var curX: CGFloat = iconX + iconWidth + 8
 
         // Filename (semibold)
         let nameGlyphs = layoutEngine.layoutTextGlyphs(parts.fileName, variant: .semibold, at: .zero, color: textColor)
@@ -1061,6 +1067,48 @@ private final class VVDiffRenderer {
             curX += 6
         }
 
+    }
+
+    @discardableResult
+    private func buildFileHeaderIcon(
+        x: CGFloat,
+        centerY: CGFloat,
+        builder: inout VVSceneBuilder
+    ) -> CGFloat {
+        let iconHeight = min(max(font.pointSize * 0.95, 10), 15)
+        let iconWidth = iconHeight * 0.82
+        let originY = centerY - iconHeight * 0.5
+        let frame = CGRect(x: x, y: originY, width: iconWidth, height: iconHeight)
+
+        let borderColor = gutterTextColor
+        let fillColor = withAlpha(gutterTextColor, 0.10)
+        let line = max(1, floor(iconHeight * 0.11))
+
+        builder.add(kind: .quad(VVQuadPrimitive(frame: frame, color: fillColor, cornerRadius: 2)))
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: line),
+            color: borderColor
+        )))
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: frame.minX, y: frame.maxY - line, width: frame.width, height: line),
+            color: borderColor
+        )))
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: frame.minX, y: frame.minY, width: line, height: frame.height),
+            color: borderColor
+        )))
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: frame.maxX - line, y: frame.minY, width: line, height: frame.height),
+            color: borderColor
+        )))
+
+        let foldSize = max(2, iconWidth * 0.3)
+        builder.add(kind: .quad(VVQuadPrimitive(
+            frame: CGRect(x: frame.maxX - foldSize, y: frame.minY, width: foldSize, height: foldSize),
+            color: withAlpha(borderColor, 0.35)
+        )))
+
+        return iconWidth
     }
 
     private func buildSplitCell(
@@ -1383,6 +1431,7 @@ private final class VVDiffMetalView: NSView {
     private var configuration: VVConfiguration = .default
     private var language: VVLanguage?
     private var syntaxHighlightingEnabled: Bool = true
+    private var onFileHeaderActivate: ((String) -> Void)?
 
     private var cachedScene: VVScene?
     private var contentHeight: CGFloat = 0
@@ -1411,6 +1460,7 @@ private final class VVDiffMetalView: NSView {
     private let selectionController = VVTextSelectionController<DiffTextPosition>()
     private let selectionColor: SIMD4<Float> = .rgba(0.24, 0.40, 0.65, 0.55)
     private var rowGeometries: [RowGeometry] = []
+    private var filePathByHeaderRowID: [Int: String] = [:]
     private var rowGeometryCacheKey: RowGeometryCacheKey?
     private var rowGeometriesContentHeight: CGFloat = 0
     private var rowsSignature: Int = 0
@@ -1559,7 +1609,8 @@ private final class VVDiffMetalView: NSView {
         theme: VVTheme,
         configuration: VVConfiguration,
         language: VVLanguage?,
-        syntaxHighlightingEnabled: Bool
+        syntaxHighlightingEnabled: Bool,
+        onFileHeaderActivate: ((String) -> Void)?
     ) {
         let nextFastPlainMode = Self.shouldUseFastPlainMode(rows: rows)
         let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled
@@ -1591,6 +1642,7 @@ private final class VVDiffMetalView: NSView {
         self.configuration = configuration
         self.language = language
         self.syntaxHighlightingEnabled = effectiveSyntaxHighlightingEnabled
+        self.onFileHeaderActivate = onFileHeaderActivate
         rowsSignature = rowsChanged ? Self.computeRowsSignature(rows) : rowsSignature
         rowGeometryCacheKey = nil
 
@@ -1616,6 +1668,7 @@ private final class VVDiffMetalView: NSView {
 
         if rowsChanged || styleChanged {
             sections = makeSections(from: rows)
+            rebuildFileHeaderPathLookup()
             if style == .split {
                 splitRows = makeSplitRows(from: rows)
             } else {
@@ -1856,6 +1909,15 @@ private final class VVDiffMetalView: NSView {
                 }
                 y += rowH
             }
+        }
+    }
+
+    private func rebuildFileHeaderPathLookup() {
+        filePathByHeaderRowID.removeAll(keepingCapacity: true)
+        filePathByHeaderRowID.reserveCapacity(sections.count)
+        for section in sections {
+            guard let header = section.headerRow else { continue }
+            filePathByHeaderRowID[header.id] = section.filePath
         }
     }
 
@@ -2421,6 +2483,13 @@ extension VVDiffMetalView: MTKViewDelegate {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+
+        if event.clickCount == 1,
+           let filePath = fileHeaderPath(at: point) {
+            onFileHeaderActivate?(filePath)
+            return
+        }
+
         selectionController.handleMouseDown(
             at: point,
             clickCount: event.clickCount,
@@ -2439,6 +2508,18 @@ extension VVDiffMetalView: MTKViewDelegate {
 
     override func mouseUp(with event: NSEvent) {
         selectionController.handleMouseUp()
+    }
+
+    private func fileHeaderPath(at point: CGPoint) -> String? {
+        let docPoint = viewPointToDocumentPoint(point)
+        let row: RowGeometry?
+        if renderStyle == .split {
+            row = findRow(at: docPoint.y, x: docPoint.x)
+        } else {
+            row = findRow(at: docPoint.y)
+        }
+        guard let row else { return nil }
+        return filePathByHeaderRowID[row.rowID]
     }
 
     // MARK: - Keyboard Events
@@ -2626,6 +2707,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
     let configuration: VVConfiguration
     let renderStyle: VVDiffRenderStyle
     let syntaxHighlightingEnabled: Bool
+    let onFileHeaderActivate: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -2655,7 +2737,8 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
             theme: theme,
             configuration: configuration,
             language: language,
-            syntaxHighlightingEnabled: syntaxHighlightingEnabled
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+            onFileHeaderActivate: onFileHeaderActivate
         )
         return view
     }
@@ -2668,7 +2751,8 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
             theme: theme,
             configuration: configuration,
             language: language,
-            syntaxHighlightingEnabled: syntaxHighlightingEnabled
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+            onFileHeaderActivate: onFileHeaderActivate
         )
     }
 }
@@ -2683,6 +2767,7 @@ public struct VVDiffView: View {
     private var configuration: VVConfiguration
     private var renderStyle: VVDiffRenderStyle
     private var syntaxHighlightingEnabled: Bool
+    private var onFileHeaderActivate: ((String) -> Void)?
 
     public init(unifiedDiff: String) {
         self.unifiedDiff = unifiedDiff
@@ -2691,6 +2776,7 @@ public struct VVDiffView: View {
         self.configuration = .default
         self.renderStyle = .unifiedTable
         self.syntaxHighlightingEnabled = true
+        self.onFileHeaderActivate = nil
     }
 
     public var body: some View {
@@ -2700,7 +2786,8 @@ public struct VVDiffView: View {
             theme: theme,
             configuration: configuration,
             renderStyle: renderStyle,
-            syntaxHighlightingEnabled: syntaxHighlightingEnabled
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+            onFileHeaderActivate: onFileHeaderActivate
         )
     }
 
@@ -2768,6 +2855,13 @@ extension VVDiffView {
     public func font(_ font: NSFont) -> VVDiffView {
         var view = self
         view.configuration = view.configuration.with(font: font)
+        return view
+    }
+
+    /// Called when a file header row is activated.
+    public func onFileHeaderActivate(_ handler: ((String) -> Void)?) -> VVDiffView {
+        var view = self
+        view.onFileHeaderActivate = handler
         return view
     }
 }
