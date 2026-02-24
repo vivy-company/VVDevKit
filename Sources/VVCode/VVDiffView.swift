@@ -329,13 +329,16 @@ private func parseDiffRows(unifiedDiff: String) -> [VVDiffRow] {
                 oldLine = header.oldStart
                 newLine = header.newStart
             }
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .hunkHeader,
-                    text: line
+            let compactHeader = compactHunkHeaderText(line)
+            if !compactHeader.isEmpty {
+                rows.append(
+                    VVDiffRow(
+                        id: rows.count,
+                        kind: .hunkHeader,
+                        text: compactHeader
+                    )
                 )
-            )
+            }
             continue
         }
 
@@ -618,6 +621,15 @@ private func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int)? 
     }
 
     return (oldStart: oldStart, newStart: newStart)
+}
+
+private func compactHunkHeaderText(_ line: String) -> String {
+    guard line.hasPrefix("@@") else { return line }
+    let searchStart = line.index(line.startIndex, offsetBy: 2)
+    guard let trailingRange = line.range(of: "@@", range: searchStart..<line.endIndex) else {
+        return ""
+    }
+    return line[trailingRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private func makeJoinedCodeBuffer(from rows: [VVDiffRow]) -> (text: String, rowRanges: [Int: NSRange]) {
