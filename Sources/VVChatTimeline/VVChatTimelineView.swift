@@ -558,7 +558,7 @@ private extension VVChatTimelineView {
             }
             guard index < controller.messages.count else { continue }
             let message = controller.messages[index]
-            guard message.role == .user else { continue }
+            guard message.role == .user || message.role == .assistant else { continue }
             guard let rendered = controller.renderedMessage(for: layout.id),
                   let actionFrame = rendered.footerTrailingActionFrame else { continue }
 

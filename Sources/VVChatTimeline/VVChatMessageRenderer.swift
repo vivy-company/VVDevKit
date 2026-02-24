@@ -306,10 +306,11 @@ public final class VVChatMessageRenderer {
             footerMetaFont = style.timestampFont
             footerText = ""
             footerSuffixTextForAction = nil
-            footerPrefixIconURL = nil
-            footerSuffixIconURL = nil
-            footerIconSize = 0
-            footerIconSpacing = 0
+            footerPrefixIconURL = normalizedAssetURL(presentation?.timestampPrefixIconURL)
+            footerSuffixIconURL = normalizedAssetURL(presentation?.timestampSuffixIconURL)
+            let hasFooterIconOnlyAction = footerPrefixIconURL != nil || footerSuffixIconURL != nil
+            footerIconSize = hasFooterIconOnlyAction ? max(10, presentation?.timestampIconSize ?? ceil(footerMetaFont.pointSize)) : 0
+            footerIconSpacing = hasFooterIconOnlyAction ? max(0, presentation?.timestampIconSpacing ?? 5) : 0
         }
 
         let footerTextWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
@@ -461,7 +462,7 @@ public final class VVChatMessageRenderer {
                 )
                 builder.add(kind: .image(icon), zIndex: 0)
 
-                if message.role == .user {
+                if message.role == .user || message.role == .assistant {
                     let hitPaddingX: CGFloat = 6
                     let hitPaddingY: CGFloat = 3
                     let actionWidth = max(20, footerIconSize + hitPaddingX * 2)
@@ -473,7 +474,7 @@ public final class VVChatMessageRenderer {
                         height: actionHeight
                     )
                 }
-            } else if message.role == .user,
+            } else if message.role == .user || message.role == .assistant,
                       let suffix = footerSuffixTextForAction?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !suffix.isEmpty {
                 let suffixWidth = max(10, Self.singleLineMetaWidth(suffix, font: footerMetaFont))
