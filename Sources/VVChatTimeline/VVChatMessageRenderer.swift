@@ -216,10 +216,15 @@ public final class VVChatMessageRenderer {
     public func renderedMessage(for message: VVChatMessage) -> VVChatRenderedMessage {
         let insets = style.insets(for: message.role)
         let presentation = message.presentation
+        let leadingIconURL = normalizedAssetURL(presentation?.leadingIconURL)
+        let hasLeadingIcon = leadingIconURL != nil
+        let leadingIconSize = hasLeadingIcon ? max(8, presentation?.leadingIconSize ?? style.headerIconSize) : 0
+        let leadingIconSpacing = hasLeadingIcon ? max(0, presentation?.leadingIconSpacing ?? style.headerIconSpacing) : 0
+        let leadingLaneWidth = hasLeadingIcon ? (leadingIconSize + leadingIconSpacing) : 0
         let bubbleStyle = presentation?.bubbleStyle ?? style.bubbleStyle(for: message.role)
         let usesBubble = bubbleStyle != nil
         let bubbleInsets = bubbleStyle?.insets ?? VVInsets()
-        let availableWidth = max(0, contentWidth - insets.left - insets.right)
+        let availableWidth = max(0, contentWidth - insets.left - insets.right - leadingLaneWidth)
         let maxBubbleWidth = bubbleStyle?.maxWidth ?? availableWidth
         let maxContentWidth = usesBubble ? min(availableWidth - bubbleInsets.left - bubbleInsets.right, maxBubbleWidth) : availableWidth
         let messageContentWidth = max(0, maxContentWidth)
@@ -364,7 +369,11 @@ public final class VVChatMessageRenderer {
             ? (bubbleInsets.top + contentHeight + bubbleInsets.bottom)
             : contentHeight
         let bubbleWidth = usesBubble ? (bubbleContentWidth + bubbleInsets.left + bubbleInsets.right) : 0
-        let messageHeight = headerBlockHeight + contentBlockHeight + footerBlockHeight
+        let contentStartY = headerBlockHeight
+        var messageHeight = headerBlockHeight + contentBlockHeight + footerBlockHeight
+        if hasLeadingIcon {
+            messageHeight = max(messageHeight, contentStartY + leadingIconSize)
+        }
 
         var builder = VVSceneBuilder()
         var footerTrailingActionFrame: CGRect?
@@ -489,7 +498,30 @@ public final class VVChatMessageRenderer {
             }
         }
 
-        let scene = builder.scene
+        var scene = builder.scene
+        if hasLeadingIcon, let leadingIconURL {
+            if !leadingIconURL.isEmpty {
+                imageURLs.insert(leadingIconURL)
+            }
+
+            var laneBuilder = VVSceneBuilder()
+            let icon = VVImagePrimitive(
+                url: leadingIconURL,
+                frame: CGRect(x: 0, y: contentStartY, width: leadingIconSize, height: leadingIconSize),
+                cornerRadius: 0
+            )
+            laneBuilder.add(kind: .image(icon), zIndex: 0)
+            laneBuilder.withOffset(CGPoint(x: leadingLaneWidth, y: 0)) { builder in
+                builder.add(node: VVNode.fromScene(scene))
+            }
+            scene = laneBuilder.scene
+            selectionContentOffset.x += leadingLaneWidth
+            if var actionFrame = footerTrailingActionFrame {
+                actionFrame.origin.x += leadingLaneWidth
+                footerTrailingActionFrame = actionFrame
+            }
+        }
+
         let messageBounds = sceneBounds(for: scene, layoutEngine: layoutEngine)
         let topOverflow = max(0, -(messageBounds?.minY ?? 0))
         let sceneMaxY = max(0, messageBounds?.maxY ?? messageHeight)

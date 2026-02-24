@@ -16,6 +16,9 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
     public var showsHeader: Bool?
     public var headerTitle: String?
     public var headerIconURL: String?
+    public var leadingIconURL: String?
+    public var leadingIconSize: CGFloat?
+    public var leadingIconSpacing: CGFloat?
     public var showsTimestamp: Bool?
     public var timestampPrefix: String?
     public var timestampSuffix: String?
@@ -32,6 +35,9 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         showsHeader: Bool? = nil,
         headerTitle: String? = nil,
         headerIconURL: String? = nil,
+        leadingIconURL: String? = nil,
+        leadingIconSize: CGFloat? = nil,
+        leadingIconSpacing: CGFloat? = nil,
         showsTimestamp: Bool? = nil,
         timestampPrefix: String? = nil,
         timestampSuffix: String? = nil,
@@ -47,6 +53,9 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         self.showsHeader = showsHeader
         self.headerTitle = headerTitle
         self.headerIconURL = headerIconURL
+        self.leadingIconURL = leadingIconURL
+        self.leadingIconSize = leadingIconSize
+        self.leadingIconSpacing = leadingIconSpacing
         self.showsTimestamp = showsTimestamp
         self.timestampPrefix = timestampPrefix
         self.timestampSuffix = timestampSuffix
