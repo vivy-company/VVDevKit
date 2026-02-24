@@ -203,6 +203,15 @@ public actor MarkdownCodeHighlighter {
             return HighlightedCodeBlock(code: code, language: language, tokens: defaultTokens(for: code))
         }
 
+        // Diff blocks should stay readable even when grammar loading/highlighting fails.
+        if resolvedLanguage == "diff" || resolvedLanguage == "patch" {
+            return HighlightedCodeBlock(
+                code: code,
+                language: language,
+                tokens: diffFallbackTokens(for: code)
+            )
+        }
+
         do {
             let highlighter = try await getOrCreateHighlighter(for: resolvedLanguage)
             _ = try await highlighter.parse(code)
@@ -311,6 +320,83 @@ public actor MarkdownCodeHighlighter {
         }
 
         return result
+    }
+
+    private func diffFallbackTokens(for code: String) -> [HighlightedCodeToken] {
+        guard !code.isEmpty else { return defaultTokens(for: code) }
+
+        let lineStrings = code.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var tokens: [HighlightedCodeToken] = []
+        tokens.reserveCapacity(lineStrings.count * 2)
+
+        let metadataColor = simdColor(from: theme.style(for: "comment").color)
+        let hunkColor = simdColor(from: theme.style(for: "type").color)
+        let addedColor = simdColor(from: theme.style(for: "string").color)
+        let deletedColor = simdColor(from: theme.style(for: "keyword").color)
+
+        var location = 0
+        for (index, line) in lineStrings.enumerated() {
+            let length = line.utf16.count
+            if length > 0 {
+                let range = NSRange(location: location, length: length)
+                tokens.append(
+                    HighlightedCodeToken(
+                        text: line,
+                        range: range,
+                        color: diffLineColor(
+                            line: line,
+                            metadataColor: metadataColor,
+                            hunkColor: hunkColor,
+                            addedColor: addedColor,
+                            deletedColor: deletedColor
+                        )
+                    )
+                )
+            }
+            location += length
+
+            if index < lineStrings.count - 1 {
+                tokens.append(
+                    HighlightedCodeToken(
+                        text: "\n",
+                        range: NSRange(location: location, length: 1),
+                        color: defaultColor
+                    )
+                )
+                location += 1
+            }
+        }
+
+        return tokens.isEmpty ? defaultTokens(for: code) : tokens
+    }
+
+    private func diffLineColor(
+        line: String,
+        metadataColor: SIMD4<Float>,
+        hunkColor: SIMD4<Float>,
+        addedColor: SIMD4<Float>,
+        deletedColor: SIMD4<Float>
+    ) -> SIMD4<Float> {
+        if line.hasPrefix("@@") {
+            return hunkColor
+        }
+        if line.hasPrefix("diff --git") ||
+            line.hasPrefix("index ") ||
+            line.hasPrefix("--- ") ||
+            line.hasPrefix("+++ ") ||
+            line.hasPrefix("rename from ") ||
+            line.hasPrefix("rename to ") ||
+            line.hasPrefix("deleted file mode ") ||
+            line.hasPrefix("new file mode ") {
+            return metadataColor
+        }
+        if line.hasPrefix("+") && !line.hasPrefix("+++") {
+            return addedColor
+        }
+        if line.hasPrefix("-") && !line.hasPrefix("---") {
+            return deletedColor
+        }
+        return defaultColor
     }
 
     private func simdColor(from color: VVColor) -> SIMD4<Float> {
