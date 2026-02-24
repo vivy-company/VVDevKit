@@ -2441,9 +2441,24 @@ public final class MetalTextView: MTKView {
             guard let layout = layoutForLine(lineIndex) else { continue }
 
             let baselineY = layout.yOffset + layout.baselineOffset
+            let foldedOpenerUTF16Offset = foldedTrailingOpenerUTF16Offset(forLine: lineIndex)
             let glyphs = layout.glyphs.compactMap { glyph -> VVTextGlyph? in
                 // For wrapped lines, glyph.position.y is the Y offset relative to the first visual line
-                makeTextGlyph(from: glyph, baselineY: baselineY + glyph.position.y)
+                let overrideColor: SIMD4<Float>?
+                if let foldedOpenerUTF16Offset {
+                    let glyphStart = glyph.characterIndex
+                    let glyphEnd = glyph.characterIndex + max(1, glyph.characterCount)
+                    overrideColor = (glyphStart <= foldedOpenerUTF16Offset && foldedOpenerUTF16Offset < glyphEnd)
+                        ? foldPlaceholderColor.simdColor
+                        : nil
+                } else {
+                    overrideColor = nil
+                }
+                return makeTextGlyph(
+                    from: glyph,
+                    baselineY: baselineY + glyph.position.y,
+                    overrideColor: overrideColor
+                )
             }
 
             if !glyphs.isEmpty {
@@ -2622,6 +2637,34 @@ public final class MetalTextView: MTKView {
         }
 
         return "{ \(body) }"
+    }
+
+    private func foldedTrailingOpenerUTF16Offset(forLine lineIndex: Int) -> Int? {
+        guard foldedRangeByStartLine[lineIndex] != nil else {
+            return nil
+        }
+        guard lineIndex >= 0 && lineIndex < lines.count else {
+            return nil
+        }
+
+        let line = lines[lineIndex]
+        var index = line.endIndex
+        while index > line.startIndex {
+            let previous = line.index(before: index)
+            let ch = line[previous]
+            if ch.isWhitespace {
+                index = previous
+                continue
+            }
+            guard ch == "{" || ch == "[" || ch == "(" else {
+                return nil
+            }
+            guard let utf16Index = previous.samePosition(in: line.utf16) else {
+                return nil
+            }
+            return line.utf16.distance(from: line.utf16.startIndex, to: utf16Index)
+        }
+        return nil
     }
 
     private func placeholderGlyphsAvailable(_ text: String) -> Bool {
@@ -3292,14 +3335,18 @@ public final class MetalTextView: MTKView {
         )
     }
 
-    private func makeTextGlyph(from glyph: LayoutGlyph, baselineY: CGFloat) -> VVTextGlyph? {
+    private func makeTextGlyph(
+        from glyph: LayoutGlyph,
+        baselineY: CGFloat,
+        overrideColor: SIMD4<Float>? = nil
+    ) -> VVTextGlyph? {
         let fontName = CTFontCopyPostScriptName(glyph.font) as String
         let size = glyphSize(for: glyph.glyphID, font: glyph.font)
         return VVTextGlyph(
             glyphID: UInt16(glyph.glyphID),
             position: CGPoint(x: textInsets.left + glyph.position.x, y: baselineY),
             size: size,
-            color: glyph.color,
+            color: overrideColor ?? glyph.color,
             fontVariant: .monospace,
             fontSize: currentFont.pointSize,
             fontName: fontName,
