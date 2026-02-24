@@ -1614,6 +1614,7 @@ private final class VVDiffMetalView: NSView {
     ) {
         let nextFastPlainMode = Self.shouldUseFastPlainMode(rows: rows)
         let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled
+        self.onFileHeaderActivate = onFileHeaderActivate
         let fastPlainModeChanged = fastPlainModeEnabled != nextFastPlainMode
         let rowsChanged = self.rows != rows
         let styleChanged = self.renderStyle != style
@@ -1642,7 +1643,6 @@ private final class VVDiffMetalView: NSView {
         self.configuration = configuration
         self.language = language
         self.syntaxHighlightingEnabled = effectiveSyntaxHighlightingEnabled
-        self.onFileHeaderActivate = onFileHeaderActivate
         rowsSignature = rowsChanged ? Self.computeRowsSignature(rows) : rowsSignature
         rowGeometryCacheKey = nil
 
