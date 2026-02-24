@@ -422,16 +422,35 @@ public final class VVMarkdownSelectionHelper {
         }
 
         var closestRunIndex = 0
-        var closestRunDistance = CGFloat.greatestFiniteMagnitude
+        var closestRunScore = CGFloat.greatestFiniteMagnitude
         var closestRunRect: CGRect?
         for (runIndex, run) in runs.enumerated() {
-            guard let lineRect = runHitBounds(run) ?? runLineBounds(run) ?? runSelectionBounds(run) else { continue }
-            let distance = abs(point.y - lineRect.midY)
-            if distance < closestRunDistance {
-                closestRunDistance = distance
+            guard let lineRect = runSelectionBounds(run) ?? runLineBounds(run) ?? runHitBounds(run) else { continue }
+
+            let dx: CGFloat
+            if point.x < lineRect.minX {
+                dx = lineRect.minX - point.x
+            } else if point.x > lineRect.maxX {
+                dx = point.x - lineRect.maxX
+            } else {
+                dx = 0
+            }
+
+            let dy: CGFloat
+            if point.y < lineRect.minY {
+                dy = lineRect.minY - point.y
+            } else if point.y > lineRect.maxY {
+                dy = point.y - lineRect.maxY
+            } else {
+                dy = 0
+            }
+
+            let score = dx * dx + dy * dy
+            if score < closestRunScore {
+                closestRunScore = score
                 closestRunIndex = runIndex
                 closestRunRect = lineRect
-                if distance == 0 { break }
+                if score == 0 { break }
             }
         }
 
