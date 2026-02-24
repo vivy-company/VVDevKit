@@ -3,6 +3,7 @@ import AppKit
 import CoreText
 import Foundation
 import Metal
+import QuartzCore
 import VVMarkdown
 import VVMetalPrimitives
 
@@ -49,6 +50,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public var onUserMessageCopyAction: ((String) -> Void)?
     public var onUserMessageCopyHoverChange: ((String?) -> Void)?
     private var hoveredFooterActionMessageID: String?
+    private var jumpAnimationToken = UUID()
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -263,6 +265,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     public func scrollToBottom(animated: Bool) {
+        cancelJumpToLatestAnimation()
         guard let controller else { return }
         let visibleRect = scrollView.contentView.bounds
         let contentHeight = max(controller.totalHeight, visibleRect.height)
@@ -287,10 +290,73 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     @objc private func handleJumpToLatest() {
         controller?.jumpToLatest()
-        scrollToBottom(animated: true)
+        animateJumpToLatest()
         if let controller {
             onStateChange?(controller.state)
         }
+    }
+
+    private func animateJumpToLatest() {
+        guard let controller else { return }
+        let visibleRect = scrollView.contentView.bounds
+        let contentHeight = max(controller.totalHeight, visibleRect.height)
+        let maxOffset = max(0, contentHeight - visibleRect.height)
+        let startY = visibleRect.origin.y
+        let distance = maxOffset - startY
+
+        guard distance > 1 else {
+            scrollToBottom(animated: false)
+            return
+        }
+
+        // Short hops feel better with a single easing curve.
+        if distance < 220 {
+            animateScroll(toY: maxOffset, duration: 0.18, timing: .easeOut, token: nil)
+            return
+        }
+
+        // Two-stage motion: fast travel, then soft settle near the bottom.
+        let token = UUID()
+        jumpAnimationToken = token
+
+        let firstStageProgress: CGFloat = distance > 1400 ? 0.93 : 0.89
+        let stage1TargetY = startY + distance * firstStageProgress
+        let stage1Duration = min(0.16, max(0.08, Double(distance) / 7000))
+        let stage2Duration = min(0.42, max(0.18, Double(distance) / 2600))
+
+        animateScroll(toY: stage1TargetY, duration: stage1Duration, timing: .linear, token: token) { [weak self] in
+            guard let self else { return }
+            self.animateScroll(toY: maxOffset, duration: stage2Duration, timing: .easeOut, token: token)
+        }
+    }
+
+    private func animateScroll(
+        toY targetY: CGFloat,
+        duration: TimeInterval,
+        timing: CAMediaTimingFunctionName,
+        token: UUID?,
+        completion: (() -> Void)? = nil
+    ) {
+        let activeToken = token
+        let currentOrigin = scrollView.contentView.bounds.origin
+        let targetOrigin = CGPoint(x: currentOrigin.x, y: targetY)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: timing)
+            scrollView.contentView.animator().setBoundsOrigin(targetOrigin)
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            if let activeToken, activeToken != self.jumpAnimationToken {
+                return
+            }
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+            completion?()
+        }
+    }
+
+    private func cancelJumpToLatestAnimation() {
+        jumpAnimationToken = UUID()
     }
 
     // MARK: - VVChatTimelineRenderDataSource
