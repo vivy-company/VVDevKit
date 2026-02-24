@@ -1392,6 +1392,15 @@ private final class VVDiffMetalView: NSView {
     private var highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]] = [:]
     private var highlightGeneration: Int = 0
     private var highlightTask: Task<Void, Never>?
+    private var codeRows: [VVDiffRow] = []
+    private var codeRowIndexByID: [Int: Int] = [:]
+    private var highlightedCodeRowCount: Int = 0
+    private var pendingHighlightCodeRowCount: Int = 0
+
+    private static let initialHighlightCodeRows: Int = 3_000
+    private static let incrementalHighlightCodeRows: Int = 1_500
+    private static let highlightPrefetchCodeRows: Int = 600
+    private static let highlightViewportMargin: CGFloat = 220
 
     private var baseFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
     private var baseFontAscent: CGFloat = 0
@@ -1475,6 +1484,7 @@ private final class VVDiffMetalView: NSView {
 
     @objc private func scrollViewBoundsChanged(_ notification: Notification) {
         updateMetalViewport()
+        requestViewportHighlightingIfNeeded()
         cachedScene = nil
         metalView.setNeedsDisplay(metalView.bounds)
     }
@@ -1483,6 +1493,7 @@ private final class VVDiffMetalView: NSView {
         super.layout()
         scrollView.frame = bounds
         updateContentSize()
+        requestViewportHighlightingIfNeeded()
     }
 
     /// Keep MTKView pinned to the visible viewport (same as VVMetalEditorContainerView).
@@ -1550,7 +1561,7 @@ private final class VVDiffMetalView: NSView {
         syntaxHighlightingEnabled: Bool
     ) {
         let nextFastPlainMode = Self.shouldUseFastPlainMode(rows: rows)
-        let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled && !nextFastPlainMode
+        let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled
         let fastPlainModeChanged = fastPlainModeEnabled != nextFastPlainMode
         let rowsChanged = self.rows != rows
         let styleChanged = self.renderStyle != style
@@ -1582,6 +1593,10 @@ private final class VVDiffMetalView: NSView {
         rowsSignature = rowsChanged ? Self.computeRowsSignature(rows) : rowsSignature
         rowGeometryCacheKey = nil
 
+        if rowsChanged {
+            rebuildCodeRowLookup()
+        }
+
         if style == .split {
             scrollView?.hasHorizontalScroller = true
         } else {
@@ -1612,16 +1627,12 @@ private final class VVDiffMetalView: NSView {
         }
 
         if rowsChanged || langChanged || fontChanged || syntaxHighlightingChanged {
-            if syntaxHighlightingEnabled {
-                rebuildHighlightsAsync()
-            } else {
-                highlightTask?.cancel()
-                highlightedRanges = [:]
-            }
+            resetHighlightingState()
         }
 
         cachedScene = nil
         updateContentSize()
+        requestViewportHighlightingIfNeeded()
         metalView?.setNeedsDisplay(metalView.bounds)
     }
 
@@ -1849,25 +1860,130 @@ private final class VVDiffMetalView: NSView {
 
     // MARK: - Syntax Highlighting
 
-    private func rebuildHighlightsAsync() {
-        guard syntaxHighlightingEnabled else {
-            highlightTask?.cancel()
-            highlightedRanges = [:]
-            return
+    private func rebuildCodeRowLookup() {
+        codeRows = rows.filter { $0.kind.isCode }
+        codeRowIndexByID.removeAll(keepingCapacity: true)
+        codeRowIndexByID.reserveCapacity(codeRows.count)
+        for (index, row) in codeRows.enumerated() {
+            codeRowIndexByID[row.id] = index
+        }
+    }
+
+    private func resetHighlightingState() {
+        highlightGeneration += 1
+        highlightTask?.cancel()
+        highlightTask = nil
+        highlightedRanges = [:]
+        highlightedCodeRowCount = 0
+        pendingHighlightCodeRowCount = 0
+
+        guard syntaxHighlightingEnabled else { return }
+        guard !codeRows.isEmpty else { return }
+
+        scheduleHighlightingIfNeeded(targetCodeRowCount: min(codeRows.count, Self.initialHighlightCodeRows))
+    }
+
+    private func requestViewportHighlightingIfNeeded() {
+        guard syntaxHighlightingEnabled else { return }
+        guard !codeRows.isEmpty else { return }
+        let targetCount = desiredHighlightedCodeRowCountForVisibleViewport()
+        scheduleHighlightingIfNeeded(targetCodeRowCount: targetCount)
+    }
+
+    private func desiredHighlightedCodeRowCountForVisibleViewport() -> Int {
+        let initialTarget = min(codeRows.count, Self.initialHighlightCodeRows)
+        guard let scrollView else { return initialTarget }
+
+        let visibleRect = scrollView.contentView.bounds
+        guard let maxVisibleCodeIndex = maxVisibleCodeRowIndex(in: visibleRect) else {
+            return initialTarget
         }
 
-        highlightGeneration += 1
+        let desiredByViewport = min(
+            codeRows.count,
+            maxVisibleCodeIndex + 1 + Self.highlightPrefetchCodeRows
+        )
+        if desiredByViewport <= initialTarget {
+            return initialTarget
+        }
+
+        let extraNeeded = desiredByViewport - initialTarget
+        let chunkCount = Int(ceil(Double(extraNeeded) / Double(Self.incrementalHighlightCodeRows)))
+        return min(codeRows.count, initialTarget + chunkCount * Self.incrementalHighlightCodeRows)
+    }
+
+    private func firstVisibleGeometryIndex(minY: CGFloat) -> Int {
+        var low = 0
+        var high = rowGeometries.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            let geometry = rowGeometries[mid]
+            if geometry.y + geometry.height < minY {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
+        return min(low, rowGeometries.count)
+    }
+
+    private func maxVisibleCodeRowIndex(in visibleRect: CGRect) -> Int? {
+        guard !rowGeometries.isEmpty else { return nil }
+
+        let minY = visibleRect.minY - Self.highlightViewportMargin
+        let maxY = visibleRect.maxY + Self.highlightViewportMargin
+        let startIndex = firstVisibleGeometryIndex(minY: minY)
+
+        var maxCodeIndex: Int?
+        var index = startIndex
+        while index < rowGeometries.count {
+            let geometry = rowGeometries[index]
+            if geometry.y > maxY {
+                break
+            }
+            if let codeIndex = codeRowIndexByID[geometry.rowID] {
+                if let current = maxCodeIndex {
+                    maxCodeIndex = max(current, codeIndex)
+                } else {
+                    maxCodeIndex = codeIndex
+                }
+            }
+            index += 1
+        }
+
+        return maxCodeIndex
+    }
+
+    private func scheduleHighlightingIfNeeded(targetCodeRowCount: Int) {
+        let boundedTarget = min(codeRows.count, max(0, targetCodeRowCount))
+        guard boundedTarget > highlightedCodeRowCount else { return }
+
+        pendingHighlightCodeRowCount = max(pendingHighlightCodeRowCount, boundedTarget)
+        startNextHighlightBatchIfNeeded()
+    }
+
+    private func startNextHighlightBatchIfNeeded() {
+        guard highlightTask == nil else { return }
+        guard pendingHighlightCodeRowCount > highlightedCodeRowCount else { return }
+
         let generation = highlightGeneration
-        let currentRows = rows
+        let startIndex = highlightedCodeRowCount
+        let batchLimit = startIndex == 0 ? Self.initialHighlightCodeRows : Self.incrementalHighlightCodeRows
+        let endIndex = min(codeRows.count, min(pendingHighlightCodeRowCount, startIndex + batchLimit))
+
+        guard endIndex > startIndex else { return }
+
+        let batchRows = Array(codeRows[startIndex..<endIndex])
         let currentLanguage = language
         let currentTheme = theme
         let currentFont = configuration.font
 
-        highlightTask?.cancel()
         highlightTask = Task(priority: .userInitiated) { [weak self] in
             guard !Task.isCancelled else { return }
             let ranges = await Self.computeHighlightRanges(
-                rows: currentRows,
+                rows: batchRows,
                 language: currentLanguage,
                 theme: currentTheme,
                 font: currentFont
@@ -1876,10 +1992,14 @@ private final class VVDiffMetalView: NSView {
 
             await MainActor.run { [weak self] in
                 guard let self, self.highlightGeneration == generation, !Task.isCancelled else { return }
-                self.highlightedRanges = ranges
+                for (rowID, rowRanges) in ranges {
+                    self.highlightedRanges[rowID] = rowRanges
+                }
+                self.highlightedCodeRowCount = max(self.highlightedCodeRowCount, endIndex)
+                self.highlightTask = nil
                 self.cachedScene = nil
-                self.updateContentSize()
                 self.metalView?.setNeedsDisplay(self.metalView.bounds)
+                self.startNextHighlightBatchIfNeeded()
             }
         }
     }
@@ -1898,9 +2018,9 @@ private final class VVDiffMetalView: NSView {
         }
 
         // Guardrails: skip expensive highlighting for large or pathological diffs.
-        let maxHighlightRows = 2_000
-        let maxHighlightUTF16 = 120_000
-        let maxSingleLineUTF16 = 2_048
+        let maxHighlightRows = 3_500
+        let maxHighlightUTF16 = 360_000
+        let maxSingleLineUTF16 = 8_192
         guard codeRows.count <= maxHighlightRows else { return [:] }
         var totalUTF16 = 0
         for row in codeRows {
