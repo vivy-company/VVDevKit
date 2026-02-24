@@ -427,7 +427,7 @@ public final class VVMarkdownSelectionHelper {
         var closestRunScore = CGFloat.greatestFiniteMagnitude
         var closestRunRect: CGRect?
         for (runIndex, run) in runs.enumerated() {
-            guard let lineRect = runSelectionBounds(run) ?? runLineBounds(run) ?? runHitBounds(run) else { continue }
+            guard let lineRect = runHitBounds(run) ?? runSelectionBounds(run) ?? runLineBounds(run) else { continue }
 
             let dx: CGFloat
             if point.x < lineRect.minX {
@@ -461,7 +461,7 @@ public final class VVMarkdownSelectionHelper {
         let clampedX = min(max(point.x, rect.minX), rect.maxX)
         var clampedIndex = glyphIndexForX(run, x: clampedX) ?? 0
         let length = runTextLength(run)
-        let edgeSnapTolerance = max(0.75, min(2, rect.width * 0.02))
+        let edgeSnapTolerance = max(2, min(10, rect.width * 0.08))
         if clampedX >= rect.maxX - edgeSnapTolerance {
             clampedIndex = length
         } else if clampedX <= rect.minX + edgeSnapTolerance {
@@ -579,20 +579,33 @@ public final class VVMarkdownSelectionHelper {
                         endX = glyphEndX
                     }
 
+                    let atStartEdge = isStartRun && startIndex <= 1
+                    let atEndEdge = isEndRun && endIndex >= max(0, length - 1)
+
                     if let horizontal = runHorizontalBounds(run) {
-                        if isStartRun && startIndex <= 1 {
+                        if atStartEdge {
                             startX = min(startX, horizontal.minX)
                         }
-                        if isEndRun && endIndex >= max(0, length - 1) {
+                        if atEndEdge {
                             endX = max(endX, horizontal.maxX)
                         }
                     }
 
-                    let edgePad: CGFloat = 0.75
-                    if isStartRun && startIndex <= 1 {
+                    if atEndEdge {
+                        let typographicWidth = CGFloat(CTLineGetTypographicBounds(metrics.line, nil, nil, nil))
+                        let typographicMaxX = metrics.originX + max(0, typographicWidth)
+                        endX = max(endX, typographicMaxX)
+                    }
+
+                    // Visual overdraw prevents clipped trailing glyph highlight on heavy headers.
+                    startX -= 0.4
+                    endX += 0.95
+
+                    let edgePad: CGFloat = 1.45
+                    if atStartEdge {
                         startX -= edgePad
                     }
-                    if isEndRun && endIndex >= max(0, length - 1) {
+                    if atEndEdge {
                         endX += edgePad
                     }
 
