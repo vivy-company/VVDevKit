@@ -17,19 +17,25 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
     public var headerTitle: String?
     public var headerIconURL: String?
     public var showsTimestamp: Bool?
+    public var prefixGlyphColor: SIMD4<Float>?
+    public var prefixGlyphCount: Int?
 
     public init(
         bubbleStyle: VVChatBubbleStyle? = nil,
         showsHeader: Bool? = nil,
         headerTitle: String? = nil,
         headerIconURL: String? = nil,
-        showsTimestamp: Bool? = nil
+        showsTimestamp: Bool? = nil,
+        prefixGlyphColor: SIMD4<Float>? = nil,
+        prefixGlyphCount: Int? = nil
     ) {
         self.bubbleStyle = bubbleStyle
         self.showsHeader = showsHeader
         self.headerTitle = headerTitle
         self.headerIconURL = headerIconURL
         self.showsTimestamp = showsTimestamp
+        self.prefixGlyphColor = prefixGlyphColor
+        self.prefixGlyphCount = prefixGlyphCount
     }
 }
 

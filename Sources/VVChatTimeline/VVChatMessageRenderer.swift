@@ -238,7 +238,17 @@ public final class VVChatMessageRenderer {
         var layout = layoutEngine.layout(document)
         layoutEngine.adjustParagraphImageSpacing(in: &layout)
 
-        let contentScene = pipeline.buildScene(from: layout)
+        var contentScene = pipeline.buildScene(from: layout)
+        if let prefixColor = presentation?.prefixGlyphColor {
+            let glyphCount = max(0, presentation?.prefixGlyphCount ?? 0)
+            if glyphCount > 0 {
+                contentScene = applyingPrefixGlyphColor(
+                    to: contentScene,
+                    color: prefixColor,
+                    glyphCount: glyphCount
+                )
+            }
+        }
         let contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
         let contentMinX = min(0, contentBounds?.minX ?? 0)
         let contentMinY = min(0, contentBounds?.minY ?? 0)
@@ -416,6 +426,45 @@ public final class VVChatMessageRenderer {
         layoutEngine.adjustParagraphImageSpacing(in: &layout)
         let scene = pipeline.buildScene(from: layout)
         return (layout, scene)
+    }
+
+    private func applyingPrefixGlyphColor(
+        to scene: VVScene,
+        color: SIMD4<Float>,
+        glyphCount: Int
+    ) -> VVScene {
+        guard glyphCount > 0 else { return scene }
+
+        var remaining = glyphCount
+        var primitives: [VVPrimitive] = []
+        primitives.reserveCapacity(scene.primitives.count)
+
+        for primitive in scene.primitives {
+            var updated = primitive
+            if remaining > 0, case .textRun(var run) = updated.kind {
+                var glyphs = run.glyphs
+                for index in glyphs.indices where remaining > 0 {
+                    guard glyphs[index].color.w > 0 else { continue }
+                    let glyph = glyphs[index]
+                    glyphs[index] = VVTextGlyph(
+                        glyphID: glyph.glyphID,
+                        position: glyph.position,
+                        size: glyph.size,
+                        color: SIMD4<Float>(color.x, color.y, color.z, glyph.color.w),
+                        fontVariant: glyph.fontVariant,
+                        fontSize: glyph.fontSize,
+                        fontName: glyph.fontName,
+                        stringIndex: glyph.stringIndex
+                    )
+                    remaining -= 1
+                }
+                run.glyphs = glyphs
+                updated.kind = .textRun(run)
+            }
+            primitives.append(updated)
+        }
+
+        return VVScene(primitives: primitives)
     }
 
     private func renderHeader(text: String, iconURL: String?, width: CGFloat) -> HeaderRender {
