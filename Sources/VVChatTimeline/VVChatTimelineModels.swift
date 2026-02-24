@@ -17,6 +17,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
     public var headerTitle: String?
     public var headerIconURL: String?
     public var showsTimestamp: Bool?
+    public var textOpacityMultiplier: Float?
     public var prefixGlyphColor: SIMD4<Float>?
     public var prefixGlyphCount: Int?
 
@@ -26,6 +27,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         headerTitle: String? = nil,
         headerIconURL: String? = nil,
         showsTimestamp: Bool? = nil,
+        textOpacityMultiplier: Float? = nil,
         prefixGlyphColor: SIMD4<Float>? = nil,
         prefixGlyphCount: Int? = nil
     ) {
@@ -34,6 +36,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         self.headerTitle = headerTitle
         self.headerIconURL = headerIconURL
         self.showsTimestamp = showsTimestamp
+        self.textOpacityMultiplier = textOpacityMultiplier
         self.prefixGlyphColor = prefixGlyphColor
         self.prefixGlyphCount = prefixGlyphCount
     }

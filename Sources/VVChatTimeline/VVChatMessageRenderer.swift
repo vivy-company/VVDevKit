@@ -239,6 +239,12 @@ public final class VVChatMessageRenderer {
         layoutEngine.adjustParagraphImageSpacing(in: &layout)
 
         var contentScene = pipeline.buildScene(from: layout)
+        if let opacityMultiplier = presentation?.textOpacityMultiplier {
+            contentScene = applyingTextOpacity(
+                to: contentScene,
+                multiplier: opacityMultiplier
+            )
+        }
         if let prefixColor = presentation?.prefixGlyphColor {
             let glyphCount = max(0, presentation?.prefixGlyphCount ?? 0)
             if glyphCount > 0 {
@@ -426,6 +432,39 @@ public final class VVChatMessageRenderer {
         layoutEngine.adjustParagraphImageSpacing(in: &layout)
         let scene = pipeline.buildScene(from: layout)
         return (layout, scene)
+    }
+
+    private func applyingTextOpacity(
+        to scene: VVScene,
+        multiplier: Float
+    ) -> VVScene {
+        let alpha = max(0, multiplier)
+        guard alpha != 1 else { return scene }
+
+        var primitives: [VVPrimitive] = []
+        primitives.reserveCapacity(scene.primitives.count)
+
+        for primitive in scene.primitives {
+            var updated = primitive
+            if case .textRun(var run) = updated.kind {
+                run.glyphs = run.glyphs.map { glyph in
+                    VVTextGlyph(
+                        glyphID: glyph.glyphID,
+                        position: glyph.position,
+                        size: glyph.size,
+                        color: SIMD4<Float>(glyph.color.x, glyph.color.y, glyph.color.z, max(0, min(1, glyph.color.w * alpha))),
+                        fontVariant: glyph.fontVariant,
+                        fontSize: glyph.fontSize,
+                        fontName: glyph.fontName,
+                        stringIndex: glyph.stringIndex
+                    )
+                }
+                updated.kind = .textRun(run)
+            }
+            primitives.append(updated)
+        }
+
+        return VVScene(primitives: primitives)
     }
 
     private func applyingPrefixGlyphColor(
