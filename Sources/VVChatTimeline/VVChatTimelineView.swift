@@ -46,6 +46,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private let selectionController = VVTextSelectionController<ChatTextPosition>()
     private let selectionColor: SIMD4<Float> = .blue.withOpacity(0.4)
     public var onStateChange: ((VVChatTimelineState) -> Void)?
+    public var onUserMessageCopyAction: ((String) -> Void)?
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -506,6 +507,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
 extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags) {
+        if handleFooterActionTap(at: point) {
+            return
+        }
         selectionController.handleMouseDown(at: point, clickCount: clickCount, modifiers: modifiers, hitTester: self)
         metalView.setNeedsDisplay(metalView.bounds)
     }
@@ -517,6 +521,38 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
 
     public func chatTimelineMetalViewMouseUp(_ view: VVChatTimelineMetalView) {
         selectionController.handleMouseUp()
+    }
+}
+
+private extension VVChatTimelineView {
+    func handleFooterActionTap(at point: CGPoint) -> Bool {
+        guard let controller else { return false }
+
+        let docPoint = viewPointToDocumentPoint(point)
+        for (index, layout) in controller.layouts.enumerated() {
+            if docPoint.y < layout.frame.minY || docPoint.y > layout.frame.maxY {
+                continue
+            }
+            guard index < controller.messages.count else { continue }
+
+            let message = controller.messages[index]
+            guard message.role == .user else { continue }
+            guard let rendered = controller.renderedMessage(for: layout.id),
+                  let actionFrame = rendered.footerTrailingActionFrame else {
+                continue
+            }
+
+            let frameInDocument = actionFrame.offsetBy(
+                dx: layout.frame.origin.x + layout.contentOffset.x,
+                dy: layout.frame.origin.y + layout.contentOffset.y
+            )
+            if frameInDocument.contains(docPoint) {
+                onUserMessageCopyAction?(message.id)
+                return true
+            }
+        }
+
+        return false
     }
 }
 

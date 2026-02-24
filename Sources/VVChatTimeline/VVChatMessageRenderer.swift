@@ -13,6 +13,7 @@ public struct VVChatRenderedMessage {
     public let contentOffset: CGPoint
     public let isDraft: Bool
     public let imageURLs: [String]
+    public let footerTrailingActionFrame: CGRect?
 }
 
 public final class VVChatMessageRenderer {
@@ -274,15 +275,19 @@ public final class VVChatMessageRenderer {
         }
         let footerText: String
         let footerMetaFont: VVFont
+        let footerSuffixText: String?
         if isDraft && message.role == .assistant {
             footerText = style.loadingIndicatorText
             footerMetaFont = style.loadingIndicatorFont
+            footerSuffixText = nil
         } else if presentation?.showsTimestamp ?? style.showsTimestamp(for: message.role) {
-            footerText = timestampLabel(for: message)
+            footerText = timestampLabel(for: message, presentation: presentation)
             footerMetaFont = style.timestampFont
+            footerSuffixText = presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role)
         } else {
             footerText = ""
             footerMetaFont = style.timestampFont
+            footerSuffixText = nil
         }
 
         let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint)
@@ -320,6 +325,7 @@ public final class VVChatMessageRenderer {
         let messageHeight = headerBlockHeight + contentBlockHeight + footerBlockHeight
 
         var builder = VVSceneBuilder()
+        var footerTrailingActionFrame: CGRect?
         var currentY: CGFloat = 0
         if let headerRender, headerHeight > 0 {
             builder.add(node: VVNode.fromScene(headerRender.scene))
@@ -359,13 +365,26 @@ public final class VVChatMessageRenderer {
         currentY += contentBlockHeight
         if let footerRender, footerHeight > 0 {
             currentY += style.footerSpacing
+            let footerBounds = sceneBounds(for: footerRender.scene, layoutEngine: timestampLayoutEngine)
+            let footerWidth = max(0, footerBounds?.width ?? 0)
+            let footerMinX = footerBounds?.minX ?? 0
+            let footerMinY = footerBounds?.minY ?? 0
+            let footerVisualHeight = max(1, footerBounds?.height ?? footerHeight)
             let footerOffsetX: CGFloat
             if message.role == .user {
-                let footerBounds = sceneBounds(for: footerRender.scene, layoutEngine: timestampLayoutEngine)
-                let footerWidth = max(0, footerBounds?.width ?? 0)
                 footerOffsetX = max(0, metaWidth - footerWidth)
             } else {
                 footerOffsetX = 0
+            }
+
+            if message.role == .user,
+               let suffix = footerSuffixText?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !suffix.isEmpty {
+                let actionWidth = max(10, Self.singleLineMetaWidth(suffix, font: footerMetaFont))
+                let actionHeight = max(10, footerVisualHeight)
+                let actionX = footerOffsetX + footerMinX + max(0, footerWidth - actionWidth)
+                let actionY = currentY + footerMinY
+                footerTrailingActionFrame = CGRect(x: actionX, y: actionY, width: actionWidth, height: actionHeight)
             }
 
             builder.withOffset(CGPoint(x: footerOffsetX, y: currentY)) { builder in
@@ -402,7 +421,8 @@ public final class VVChatMessageRenderer {
             height: height,
             contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
             isDraft: isDraft,
-            imageURLs: Array(imageURLs)
+            imageURLs: Array(imageURLs),
+            footerTrailingActionFrame: footerTrailingActionFrame
         )
         cache.set(rendered, for: key)
         return rendered
@@ -579,9 +599,11 @@ public final class VVChatMessageRenderer {
         return ceil(width + 2)
     }
 
-    private func timestampLabel(for message: VVChatMessage) -> String {
+    private func timestampLabel(for message: VVChatMessage, presentation: VVChatMessagePresentation?) -> String {
         let timestamp = message.timestamp ?? Date()
-        return Self.timeFormatter.string(from: timestamp) + style.timestampSuffix(for: message.role)
+        let prefix = presentation?.timestampPrefix ?? ""
+        let suffix = presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role)
+        return prefix + Self.timeFormatter.string(from: timestamp) + suffix
     }
 
     private static func makeMetaTheme(base: MarkdownTheme, textColor: SIMD4<Float>) -> MarkdownTheme {
