@@ -147,6 +147,7 @@ public final class MetalTextView: MTKView {
     private var diffOverlayTextRuns: [VVTextRunPrimitive] = []
 
     private var gutterQuads: [VVQuadPrimitive] = []
+    private var gutterLines: [VVLinePrimitive] = []
     private var gutterCoverQuads: [VVQuadPrimitive] = []
     private var diffOverlayGradientQuads: [VVGradientQuadPrimitive] = []
     private var diffOverlayQuads: [VVQuadPrimitive] = []
@@ -1102,6 +1103,7 @@ public final class MetalTextView: MTKView {
 
         appendTextRuns(contentTextRuns, to: &scene, zIndex: 12)
         appendQuads(gutterCoverQuads, to: &scene, zIndex: 13)
+        appendLines(gutterLines, to: &scene, zIndex: 14)
         appendTextRuns(gutterTextRuns, to: &scene, zIndex: 14)
         appendTextRuns(diffOverlayTextRuns, to: &scene, zIndex: 15)
         appendTextRuns(blameTextRuns, to: &scene, zIndex: 16)
@@ -2302,6 +2304,7 @@ public final class MetalTextView: MTKView {
 
     private func prepareGutterBatches() {
         gutterQuads.removeAll(keepingCapacity: true)
+        gutterLines.removeAll(keepingCapacity: true)
         gutterCoverQuads.removeAll(keepingCapacity: true)
         gutterTextRuns.removeAll(keepingCapacity: true)
 
@@ -2404,12 +2407,8 @@ public final class MetalTextView: MTKView {
                     gutterQuads.append(VVQuadPrimitive(frame: rect, color: foldMarkerHoverBackgroundColor.simdColor, cornerRadius: foldMetrics.hoverCornerRadius))
                 }
 
-                let markerChar = foldMarkerCharacter(isFolded: isFolded)
-                let marker = String(markerChar)
-                let markerWidth = glyphAdvance(for: markerChar, fontSize: gutterFont.pointSize)
-                let markerX = foldMarkerAreaX + max(0, (foldMarkerAreaWidth - markerWidth) / 2)
                 let iconColor = isFolded ? foldMarkerActiveColor : (isHovered ? foldMarkerColor.withAlphaComponent(0.9) : foldMarkerColor)
-                addGutterText(marker, baselineY: baselineY, color: iconColor, x: markerX)
+                addFoldMarkerIcon(baselineY: baselineY, isFolded: isFolded, color: iconColor, metrics: foldMetrics)
             }
         }
 
@@ -3321,6 +3320,43 @@ public final class MetalTextView: MTKView {
         )
     }
 
+    private func addFoldMarkerIcon(
+        baselineY: CGFloat,
+        isFolded: Bool,
+        color: NSColor,
+        metrics: FoldIconMetrics
+    ) {
+        let iconX = scrollOffset.x + foldMarkerAreaX + max(0, (foldMarkerAreaWidth - metrics.iconSize.width) / 2)
+        let iconY = baselineY
+            - layoutEngine.calculatedBaselineOffset
+            + (layoutEngine.calculatedLineHeight - metrics.iconSize.height) / 2
+        let iconRect = CGRect(origin: CGPoint(x: iconX, y: iconY), size: metrics.iconSize)
+
+        let p1: CGPoint
+        let p2: CGPoint
+        let p3: CGPoint
+
+        if isFolded {
+            // Down-pointing chevron (expanded range)
+            p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
+            p2 = CGPoint(x: iconRect.midX, y: iconRect.maxY)
+            p3 = CGPoint(x: iconRect.maxX, y: iconRect.minY)
+        } else {
+            // Right-pointing chevron (collapsed range)
+            p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
+            p2 = CGPoint(x: iconRect.maxX, y: iconRect.midY)
+            p3 = CGPoint(x: iconRect.minX, y: iconRect.maxY)
+        }
+
+        let strokeColor = color.simdColor
+        gutterLines.append(
+            VVLinePrimitive(start: p1, end: p2, thickness: metrics.lineWidth, color: strokeColor)
+        )
+        gutterLines.append(
+            VVLinePrimitive(start: p2, end: p3, thickness: metrics.lineWidth, color: strokeColor)
+        )
+    }
+
     private func mergeLineRanges(_ ranges: [ClosedRange<Int>]) -> [ClosedRange<Int>] {
         guard !ranges.isEmpty else { return [] }
         let sorted = ranges.sorted { lhs, rhs in
@@ -3336,14 +3372,6 @@ public final class MetalTextView: MTKView {
             }
         }
         return merged
-    }
-
-    private func foldMarkerCharacter(isFolded: Bool) -> Character {
-        let preferred: Character = isFolded ? "▾" : "▸"
-        if renderer?.glyphAtlas.glyph(for: preferred, variant: .monospace, fontSize: gutterFont.pointSize, baseFont: renderer?.baseFont) != nil {
-            return preferred
-        }
-        return isFolded ? "v" : ">"
     }
 
     // MARK: - Mouse Events
