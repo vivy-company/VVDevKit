@@ -383,9 +383,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         }
 
         let rects = helper.selectionRects(from: mdStart, to: mdEnd)
+        let contentOffset = rendered.selectionContentOffset
         return rects.map { rect in
             VVQuadPrimitive(
-                frame: rect.offsetBy(dx: itemOffset.x, dy: itemOffset.y),
+                frame: rect.offsetBy(dx: itemOffset.x + contentOffset.x, dy: itemOffset.y + contentOffset.y),
                 color: selectionColor,
                 cornerRadius: 2
             )
@@ -609,9 +610,10 @@ extension VVChatTimelineView: VVTextHitTestable {
               let rendered = controller.renderedMessage(for: layout.id) else { return nil }
 
         // Convert to item-local coordinates
+        let contentOffset = rendered.selectionContentOffset
         let localPoint = CGPoint(
-            x: docPoint.x - layout.frame.origin.x - layout.contentOffset.x,
-            y: docPoint.y - layout.frame.origin.y - layout.contentOffset.y
+            x: docPoint.x - layout.frame.origin.x - layout.contentOffset.x - contentOffset.x,
+            y: docPoint.y - layout.frame.origin.y - layout.contentOffset.y - contentOffset.y
         )
 
         let helper = VVMarkdownSelectionHelper(layout: rendered.layout, layoutEngine: rendered.layoutEngine)

@@ -11,6 +11,7 @@ public struct VVChatRenderedMessage {
     public let scene: VVScene
     public let height: CGFloat
     public let contentOffset: CGPoint
+    public let selectionContentOffset: CGPoint
     public let isDraft: Bool
     public let imageURLs: [String]
     public let footerTrailingActionFrame: CGRect?
@@ -366,6 +367,7 @@ public final class VVChatMessageRenderer {
 
         var builder = VVSceneBuilder()
         var footerTrailingActionFrame: CGRect?
+        var selectionContentOffset: CGPoint = .zero
         var currentY: CGFloat = 0
         if let headerRender, headerHeight > 0 {
             builder.add(node: VVNode.fromScene(headerRender.scene))
@@ -391,12 +393,14 @@ public final class VVChatMessageRenderer {
             builder.add(kind: .quad(bubble), zIndex: -1)
             let contentOffsetX = bubbleInsets.left - contentMinX
             let contentOffsetY = currentY + bubbleInsets.top - contentMinY
+            selectionContentOffset = CGPoint(x: contentOffsetX, y: contentOffsetY)
             builder.withOffset(CGPoint(x: contentOffsetX, y: contentOffsetY)) { builder in
                 builder.add(node: VVNode.fromScene(contentScene))
             }
         } else {
             let contentOffsetX = -contentMinX
             let contentOffsetY = currentY - contentMinY
+            selectionContentOffset = CGPoint(x: contentOffsetX, y: contentOffsetY)
             builder.withOffset(CGPoint(x: contentOffsetX, y: contentOffsetY)) { builder in
                 builder.add(node: VVNode.fromScene(contentScene))
             }
@@ -512,6 +516,7 @@ public final class VVChatMessageRenderer {
             scene: scene,
             height: height,
             contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
+            selectionContentOffset: selectionContentOffset,
             isDraft: isDraft,
             imageURLs: Array(imageURLs),
             footerTrailingActionFrame: footerTrailingActionFrame
