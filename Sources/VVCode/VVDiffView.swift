@@ -1398,9 +1398,10 @@ private final class VVDiffMetalView: NSView {
     private var pendingHighlightCodeRowCount: Int = 0
 
     private static let initialHighlightCodeRows: Int = 3_000
-    private static let incrementalHighlightCodeRows: Int = 1_500
+    private static let incrementalHighlightCodeRows: Int = 3_000
     private static let highlightPrefetchCodeRows: Int = 600
     private static let highlightViewportMargin: CGFloat = 220
+    private static let highlightWarmupContextRows: Int = 192
 
     private var baseFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
     private var baseFontAscent: CGFloat = 0
@@ -1975,7 +1976,10 @@ private final class VVDiffMetalView: NSView {
 
         guard endIndex > startIndex else { return }
 
-        let batchRows = Array(codeRows[startIndex..<endIndex])
+        let warmupRows = min(Self.highlightWarmupContextRows, startIndex)
+        let parseStart = startIndex - warmupRows
+        let batchRows = Array(codeRows[parseStart..<endIndex])
+        let targetRowIDs = Set(codeRows[startIndex..<endIndex].map(\.id))
         let currentLanguage = language
         let currentTheme = theme
         let currentFont = configuration.font
@@ -1993,6 +1997,7 @@ private final class VVDiffMetalView: NSView {
             await MainActor.run { [weak self] in
                 guard let self, self.highlightGeneration == generation, !Task.isCancelled else { return }
                 for (rowID, rowRanges) in ranges {
+                    guard targetRowIDs.contains(rowID) else { continue }
                     self.highlightedRanges[rowID] = rowRanges
                 }
                 self.highlightedCodeRowCount = max(self.highlightedCodeRowCount, endIndex)
