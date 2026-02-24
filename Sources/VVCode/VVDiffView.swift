@@ -48,6 +48,7 @@ public struct VVDiffRow: Identifiable, Hashable, Sendable {
 private struct VVDiffSection: Identifiable, Hashable {
     let id: Int
     let filePath: String
+    let headerRow: VVDiffRow?
     let rows: [VVDiffRow]
 
     var addedCount: Int { rows.filter { $0.kind == .added }.count }
@@ -442,6 +443,7 @@ private func makeSections(from rows: [VVDiffRow]) -> [VVDiffSection] {
 
     var currentSectionID: Int?
     var currentPath: String?
+    var currentHeaderRow: VVDiffRow?
     var currentRows: [VVDiffRow] = []
     var syntheticID = -1
 
@@ -454,6 +456,7 @@ private func makeSections(from rows: [VVDiffRow]) -> [VVDiffSection] {
             VVDiffSection(
                 id: sectionID,
                 filePath: path,
+                headerRow: currentHeaderRow,
                 rows: currentRows
             )
         )
@@ -466,6 +469,7 @@ private func makeSections(from rows: [VVDiffRow]) -> [VVDiffSection] {
             flushSection()
             currentSectionID = row.id
             currentPath = row.text
+            currentHeaderRow = row
             continue
         }
 
@@ -473,6 +477,7 @@ private func makeSections(from rows: [VVDiffRow]) -> [VVDiffSection] {
             currentSectionID = syntheticID
             syntheticID -= 1
             currentPath = "workspace.diff"
+            currentHeaderRow = nil
         }
 
         currentRows.append(row)
@@ -780,8 +785,7 @@ private final class VVDiffRenderer {
 
         for section in sections {
             // File header
-            let headerRow = rows.first(where: { $0.id == section.id && $0.kind == .fileHeader })
-            if headerRow != nil {
+            if section.headerRow != nil {
                 let rowH = headerHeight
                 if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
                     buildFileHeader(
@@ -858,6 +862,7 @@ private final class VVDiffRenderer {
                         let section = VVDiffSection(
                             id: header.id,
                             filePath: header.text,
+                            headerRow: header,
                             rows: rowsForFileHeader(header, allRows: rows)
                         )
                         buildFileHeader(section: section, y: y, width: totalWidth, height: rowH, builder: &builder)
@@ -1705,8 +1710,7 @@ private final class VVDiffMetalView: NSView {
 
         for section in sections {
             // File header
-            let headerRow = rows.first(where: { $0.id == section.id && $0.kind == .fileHeader })
-            if let header = headerRow {
+            if let header = section.headerRow {
                 let rowH = renderer.headerHeight
                 rowGeometries.append(RowGeometry(
                     rowIndex: rowIndex,
