@@ -380,10 +380,13 @@ public final class VVChatMessageRenderer {
             if message.role == .user,
                let suffix = footerSuffixText?.trimmingCharacters(in: .whitespacesAndNewlines),
                !suffix.isEmpty {
-                let actionWidth = max(10, Self.singleLineMetaWidth(suffix, font: footerMetaFont))
-                let actionHeight = max(10, footerVisualHeight)
-                let actionX = footerOffsetX + footerMinX + max(0, footerWidth - actionWidth)
-                let actionY = currentY + footerMinY
+                let iconWidth = max(10, Self.singleLineMetaWidth(suffix, font: footerMetaFont))
+                let hitPaddingX: CGFloat = 6
+                let hitPaddingY: CGFloat = 3
+                let actionWidth = max(18, iconWidth + hitPaddingX * 2)
+                let actionHeight = max(16, footerVisualHeight + hitPaddingY * 2)
+                let actionX = footerOffsetX + footerMinX + max(0, footerWidth - iconWidth) - hitPaddingX
+                let actionY = currentY + footerMinY - hitPaddingY
                 footerTrailingActionFrame = CGRect(x: actionX, y: actionY, width: actionWidth, height: actionHeight)
             }
 

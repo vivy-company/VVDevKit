@@ -351,9 +351,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public func selectionQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] {
         guard let selection = selectionController.selection else { return [] }
         guard let controller else { return [] }
-
-        // Only allow selection on user messages
-        guard index < controller.messages.count, controller.messages[index].role == .user else { return [] }
+        guard index < controller.messages.count else { return [] }
 
         guard let layout = controller.itemLayout(at: index) else { return [] }
         guard let rendered = controller.renderedMessage(for: layout.id) else { return [] }
@@ -415,8 +413,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         var result: [String] = []
 
         for itemIndex in start.itemIndex...min(end.itemIndex, controller.layouts.count - 1) {
-            // Skip non-user messages
-            guard itemIndex < controller.messages.count, controller.messages[itemIndex].role == .user else { continue }
+            guard itemIndex < controller.messages.count else { continue }
 
             guard let layout = controller.itemLayout(at: itemIndex),
                   let rendered = controller.renderedMessage(for: layout.id) else { continue }
@@ -471,10 +468,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func selectAllText() {
         guard let controller, !controller.layouts.isEmpty else { return }
 
-        // Find first valid position (user messages only)
+        // Find first valid position
         var firstPos: ChatTextPosition?
         for i in 0..<controller.layouts.count {
-            guard i < controller.messages.count, controller.messages[i].role == .user else { continue }
+            guard i < controller.messages.count else { continue }
             guard let layout = controller.itemLayout(at: i),
                   let rendered = controller.renderedMessage(for: layout.id) else { continue }
             let helper = VVMarkdownSelectionHelper(layout: rendered.layout, layoutEngine: rendered.layoutEngine)
@@ -484,10 +481,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             }
         }
 
-        // Find last valid position (user messages only)
+        // Find last valid position
         var lastPos: ChatTextPosition?
         for i in stride(from: controller.layouts.count - 1, through: 0, by: -1) {
-            guard i < controller.messages.count, controller.messages[i].role == .user else { continue }
+            guard i < controller.messages.count else { continue }
             guard let layout = controller.itemLayout(at: i),
                   let rendered = controller.renderedMessage(for: layout.id) else { continue }
             let helper = VVMarkdownSelectionHelper(layout: rendered.layout, layoutEngine: rendered.layoutEngine)
@@ -568,8 +565,7 @@ extension VVChatTimelineView: VVTextHitTestable {
         var closestDistance = CGFloat.greatestFiniteMagnitude
 
         for (index, layout) in controller.layouts.enumerated() {
-            // Only allow selection on user messages
-            guard index < controller.messages.count, controller.messages[index].role == .user else { continue }
+            guard index < controller.messages.count else { continue }
 
             let frame = layout.frame
             if docPoint.y >= frame.minY && docPoint.y <= frame.maxY {
