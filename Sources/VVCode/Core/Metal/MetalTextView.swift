@@ -113,8 +113,8 @@ public final class MetalTextView: MTKView {
     private var currentLineNumber: Int = 0
     private var gutterWidth: CGFloat = 0
 
-    private var foldMarkerIconScale: CGFloat = 0.5
-    private var foldMarkerIconLineWidth: CGFloat = 1.3
+    private var foldMarkerIconScale: CGFloat = 0.42
+    private var foldMarkerIconLineWidth: CGFloat = 1.15
     private var foldMarkerHoverPadding: CGFloat = 5
     private var foldMarkerHoverCornerRadius: CGFloat = 4
     private var gutterTrackingArea: NSTrackingArea?
@@ -3341,29 +3341,39 @@ public final class MetalTextView: MTKView {
             + (layoutEngine.calculatedLineHeight - metrics.iconSize.height) / 2
         let iconRect = CGRect(origin: CGPoint(x: iconX, y: iconY), size: metrics.iconSize)
 
-        let p1: CGPoint
-        let p2: CGPoint
-        let p3: CGPoint
+        let strokeColor = color.simdColor
+        let insetX = max(metrics.lineWidth, metrics.iconSize.width * 0.18)
+        let insetY = max(metrics.lineWidth, metrics.iconSize.height * 0.16)
+        let minX = iconRect.minX + insetX
+        let maxX = iconRect.maxX - insetX
+        let midX = iconRect.midX
+        let minY = iconRect.minY + insetY
+        let maxY = iconRect.maxY - insetY
+        let iconHeight = max(1, maxY - minY)
+        let arrowOffset = iconHeight * 0.24
 
-        if isFolded {
-            // Right-pointing chevron (collapsed range)
-            p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
-            p2 = CGPoint(x: iconRect.maxX, y: iconRect.midY)
-            p3 = CGPoint(x: iconRect.minX, y: iconRect.maxY)
-        } else {
-            // Down-pointing chevron (expanded range)
-            p1 = CGPoint(x: iconRect.minX, y: iconRect.minY)
-            p2 = CGPoint(x: iconRect.midX, y: iconRect.maxY)
-            p3 = CGPoint(x: iconRect.maxX, y: iconRect.minY)
+        let topJointY = minY + arrowOffset
+        let bottomJointY = maxY - arrowOffset
+
+        func append(_ start: CGPoint, _ end: CGPoint) {
+            gutterChevronLines.append(
+                VVTableLinePrimitive(start: start, end: end, color: strokeColor, lineWidth: metrics.lineWidth)
+            )
         }
 
-        let strokeColor = color.simdColor
-        gutterChevronLines.append(
-            VVTableLinePrimitive(start: p1, end: p2, color: strokeColor, lineWidth: metrics.lineWidth)
-        )
-        gutterChevronLines.append(
-            VVTableLinePrimitive(start: p2, end: p3, color: strokeColor, lineWidth: metrics.lineWidth)
-        )
+        if isFolded {
+            // Matches rectangle.expand.vertical semantics (arrows pointing outward).
+            append(CGPoint(x: midX, y: minY), CGPoint(x: minX, y: topJointY))
+            append(CGPoint(x: midX, y: minY), CGPoint(x: maxX, y: topJointY))
+            append(CGPoint(x: midX, y: maxY), CGPoint(x: minX, y: bottomJointY))
+            append(CGPoint(x: midX, y: maxY), CGPoint(x: maxX, y: bottomJointY))
+        } else {
+            // Matches rectangle.compress.vertical semantics (arrows pointing inward).
+            append(CGPoint(x: minX, y: minY), CGPoint(x: midX, y: topJointY))
+            append(CGPoint(x: maxX, y: minY), CGPoint(x: midX, y: topJointY))
+            append(CGPoint(x: minX, y: maxY), CGPoint(x: midX, y: bottomJointY))
+            append(CGPoint(x: maxX, y: maxY), CGPoint(x: midX, y: bottomJointY))
+        }
     }
 
     private func mergeLineRanges(_ ranges: [ClosedRange<Int>]) -> [ClosedRange<Int>] {
