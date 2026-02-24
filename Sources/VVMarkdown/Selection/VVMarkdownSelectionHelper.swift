@@ -459,8 +459,14 @@ public final class VVMarkdownSelectionHelper {
         let run = runs[closestRunIndex]
         let rect = closestRunRect ?? runHitBounds(run) ?? runLineBounds(run) ?? CGRect(x: run.position.x, y: run.position.y, width: 1, height: 1)
         let clampedX = min(max(point.x, rect.minX), rect.maxX)
-        let clampedIndex = glyphIndexForX(run, x: clampedX) ?? 0
+        var clampedIndex = glyphIndexForX(run, x: clampedX) ?? 0
         let length = runTextLength(run)
+        let edgeSnapTolerance = max(0.75, min(2, rect.width * 0.02))
+        if clampedX >= rect.maxX - edgeSnapTolerance {
+            clampedIndex = length
+        } else if clampedX <= rect.minX + edgeSnapTolerance {
+            clampedIndex = 0
+        }
         let index = max(0, min(clampedIndex, length))
         return MarkdownTextPosition(
             blockIndex: blockIndex,
@@ -574,19 +580,19 @@ public final class VVMarkdownSelectionHelper {
                     }
 
                     if let horizontal = runHorizontalBounds(run) {
-                        if startIndex == 0 {
+                        if isStartRun && startIndex <= 1 {
                             startX = min(startX, horizontal.minX)
                         }
-                        if endIndex == length {
+                        if isEndRun && endIndex >= max(0, length - 1) {
                             endX = max(endX, horizontal.maxX)
                         }
                     }
 
                     let edgePad: CGFloat = 0.75
-                    if startIndex == 0 {
+                    if isStartRun && startIndex <= 1 {
                         startX -= edgePad
                     }
-                    if endIndex == length {
+                    if isEndRun && endIndex >= max(0, length - 1) {
                         endX += edgePad
                     }
 
