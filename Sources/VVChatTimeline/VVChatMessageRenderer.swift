@@ -282,7 +282,10 @@ public final class VVChatMessageRenderer {
             }
         }
         let contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
-        let contentMinX = contentBounds?.minX ?? 0
+        // Only compensate positive scene offsets. Negative minX can be produced by
+        // markdown sub-primitives (e.g. list markers/row adorners) and should not
+        // shift the whole message body to the right.
+        let contentMinX = max(0, contentBounds?.minX ?? 0)
         let contentMinY = min(0, contentBounds?.minY ?? 0)
         var imageURLs = Set(collectImageURLs(from: layout))
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
