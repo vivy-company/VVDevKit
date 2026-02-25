@@ -584,20 +584,22 @@ public final class VVMarkdownSelectionHelper {
 
                     let horizontal = runHorizontalBounds(run)
                     let minVisualX = horizontal?.minX ?? min(startX, endX)
-                    var maxVisualX = horizontal?.maxX ?? max(startX, endX)
-                    let typographicWidth = CGFloat(CTLineGetTypographicBounds(metrics.line, nil, nil, nil))
-                    let typographicMaxX = metrics.originX + max(0, typographicWidth)
-                    maxVisualX = max(maxVisualX, typographicMaxX)
+                    let maxVisualX = horizontal?.maxX ?? max(startX, endX)
 
                     if atStartEdge {
-                        startX = min(startX, minVisualX) - min(0.9, metrics.lineHeight * 0.05)
+                        startX = min(startX, minVisualX) - min(0.7, metrics.lineHeight * 0.04)
                     }
                     if atEndEdge {
-                        endX = max(endX, maxVisualX) + min(1.2, metrics.lineHeight * 0.06)
+                        endX = max(endX, maxVisualX) + min(1.0, metrics.lineHeight * 0.05)
                     }
 
                     // Clamp overshoot so selection does not visibly exceed glyph bounds in non-edge cases.
-                    let maxVisualOvershoot = max(0.75, min(1.8, metrics.lineHeight * 0.08))
+                    let maxVisualOvershoot: CGFloat
+                    if atStartEdge || atEndEdge {
+                        maxVisualOvershoot = max(0.85, min(1.4, metrics.lineHeight * 0.06))
+                    } else {
+                        maxVisualOvershoot = max(0.35, min(0.7, metrics.lineHeight * 0.03))
+                    }
                     startX = max(startX, minVisualX - maxVisualOvershoot)
                     endX = min(endX, maxVisualX + maxVisualOvershoot)
 
