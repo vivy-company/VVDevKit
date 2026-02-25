@@ -282,7 +282,7 @@ public final class VVChatMessageRenderer {
             }
         }
         let contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
-        let contentMinX = min(0, contentBounds?.minX ?? 0)
+        let contentMinX = contentBounds?.minX ?? 0
         let contentMinY = min(0, contentBounds?.minY ?? 0)
         var imageURLs = Set(collectImageURLs(from: layout))
         let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
