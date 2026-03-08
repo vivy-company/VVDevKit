@@ -160,6 +160,7 @@ public final class VVChatMessageRenderer {
         let height: CGFloat
         let visualWidth: CGFloat
         let interactiveRegions: [VVChatInteractiveRegion]
+        let imageURLs: [String]
     }
 
     private typealias ContentResources = (layoutEngine: MarkdownLayoutEngine, pipeline: VVMarkdownRenderPipeline)
@@ -313,6 +314,7 @@ public final class VVChatMessageRenderer {
             contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
             contentMinX = max(0, contentBounds?.minX ?? 0)
             contentMinY = min(0, contentBounds?.minY ?? 0)
+            imageURLs = Set(customRender.imageURLs)
             measuredWidth = customRender.visualWidth
             interactiveRegions = customRender.interactiveRegions
         } else {
@@ -802,6 +804,7 @@ public final class VVChatMessageRenderer {
 
         var builder = VVSceneBuilder()
         var interactiveRegions: [VVChatInteractiveRegion] = []
+        var imageURLs: [String] = []
         var currentY: CGFloat = 0
 
         let titleTextWidth = max(1, width - titleIconSize - titleIconSpacing)
@@ -816,6 +819,7 @@ public final class VVChatMessageRenderer {
                 cornerRadius: 2
             )
             builder.add(kind: .image(icon), zIndex: 0)
+            imageURLs.append(iconURL)
             titleTextX = titleIconSize + titleIconSpacing
         }
         let titleTextY = currentY + max(0, (titleVisualHeight - titleRender.height) * 0.5) - titleRender.minY
@@ -942,7 +946,8 @@ public final class VVChatMessageRenderer {
             scene: builder.scene,
             height: currentY,
             visualWidth: width,
-            interactiveRegions: interactiveRegions
+            interactiveRegions: interactiveRegions,
+            imageURLs: imageURLs
         )
     }
 
