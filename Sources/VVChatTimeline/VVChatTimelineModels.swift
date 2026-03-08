@@ -11,6 +11,16 @@ public enum VVChatMessageState: Sendable {
     case final
 }
 
+public struct VVHeaderBadge: Hashable, Sendable {
+    public let text: String
+    public let color: SIMD4<Float>
+
+    public init(text: String, color: SIMD4<Float>) {
+        self.text = text
+        self.color = color
+    }
+}
+
 public struct VVChatMessagePresentation: Hashable, Sendable {
     public var bubbleStyle: VVChatBubbleStyle?
     public var showsHeader: Bool?
@@ -34,6 +44,8 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
     public var textOpacityMultiplier: Float?
     public var prefixGlyphColor: SIMD4<Float>?
     public var prefixGlyphCount: Int?
+    /// Colored text badges rendered inline after the header title.
+    public var headerBadges: [VVHeaderBadge]?
 
     public init(
         bubbleStyle: VVChatBubbleStyle? = nil,
@@ -55,7 +67,8 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         contentFontScale: CGFloat? = nil,
         textOpacityMultiplier: Float? = nil,
         prefixGlyphColor: SIMD4<Float>? = nil,
-        prefixGlyphCount: Int? = nil
+        prefixGlyphCount: Int? = nil,
+        headerBadges: [VVHeaderBadge]? = nil
     ) {
         self.bubbleStyle = bubbleStyle
         self.showsHeader = showsHeader
@@ -77,6 +90,7 @@ public struct VVChatMessagePresentation: Hashable, Sendable {
         self.textOpacityMultiplier = textOpacityMultiplier
         self.prefixGlyphColor = prefixGlyphColor
         self.prefixGlyphCount = prefixGlyphCount
+        self.headerBadges = headerBadges
     }
 }
 

@@ -358,7 +358,14 @@ public final class VVChatMessageRenderer {
         let headerTrailingIconURL = shouldShowHeader ? normalizedAssetURL(presentation?.headerTrailingIconURL) : nil
         let headerTrailingHasIcon = (headerTrailingIconURL?.isEmpty == false)
         let headerTrailingIconFootprint: CGFloat = headerTrailingHasIcon ? (max(8, style.headerIconSize) + max(0, style.headerIconSpacing)) : 0
-        let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint + headerTrailingIconFootprint)
+        let headerBadgesWidth: CGFloat = {
+            guard let badges = presentation?.headerBadges, !badges.isEmpty else { return 0 }
+            let spacing: CGFloat = 6
+            return badges.reduce(CGFloat(0)) { sum, badge in
+                sum + spacing + Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+            }
+        }()
+        let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint + headerTrailingIconFootprint + headerBadgesWidth)
         let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
         let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
         let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
@@ -367,7 +374,7 @@ public final class VVChatMessageRenderer {
         if headerText.isEmpty {
             headerRender = nil
         } else {
-            headerRender = renderHeader(text: headerText, iconURL: headerIconURL, trailingIconURL: headerTrailingIconURL, width: metaWidth)
+            headerRender = renderHeader(text: headerText, iconURL: headerIconURL, trailingIconURL: headerTrailingIconURL, badges: presentation?.headerBadges, width: metaWidth)
             headerRender?.imageURLs.forEach { imageURLs.insert($0) }
         }
 
@@ -692,14 +699,21 @@ public final class VVChatMessageRenderer {
         return VVScene(primitives: primitives)
     }
 
-    private func renderHeader(text: String, iconURL: String?, trailingIconURL: String? = nil, width: CGFloat) -> HeaderRender {
+    private func renderHeader(text: String, iconURL: String?, trailingIconURL: String? = nil, badges: [VVHeaderBadge]? = nil, width: CGFloat) -> HeaderRender {
         let hasIcon = (iconURL?.isEmpty == false)
         let iconSize = hasIcon ? max(8, style.headerIconSize) : 0
         let iconSpacing = hasIcon ? max(0, style.headerIconSpacing) : 0
         let hasTrailingIcon = (trailingIconURL?.isEmpty == false)
         let trailingIconSize = hasTrailingIcon ? max(8, style.headerIconSize) : 0
         let trailingIconSpacing = hasTrailingIcon ? max(0, style.headerIconSpacing) : 0
-        let textWidth = max(1, width - iconSize - iconSpacing - trailingIconSize - trailingIconSpacing)
+        let badgeSpacing: CGFloat = 6
+        let badgesTotalWidth: CGFloat = {
+            guard let badges, !badges.isEmpty else { return 0 }
+            return badges.reduce(CGFloat(0)) { sum, badge in
+                sum + badgeSpacing + Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+            }
+        }()
+        let textWidth = max(1, width - iconSize - iconSpacing - trailingIconSize - trailingIconSpacing - badgesTotalWidth)
         let textRender = renderMeta(
             text: text,
             layoutEngine: headerLayoutEngine,
@@ -735,6 +749,26 @@ public final class VVChatMessageRenderer {
             builder.add(node: VVNode.fromScene(textRender.scene))
         }
 
+        // Render colored badges after the header text
+        if let badges, !badges.isEmpty {
+            let titleTextWidth = Self.singleLineMetaWidth(text, font: style.headerFont)
+            var badgeX = textX + titleTextWidth
+            for badge in badges {
+                badgeX += badgeSpacing
+                let badgeRender = renderMeta(
+                    text: badge.text,
+                    layoutEngine: headerLayoutEngine,
+                    pipeline: headerPipeline,
+                    width: max(1, width - badgeX)
+                )
+                let badgeScene = recolorScene(badgeRender.scene, color: badge.color)
+                builder.withOffset(CGPoint(x: badgeX, y: textOffsetY)) { builder in
+                    builder.add(node: VVNode.fromScene(badgeScene))
+                }
+                badgeX += Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+            }
+        }
+
         if hasTrailingIcon, let trailingIconURL {
             let trailingIconY = max(0, (height - trailingIconSize) * 0.5)
             let trailingX = width - trailingIconSize
@@ -752,6 +786,21 @@ public final class VVChatMessageRenderer {
             height: height,
             imageURLs: allImageURLs
         )
+    }
+
+    /// Replace all glyph colors in a scene with the given color.
+    private func recolorScene(_ scene: VVScene, color: SIMD4<Float>) -> VVScene {
+        var primitives = scene.primitives
+        for i in primitives.indices {
+            switch primitives[i].kind {
+            case .glyph(var glyph):
+                glyph.color = color
+                primitives[i] = VVPrimitive(kind: .glyph(glyph), zIndex: primitives[i].zIndex)
+            default:
+                break
+            }
+        }
+        return VVScene(primitives: primitives)
     }
 
     private func makeMetaDocument(text: String) -> ParsedMarkdownDocument {
