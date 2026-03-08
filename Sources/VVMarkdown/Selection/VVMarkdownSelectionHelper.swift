@@ -345,6 +345,118 @@ public final class VVMarkdownSelectionHelper {
         return lineRect
     }
 
+    // MARK: - Link Hit Testing
+
+    public func linkURL(at point: CGPoint) -> String? {
+        for block in layout.blocks {
+            if let url = linkURL(in: block, point: point) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func linkURL(in block: LayoutBlock, point: CGPoint) -> String? {
+        switch block.content {
+        case .text(let runs):
+            return linkURL(in: runs, point: point)
+        case .inline(let runs, let images):
+            if let url = linkURL(in: runs, point: point) {
+                return url
+            }
+            return linkURL(in: images, point: point)
+        case .imageRow(let images):
+            return linkURL(in: images, point: point)
+        case .code:
+            return nil
+        case .listItems(let items):
+            return linkURL(in: items, point: point)
+        case .quoteBlocks(let blocks):
+            for nested in blocks {
+                if let url = linkURL(in: nested, point: point) {
+                    return url
+                }
+            }
+            return nil
+        case .tableRows(let rows):
+            for row in rows {
+                for cell in row.cells {
+                    if let url = linkURL(in: cell.textRuns, point: point) {
+                        return url
+                    }
+                    if let url = linkURL(in: cell.inlineImages, point: point) {
+                        return url
+                    }
+                }
+            }
+            return nil
+        case .definitionList(let items):
+            for item in items {
+                if let url = linkURL(in: item.termRuns, point: point) {
+                    return url
+                }
+                if let url = linkURL(in: item.termImages, point: point) {
+                    return url
+                }
+                for (index, runs) in item.definitionRuns.enumerated() {
+                    if let url = linkURL(in: runs, point: point) {
+                        return url
+                    }
+                    if item.definitionImages.indices.contains(index),
+                       let url = linkURL(in: item.definitionImages[index], point: point) {
+                        return url
+                    }
+                }
+            }
+            return nil
+        case .abbreviationList(let items):
+            for item in items {
+                if let url = linkURL(in: item.runs, point: point) {
+                    return url
+                }
+                if let url = linkURL(in: item.images, point: point) {
+                    return url
+                }
+            }
+            return nil
+        case .image, .thematicBreak, .math, .mermaid:
+            return nil
+        }
+    }
+
+    private func linkURL(in items: [LayoutListItem], point: CGPoint) -> String? {
+        for item in items {
+            if let url = linkURL(in: item.contentRuns, point: point) {
+                return url
+            }
+            if let url = linkURL(in: item.inlineImages, point: point) {
+                return url
+            }
+            if let url = linkURL(in: item.children, point: point) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func linkURL(in images: [LayoutInlineImage], point: CGPoint) -> String? {
+        for image in images {
+            if let linkURL = image.linkURL, !linkURL.isEmpty, image.frame.contains(point) {
+                return linkURL
+            }
+        }
+        return nil
+    }
+
+    private func linkURL(in runs: [LayoutTextRun], point: CGPoint) -> String? {
+        for run in runs {
+            guard let url = run.style.linkURL, !url.isEmpty else { continue }
+            guard let hitBounds = runHitBounds(run), hitBounds.contains(point) else { continue }
+            return url
+        }
+        return nil
+    }
+
     // MARK: - Hit Testing
 
     public func hitTest(at point: CGPoint) -> MarkdownTextPosition? {

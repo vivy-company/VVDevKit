@@ -8,19 +8,22 @@ public struct VVChatTimelineViewRepresentable: NSViewRepresentable {
     public var onUserMessageCopyAction: ((String) -> Void)?
     public var onUserMessageCopyHoverChange: ((String?) -> Void)?
     public var onEntryActivate: ((String) -> Void)?
+    public var onLinkActivate: ((String) -> Void)?
 
     public init(
         controller: VVChatTimelineController,
         onStateChange: ((VVChatTimelineState) -> Void)? = nil,
         onUserMessageCopyAction: ((String) -> Void)? = nil,
         onUserMessageCopyHoverChange: ((String?) -> Void)? = nil,
-        onEntryActivate: ((String) -> Void)? = nil
+        onEntryActivate: ((String) -> Void)? = nil,
+        onLinkActivate: ((String) -> Void)? = nil
     ) {
         self.controller = controller
         self.onStateChange = onStateChange
         self.onUserMessageCopyAction = onUserMessageCopyAction
         self.onUserMessageCopyHoverChange = onUserMessageCopyHoverChange
         self.onEntryActivate = onEntryActivate
+        self.onLinkActivate = onLinkActivate
     }
 
     public func makeNSView(context: Context) -> VVChatTimelineView {
@@ -30,6 +33,7 @@ public struct VVChatTimelineViewRepresentable: NSViewRepresentable {
         view.onUserMessageCopyAction = onUserMessageCopyAction
         view.onUserMessageCopyHoverChange = onUserMessageCopyHoverChange
         view.onEntryActivate = onEntryActivate
+        view.onLinkActivate = onLinkActivate
         return view
     }
 
@@ -39,6 +43,7 @@ public struct VVChatTimelineViewRepresentable: NSViewRepresentable {
         nsView.onUserMessageCopyAction = onUserMessageCopyAction
         nsView.onUserMessageCopyHoverChange = onUserMessageCopyHoverChange
         nsView.onEntryActivate = onEntryActivate
+        nsView.onLinkActivate = onLinkActivate
     }
 }
 
@@ -48,19 +53,22 @@ public struct VVChatTimelineViewSwiftUI: View {
     public var onUserMessageCopyAction: ((String) -> Void)?
     public var onUserMessageCopyHoverChange: ((String?) -> Void)?
     public var onEntryActivate: ((String) -> Void)?
+    public var onLinkActivate: ((String) -> Void)?
 
     public init(
         controller: VVChatTimelineController,
         onStateChange: ((VVChatTimelineState) -> Void)? = nil,
         onUserMessageCopyAction: ((String) -> Void)? = nil,
         onUserMessageCopyHoverChange: ((String?) -> Void)? = nil,
-        onEntryActivate: ((String) -> Void)? = nil
+        onEntryActivate: ((String) -> Void)? = nil,
+        onLinkActivate: ((String) -> Void)? = nil
     ) {
         self.controller = controller
         self.onStateChange = onStateChange
         self.onUserMessageCopyAction = onUserMessageCopyAction
         self.onUserMessageCopyHoverChange = onUserMessageCopyHoverChange
         self.onEntryActivate = onEntryActivate
+        self.onLinkActivate = onLinkActivate
     }
 
     public var body: some View {
@@ -69,7 +77,8 @@ public struct VVChatTimelineViewSwiftUI: View {
             onStateChange: onStateChange,
             onUserMessageCopyAction: onUserMessageCopyAction,
             onUserMessageCopyHoverChange: onUserMessageCopyHoverChange,
-            onEntryActivate: onEntryActivate
+            onEntryActivate: onEntryActivate,
+            onLinkActivate: onLinkActivate
         )
     }
 }

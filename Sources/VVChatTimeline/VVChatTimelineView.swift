@@ -50,7 +50,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public var onUserMessageCopyAction: ((String) -> Void)?
     public var onUserMessageCopyHoverChange: ((String?) -> Void)?
     public var onEntryActivate: ((String) -> Void)?
+    public var onLinkActivate: ((String) -> Void)?
     private var hoveredFooterActionMessageID: String?
+    private var hoveredLinkURL: String?
     private var jumpAnimationToken = UUID()
     private var isAnimatingJump = false
     private var displayLink: CVDisplayLink?
@@ -685,7 +687,16 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags) {
         updateFooterActionHover(at: point)
+        updateLinkHover(at: point)
         if handleFooterActionTap(at: point) {
+            return
+        }
+        if clickCount >= 1, let url = linkURL(at: point) {
+            if let onLinkActivate {
+                onLinkActivate(url)
+            } else if let resolvedURL = URL(string: url) {
+                NSWorkspace.shared.open(resolvedURL)
+            }
             return
         }
         if clickCount >= 1, let entryID = timelineEntryID(at: point) {
@@ -707,10 +718,12 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
 
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseMovedTo point: CGPoint) {
         updateFooterActionHover(at: point)
+        updateLinkHover(at: point)
     }
 
     public func chatTimelineMetalViewMouseExited(_ view: VVChatTimelineMetalView) {
         updateFooterActionHover(at: nil)
+        updateLinkHover(at: nil)
     }
 }
 
@@ -726,6 +739,44 @@ private extension VVChatTimelineView {
         guard hoveredID != hoveredFooterActionMessageID else { return }
         hoveredFooterActionMessageID = hoveredID
         onUserMessageCopyHoverChange?(hoveredID)
+    }
+
+    func updateLinkHover(at point: CGPoint?) {
+        let hoveredURL = point.flatMap { linkURL(at: $0) }
+        guard hoveredURL != hoveredLinkURL else { return }
+        hoveredLinkURL = hoveredURL
+
+        if hoveredURL != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    func linkURL(at point: CGPoint) -> String? {
+        guard let controller else { return nil }
+        let docPoint = viewPointToDocumentPoint(point)
+
+        for (index, layout) in controller.layouts.enumerated() {
+            guard layout.frame.contains(docPoint),
+                  let itemLayout = controller.itemLayout(at: index),
+                  let rendered = controller.renderedMessage(for: itemLayout.id) else {
+                continue
+            }
+
+            let contentOffset = rendered.selectionContentOffset
+            let localPoint = CGPoint(
+                x: docPoint.x - layout.frame.origin.x - layout.contentOffset.x - contentOffset.x,
+                y: docPoint.y - layout.frame.origin.y - layout.contentOffset.y - contentOffset.y
+            )
+
+            let helper = VVMarkdownSelectionHelper(layout: rendered.layout, layoutEngine: rendered.layoutEngine)
+            if let url = helper.linkURL(at: localPoint) {
+                return url
+            }
+        }
+
+        return nil
     }
 
     func footerActionMessageID(at point: CGPoint) -> String? {
