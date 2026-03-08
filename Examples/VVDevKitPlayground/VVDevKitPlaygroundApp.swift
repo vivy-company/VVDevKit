@@ -1690,7 +1690,7 @@ struct ChatPlaygroundView: View {
             currentDraft.revision += 1
             await MainActor.run {
                 replaceMessage(currentDraft)
-                controller.updateDraftMessage(id: currentDraft.id, content: currentDraft.content, throttle: false)
+                controller.updateDraftMessage(id: currentDraft.id, content: currentDraft.content, throttle: true)
             }
             try? await Task.sleep(nanoseconds: UInt64(chunkDelay * 1_000_000_000))
         }
@@ -1757,7 +1757,7 @@ struct ChatPlaygroundView: View {
             streamedFinal.revision += 1
             await MainActor.run {
                 replaceMessage(streamedFinal)
-                controller.updateDraftMessage(id: streamedFinal.id, content: streamedFinal.content, throttle: false)
+                controller.updateDraftMessage(id: streamedFinal.id, content: streamedFinal.content, throttle: true)
             }
             try? await Task.sleep(nanoseconds: UInt64(chunkDelay * 1_000_000_000))
         }
@@ -4642,6 +4642,7 @@ enum SampleData {
         let guideBorder = SIMD4(fg.x, fg.y, fg.z, 0.12)
         let ghostStroke = SIMD4(fg.x, fg.y, fg.z, 0.38)
         let originColor = SIMD4<Float>(1, 1, 1, 0.9)
+        let env = VVLayoutEnvironment(scale: 1, defaultTextColor: fg, defaultCornerRadius: config.cornerRadius)
 
         func card(at origin: CGPoint) -> CGRect {
             CGRect(origin: origin, size: cardSize)
@@ -4674,13 +4675,24 @@ enum SampleData {
             return path.build(fill: fill, stroke: stroke, transform: transform)
         }
 
-        func addGuideCard(_ frame: CGRect) {
+        func addGuideCard(_ frame: CGRect, title: String, detail: String) {
             builder.add(kind: .quad(VVQuadPrimitive(
                 frame: frame,
                 color: guideFill,
                 cornerRadii: VVCornerRadii(18),
                 border: VVBorder(width: 1, color: guideBorder)
             )), zIndex: 0)
+
+            let labelNode = VVStack(spacing: 4, alignment: .leading) {
+                VText(title, font: .headline, color: fg.withOpacity(0.94))
+                VText(detail, font: .caption, color: fg.withOpacity(0.62), maxLines: 2)
+            }
+            .renderNode(width: frame.width - 28, env: env)
+            builder.add(node: VVNode(
+                offset: CGPoint(x: frame.minX + 14, y: frame.minY + 14),
+                zIndex: 2,
+                children: [labelNode]
+            ))
 
             let center = CGPoint(x: frame.midX, y: frame.midY)
             builder.add(kind: .quad(VVQuadPrimitive(
@@ -4695,12 +4707,13 @@ enum SampleData {
         let bottomLeft = card(at: CGPoint(x: inset, y: topLeft.maxY + spacing.height))
         let bottomRight = card(at: CGPoint(x: topRight.minX, y: bottomLeft.minY))
 
-        for frame in [topLeft, topRight, bottomLeft, bottomRight] {
-            addGuideCard(frame)
-        }
+        addGuideCard(topLeft, title: "Translate", detail: "A direct x/y move with a ghost start frame.")
+        addGuideCard(topRight, title: "Scale", detail: "Scaling around the local center, then positioning the result.")
+        addGuideCard(bottomLeft, title: "Rotate", detail: "Rotation kept local so the star stays centered in its card.")
+        addGuideCard(bottomRight, title: "Compose", detail: "Scale plus rotation applied before final placement.")
 
-        let translatedStart = CGPoint(x: topLeft.midX - 54, y: topLeft.midY)
-        let translatedEnd = CGPoint(x: topLeft.midX + 44, y: topLeft.midY)
+        let translatedStart = CGPoint(x: topLeft.midX - 54, y: topLeft.midY + 18)
+        let translatedEnd = CGPoint(x: topLeft.midX + 44, y: topLeft.midY + 18)
         builder.add(kind: .path(rectPath(
             size: CGSize(width: 76, height: 50),
             cornerRadius: 12,
@@ -4716,7 +4729,7 @@ enum SampleData {
             transform: .identity.translated(by: translatedEnd)
         )), zIndex: 2)
 
-        let scaleCenter = CGPoint(x: topRight.midX, y: topRight.midY)
+        let scaleCenter = CGPoint(x: topRight.midX, y: topRight.midY + 18)
         builder.add(kind: .path(rectPath(
             size: CGSize(width: 62, height: 42),
             cornerRadius: 10,
@@ -4734,7 +4747,7 @@ enum SampleData {
                 .translated(by: scaleCenter)
         )), zIndex: 2)
 
-        let rotationCenter = CGPoint(x: bottomLeft.midX, y: bottomLeft.midY)
+        let rotationCenter = CGPoint(x: bottomLeft.midX, y: bottomLeft.midY + 18)
         builder.add(kind: .path(starPath(
             outerRadius: 42,
             innerRadius: 18,
@@ -4752,7 +4765,7 @@ enum SampleData {
                 .translated(by: rotationCenter)
         )), zIndex: 2)
 
-        let composedCenter = CGPoint(x: bottomRight.midX, y: bottomRight.midY)
+        let composedCenter = CGPoint(x: bottomRight.midX, y: bottomRight.midY + 18)
         builder.add(kind: .path(rectPath(
             size: CGSize(width: 70, height: 44),
             cornerRadius: 12,
@@ -4781,9 +4794,11 @@ enum SampleData {
     ) -> [String: VVLayoutAnimationSnapshot] {
         let fg = foregroundColor(for: configuration.backgroundColor)
         let env = VVLayoutEnvironment(scale: 1, defaultTextColor: fg, defaultCornerRadius: configuration.cornerRadius)
-        let width = min(max(540, size.width * 0.52), 720)
+        let canvas = CGRect(x: 44, y: 36, width: max(1080, size.width - 88), height: max(740, size.height - 72))
+        let stage = CGRect(x: canvas.minX + 28, y: canvas.minY + 74, width: min(canvas.width - 300, 760), height: canvas.height - 118)
+        let contentWidth = stage.width - 56
         let mediaSize = expanded ? CGSize(width: 180, height: 156) : CGSize(width: 132, height: 112)
-        let copyWidth = max(260, width - mediaSize.width - 20)
+        let copyWidth = max(260, contentWidth - mediaSize.width - 20)
 
         let view = VVStack(spacing: 18, alignment: .leading) {
             VVStack(spacing: 6, alignment: .leading) {
@@ -4796,7 +4811,7 @@ enum SampleData {
                 )
             }
             .padding(18)
-            .frame(width: width)
+            .frame(width: contentWidth)
             .background(color: .indigo.withOpacity(0.16), cornerRadius: configuration.cornerRadius)
                 .id("hero")
                 .transition(.morph)
@@ -4863,7 +4878,7 @@ enum SampleData {
                 .padding(18)
                 .background(color: fg.withOpacity(0.045), cornerRadius: configuration.cornerRadius)
                 .border(color: fg.withOpacity(0.12), width: 1, cornerRadii: VVCornerRadii(configuration.cornerRadius))
-                .frame(width: width)
+                .frame(width: contentWidth)
                 .id("accordion")
                 .transition(.accordion)
                 .animation(.spring(response: 0.4, dampingFraction: 0.8))
@@ -4871,7 +4886,7 @@ enum SampleData {
         }
         .padding(40)
 
-        return view.renderAnimationSnapshots(width: width, env: env)
+        return view.renderAnimationSnapshots(width: contentWidth, env: env)
     }
 
     static func transitionAnimationScene(
@@ -4885,6 +4900,7 @@ enum SampleData {
         let cool = SIMD4<Float>(0.26, 0.73, 0.88, 1)
         let canvas = CGRect(x: 44, y: 36, width: max(1080, size.width - 88), height: max(740, size.height - 72))
         let stage = CGRect(x: canvas.minX + 28, y: canvas.minY + 74, width: min(canvas.width - 300, 760), height: canvas.height - 118)
+        let contentOrigin = CGPoint(x: stage.minX + 28, y: stage.minY + 72)
         let rail = CGRect(x: stage.maxX + 24, y: stage.minY, width: 220, height: stage.height)
         let env = VVLayoutEnvironment(scale: 1, defaultTextColor: fg, defaultCornerRadius: configuration.cornerRadius)
         let checkpoints = [
@@ -4964,7 +4980,7 @@ enum SampleData {
         }
 
         if let rowSnapshot = state["row"] {
-            let rowFrame = transitionSnapshotFrame(rowSnapshot)
+            let rowFrame = transitionSnapshotFrame(rowSnapshot, origin: contentOrigin)
             children.append(
                 transitionPositioned(
                     rowFrame,
@@ -4978,7 +4994,7 @@ enum SampleData {
         }
 
         if let heroSnapshot = state["hero"] {
-            let frame = transitionSnapshotFrame(heroSnapshot)
+            let frame = transitionSnapshotFrame(heroSnapshot, origin: contentOrigin)
             children.append(
                 transitionPositioned(
                     frame,
@@ -5001,7 +5017,7 @@ enum SampleData {
         }
 
         if let mediaSnapshot = state["media"] {
-            let frame = transitionSnapshotFrame(mediaSnapshot)
+            let frame = transitionSnapshotFrame(mediaSnapshot, origin: contentOrigin)
             children.append(
                 transitionPositioned(
                     frame,
@@ -5017,7 +5033,7 @@ enum SampleData {
         }
 
         if let copySnapshot = state["copy"] {
-            let frame = transitionSnapshotFrame(copySnapshot)
+            let frame = transitionSnapshotFrame(copySnapshot, origin: contentOrigin)
             children.append(
                 transitionPositioned(
                     frame,
@@ -5034,7 +5050,7 @@ enum SampleData {
         }
 
         if let detailSnapshot = state["detail-line"] {
-            let frame = transitionSnapshotFrame(detailSnapshot)
+            let frame = transitionSnapshotFrame(detailSnapshot, origin: contentOrigin)
             children.append(
                 transitionPositioned(
                     frame,
@@ -5047,7 +5063,7 @@ enum SampleData {
         }
 
         if let accordionSnapshot = state["accordion"] {
-            let frame = transitionSnapshotFrame(accordionSnapshot)
+            let frame = transitionSnapshotFrame(accordionSnapshot, origin: contentOrigin)
             children.append(
                 transitionPositioned(
                     frame,
@@ -5076,10 +5092,10 @@ enum SampleData {
         return VVZStack(children: children).renderScene(width: canvas.maxX + 40, env: env)
     }
 
-    private static func transitionSnapshotFrame(_ snapshot: VVLayoutAnimationSnapshot) -> CGRect {
+    private static func transitionSnapshotFrame(_ snapshot: VVLayoutAnimationSnapshot, origin: CGPoint) -> CGRect {
         CGRect(
-            x: snapshot.frame.midX - snapshot.frame.width * snapshot.scale * 0.5,
-            y: snapshot.frame.midY - snapshot.frame.height * snapshot.scale * 0.5,
+            x: origin.x + snapshot.frame.midX - snapshot.frame.width * snapshot.scale * 0.5,
+            y: origin.y + snapshot.frame.midY - snapshot.frame.height * snapshot.scale * 0.5,
             width: snapshot.frame.width * snapshot.scale,
             height: snapshot.frame.height * snapshot.scale
         )
