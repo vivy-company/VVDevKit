@@ -803,7 +803,7 @@ public final class VVChatMessageRenderer {
         let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
         let rowDeltaFont = style.timestampFont.withSize(max(style.timestampFont.pointSize + 1, 13))
         let rowVerticalPadding: CGFloat = 7
-        let rowHighlightHorizontalInset: CGFloat = 0
+        let rowHighlightHorizontalInset: CGFloat = 10
         let rowHighlightVerticalInset: CGFloat = 3
         let titleSubtitleSpacing: CGFloat = 4
         let dividerSpacingTop: CGFloat = 8
@@ -931,9 +931,9 @@ public final class VVChatMessageRenderer {
 
             if let actionURL = row.actionURL?.trimmingCharacters(in: .whitespacesAndNewlines), !actionURL.isEmpty {
                 let hoverFrame = CGRect(
-                    x: rowHighlightHorizontalInset,
+                    x: -rowHighlightHorizontalInset,
                     y: rowTop + rowHighlightVerticalInset,
-                    width: max(0, width - rowHighlightHorizontalInset * 2),
+                    width: max(0, width + rowHighlightHorizontalInset * 2),
                     height: max(0, rowHeight - rowHighlightVerticalInset * 2)
                 )
                 interactiveRegions.append(
