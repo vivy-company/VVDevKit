@@ -51,19 +51,22 @@ public struct VVChatTimelineMotionStyle: Hashable, Sendable {
     public var viewportFollowAnimation: VVAnimationDescriptor
     public var viewportClampAnimation: VVAnimationDescriptor
     public var jumpToLatestAnimation: VVAnimationDescriptor
+    public var updateBatchInterval: TimeInterval
 
     public init(
         layoutTransition: VVTransition = .accordion,
         layoutAnimation: VVAnimationDescriptor = .smooth(duration: 0.26),
         viewportFollowAnimation: VVAnimationDescriptor = .smooth(duration: 0.24),
         viewportClampAnimation: VVAnimationDescriptor = .smooth(duration: 0.22),
-        jumpToLatestAnimation: VVAnimationDescriptor = .smooth(duration: 0.34)
+        jumpToLatestAnimation: VVAnimationDescriptor = .timing(duration: 0.34, easing: .easeOut),
+        updateBatchInterval: TimeInterval = 1.0 / 45.0
     ) {
         self.layoutTransition = layoutTransition
         self.layoutAnimation = layoutAnimation
         self.viewportFollowAnimation = viewportFollowAnimation
         self.viewportClampAnimation = viewportClampAnimation
         self.jumpToLatestAnimation = jumpToLatestAnimation
+        self.updateBatchInterval = updateBatchInterval
     }
 }
 

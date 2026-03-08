@@ -67,6 +67,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var stableLayoutSnapshots: [String: VVLayoutAnimationSnapshot] = [:]
     private var visibleRenderRange: Range<Int> = 0..<0
     private var displayLink: CVDisplayLink?
+    private var pendingControllerUpdate: VVChatTimelineController.Update?
+    private var hasScheduledControllerUpdateApply = false
+    private var pendingControllerUpdateWorkItem: DispatchWorkItem?
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -98,6 +101,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     deinit {
         stopDisplayLink()
+        pendingControllerUpdateWorkItem?.cancel()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -184,13 +188,17 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     private func bindController(oldValue: VVChatTimelineController?) {
         oldValue?.onUpdate = nil
+        pendingControllerUpdateWorkItem?.cancel()
+        pendingControllerUpdateWorkItem = nil
+        pendingControllerUpdate = nil
+        hasScheduledControllerUpdateApply = false
         didInitialScroll = false
         stopLayoutAnimation()
         stableLayoutSnapshots.removeAll(keepingCapacity: false)
         animatedLayoutSnapshots.removeAll(keepingCapacity: false)
         visibleRenderRange = 0..<0
         controller?.onUpdate = { [weak self] update in
-            self?.apply(update: update)
+            self?.enqueue(update: update)
         }
         if let style = controller?.currentStyle {
             metalView.updateFont(style.baseFont)
@@ -198,6 +206,40 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         }
         updateContentWidth()
         apply(update: .init(totalHeight: controller?.totalHeight ?? 0))
+    }
+
+    private func enqueue(update: VVChatTimelineController.Update) {
+        pendingControllerUpdate = merge(pendingControllerUpdate, with: update)
+        guard !hasScheduledControllerUpdateApply else { return }
+        hasScheduledControllerUpdateApply = true
+        let interval = controller?.currentStyle.motion.updateBatchInterval ?? 0
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.hasScheduledControllerUpdateApply = false
+            self.pendingControllerUpdateWorkItem = nil
+            guard let update = self.pendingControllerUpdate else { return }
+            self.pendingControllerUpdate = nil
+            self.apply(update: update)
+        }
+        pendingControllerUpdateWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, interval), execute: workItem)
+    }
+
+    private func merge(
+        _ existing: VVChatTimelineController.Update?,
+        with incoming: VVChatTimelineController.Update
+    ) -> VVChatTimelineController.Update {
+        guard let existing else { return incoming }
+        return VVChatTimelineController.Update(
+            insertedIndexes: existing.insertedIndexes.union(incoming.insertedIndexes),
+            updatedIndexes: existing.updatedIndexes.union(incoming.updatedIndexes),
+            removedIndexes: existing.removedIndexes.union(incoming.removedIndexes),
+            totalHeight: incoming.totalHeight,
+            heightDelta: existing.heightDelta + incoming.heightDelta,
+            changedIndex: incoming.changedIndex ?? existing.changedIndex,
+            shouldScrollToBottom: existing.shouldScrollToBottom || incoming.shouldScrollToBottom,
+            hasUnreadNewContent: incoming.hasUnreadNewContent
+        )
     }
 
     private func updateContentWidth() {
@@ -227,16 +269,15 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             compensateScrollIfNeeded(layout: layout, delta: update.heightDelta)
         }
 
-        if update.shouldScrollToBottom, !isAnimatingJump {
+        let transition = consumePendingOrImplicitTransition(for: update, controller: controller)
+
+        if !didInitialScroll, update.totalHeight > 0 {
+            scrollToBottom(animated: false)
+            didInitialScroll = true
+        } else if update.shouldScrollToBottom, !isAnimatingJump, transition == nil {
             scrollToBottom(animated: false)
             controller.updatePinnedState(distanceFromBottom: 0)
-            didInitialScroll = true
-        } else if !didInitialScroll, update.totalHeight > 0 {
-            scrollToBottom(animated: false)
-            didInitialScroll = true
         }
-
-        let transition = consumePendingOrImplicitTransition(for: update, controller: controller)
 
         if let transition {
             controller.pendingLayoutTransition = nil
