@@ -596,7 +596,15 @@ public final class VVChatMessageRenderer {
         }
 
         var scene = builder.scene
-        var adjustedInteractiveRegions = interactiveRegions
+        var adjustedInteractiveRegions = interactiveRegions.map { region in
+            VVChatInteractiveRegion(
+                id: region.id,
+                frame: region.frame.offsetBy(dx: selectionContentOffset.x, dy: selectionContentOffset.y),
+                action: region.action,
+                hoverFillColor: region.hoverFillColor,
+                cornerRadius: region.cornerRadius
+            )
+        }
         if leadingLaneWidth > 0 {
             var laneBuilder = VVSceneBuilder()
             if hasLeadingIcon, let leadingIconURL {
