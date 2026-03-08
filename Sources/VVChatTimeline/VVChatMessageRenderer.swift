@@ -995,6 +995,13 @@ public final class VVChatMessageRenderer {
     }
 
     private func renderHeader(text: String, iconURL: String?, trailingIconURL: String? = nil, badges: [VVHeaderBadge]? = nil, width: CGFloat) -> HeaderRender {
+        struct HeaderBadgeRender {
+            let scene: VVScene
+            let width: CGFloat
+            let minY: CGFloat
+            let visualHeight: CGFloat
+        }
+
         let hasIcon = (iconURL?.isEmpty == false)
         let iconSize = hasIcon ? max(8, style.headerIconSize) : 0
         let iconSpacing = hasIcon ? max(0, style.headerIconSpacing) : 0
@@ -1002,12 +1009,13 @@ public final class VVChatMessageRenderer {
         let trailingIconSize = hasTrailingIcon ? max(8, style.headerIconSize) : 0
         let trailingIconSpacing = hasTrailingIcon ? max(0, style.headerIconSpacing) : 0
         let badgeSpacing: CGFloat = 6
-        let badgesTotalWidth: CGFloat = {
-            guard let badges, !badges.isEmpty else { return 0 }
-            return badges.reduce(CGFloat(0)) { sum, badge in
-                sum + badgeSpacing + Self.singleLineMetaWidth(badge.text, font: style.headerFont)
-            }
-        }()
+
+        let rawBadges = badges ?? []
+        let badgesTotalWidth: CGFloat = rawBadges.enumerated().reduce(CGFloat(0)) { sum, item in
+            let spacing = item.offset == 0 ? 0 : badgeSpacing
+            return sum + spacing + Self.singleLineMetaWidth(item.element.text, font: style.headerFont)
+        }
+
         let textWidth = max(1, width - iconSize - iconSpacing - trailingIconSize - trailingIconSpacing - badgesTotalWidth)
         let textRender = renderMeta(
             text: text,
@@ -1019,8 +1027,30 @@ public final class VVChatMessageRenderer {
         let textBounds = sceneBounds(for: textRender.scene, layoutEngine: headerLayoutEngine)
         let textMinY = textBounds?.minY ?? 0
         let textVisualHeight = max(1, textBounds?.height ?? textHeight)
+
+        let badgeRenders: [HeaderBadgeRender] = rawBadges.map { badge in
+            let render = renderMeta(
+                text: badge.text,
+                layoutEngine: headerLayoutEngine,
+                pipeline: headerPipeline,
+                width: max(1, Self.singleLineMetaWidth(badge.text, font: style.headerFont))
+            )
+            let badgeScene = recolorScene(render.scene, color: badge.color)
+            let badgeBounds = sceneBounds(for: badgeScene, layoutEngine: headerLayoutEngine)
+            let badgeWidth = max(1, badgeBounds?.width ?? Self.singleLineMetaWidth(badge.text, font: style.headerFont))
+            let badgeMinY = badgeBounds?.minY ?? 0
+            let badgeVisualHeight = max(1, badgeBounds?.height ?? render.layout.totalHeight)
+            return HeaderBadgeRender(
+                scene: badgeScene,
+                width: badgeWidth,
+                minY: badgeMinY,
+                visualHeight: badgeVisualHeight
+            )
+        }
+
+        let badgesVisualHeight = badgeRenders.map(\.visualHeight).max() ?? 0
         let effectiveIconSize = max(iconSize, trailingIconSize)
-        let height = max(textVisualHeight, effectiveIconSize)
+        let height = max(textVisualHeight, badgesVisualHeight, effectiveIconSize)
         let textOffsetY = max(0, (height - textVisualHeight) * 0.5 - textMinY)
 
         var allImageURLs: [String] = []
@@ -1044,24 +1074,17 @@ public final class VVChatMessageRenderer {
             builder.add(node: VVNode.fromScene(textRender.scene))
         }
 
-        let titleTextWidth = Self.singleLineMetaWidth(text, font: style.headerFont)
+        let titleTextWidth = max(1, textBounds?.width ?? Self.singleLineMetaWidth(text, font: style.headerFont))
         var cursorX = textX + titleTextWidth
 
-        // Render colored badges after the header text
-        if let badges, !badges.isEmpty {
-            for badge in badges {
-                cursorX += badgeSpacing
-                let badgeRender = renderMeta(
-                    text: badge.text,
-                    layoutEngine: headerLayoutEngine,
-                    pipeline: headerPipeline,
-                    width: max(1, width - cursorX)
-                )
-                let badgeScene = recolorScene(badgeRender.scene, color: badge.color)
-                builder.withOffset(CGPoint(x: cursorX, y: textOffsetY)) { builder in
-                    builder.add(node: VVNode.fromScene(badgeScene))
+        if !badgeRenders.isEmpty {
+            for (index, badgeRender) in badgeRenders.enumerated() {
+                cursorX += index == 0 ? badgeSpacing : badgeSpacing
+                let badgeOffsetY = max(0, (height - badgeRender.visualHeight) * 0.5 - badgeRender.minY)
+                builder.withOffset(CGPoint(x: cursorX, y: badgeOffsetY)) { builder in
+                    builder.add(node: VVNode.fromScene(badgeRender.scene))
                 }
-                cursorX += Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+                cursorX += badgeRender.width
             }
         }
 
