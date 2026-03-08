@@ -76,7 +76,7 @@ struct VVMarkdownSceneBuilder {
             let imageView = VVImage(url: url, size: imageSize, cornerRadius: 4)
             return VVPositionedFrame(frame: block.frame, child: imageView, clipRect: clipRect)
         case .thematicBreak:
-            let divider = VDivider(thickness: 2, color: theme.thematicBreakColor, inset: 20)
+            let divider = VDivider(thickness: 1, color: theme.thematicBreakColor, inset: 0)
             return VVPositionedFrame(frame: block.frame, child: divider, clipRect: clipRect)
         case .code(let code, let language, let lines):
             var codeBuilder = VVSceneBuilder()
@@ -226,9 +226,9 @@ struct VVMarkdownSceneBuilder {
 
         case .thematicBreak:
             let line = VVLinePrimitive(
-                start: CGPoint(x: block.frame.origin.x + 20, y: block.frame.midY),
-                end: CGPoint(x: block.frame.maxX - 20, y: block.frame.midY),
-                thickness: 2,
+                start: CGPoint(x: block.frame.origin.x, y: block.frame.midY),
+                end: CGPoint(x: block.frame.maxX, y: block.frame.midY),
+                thickness: 1,
                 color: theme.thematicBreakColor
             )
             builder.add(kind: .line(line))
