@@ -59,9 +59,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var hoveredFooterActionMessageID: String?
     private var hoveredLinkURL: String?
     private var hoveredInteractiveRegionKey: String?
-    private var interactiveRegionHoverProgress: [String: CGFloat] = [:]
-    private var interactiveRegionHoverTargets: [String: CGFloat] = [:]
-    private var interactiveRegionHoverTimer: Timer?
     private var jumpAnimationToken = UUID()
     private var isAnimatingJump = false
     private var scrollAnimationTimer: Timer?
@@ -111,7 +108,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     deinit {
         stopScrollAnimation()
         stopLayoutAnimation()
-        stopInteractiveRegionHoverAnimation()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -721,11 +717,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                 return nil
             }
             let key = interactiveRegionKey(messageID: layout.id, regionID: region.id)
-            let progress = interactiveRegionHoverProgress[key] ?? 0
-            guard progress > 0.001 else { return nil }
+            guard key == hoveredInteractiveRegionKey else { return nil }
             return VVQuadPrimitive(
                 frame: region.frame.offsetBy(dx: itemOffset.x, dy: itemOffset.y),
-                color: SIMD4<Float>(hoverFillColor.x, hoverFillColor.y, hoverFillColor.z, hoverFillColor.w * Float(progress)),
+                color: hoverFillColor,
                 cornerRadius: region.cornerRadius
             )
         }
@@ -914,67 +909,9 @@ private extension VVChatTimelineView {
             return interactiveRegionKey(messageID: hit.messageID, regionID: hit.region.id)
         }
         guard hoveredKey != hoveredInteractiveRegionKey else { return hoveredKey != nil }
-        if let previous = hoveredInteractiveRegionKey {
-            interactiveRegionHoverTargets[previous] = 0
-        }
         hoveredInteractiveRegionKey = hoveredKey
-        if let hoveredKey {
-            interactiveRegionHoverTargets[hoveredKey] = 1
-            if interactiveRegionHoverProgress[hoveredKey] == nil {
-                interactiveRegionHoverProgress[hoveredKey] = 0
-            }
-        }
-        startInteractiveRegionHoverAnimation()
+        metalView.setNeedsDisplay(metalView.bounds)
         return hoveredKey != nil
-    }
-
-    func startInteractiveRegionHoverAnimation() {
-        guard interactiveRegionHoverTimer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            self?.interactiveRegionHoverTick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        interactiveRegionHoverTimer = timer
-    }
-
-    func stopInteractiveRegionHoverAnimation() {
-        interactiveRegionHoverTimer?.invalidate()
-        interactiveRegionHoverTimer = nil
-    }
-
-    func interactiveRegionHoverTick() {
-        guard !interactiveRegionHoverTargets.isEmpty || !interactiveRegionHoverProgress.isEmpty else {
-            stopInteractiveRegionHoverAnimation()
-            return
-        }
-
-        var didChange = false
-        let blend: CGFloat = 0.28
-        let epsilon: CGFloat = 0.01
-
-        for (key, target) in interactiveRegionHoverTargets {
-            let current = interactiveRegionHoverProgress[key] ?? 0
-            let next = current + (target - current) * blend
-            if abs(next - current) > 0.001 {
-                interactiveRegionHoverProgress[key] = next
-                didChange = true
-            }
-            if abs(target - next) < epsilon {
-                interactiveRegionHoverProgress[key] = target
-                if target == 0 {
-                    interactiveRegionHoverProgress.removeValue(forKey: key)
-                    interactiveRegionHoverTargets.removeValue(forKey: key)
-                }
-            }
-        }
-
-        if didChange {
-            metalView.setNeedsDisplay(metalView.bounds)
-        }
-
-        if interactiveRegionHoverTargets.isEmpty && interactiveRegionHoverProgress.isEmpty {
-            stopInteractiveRegionHoverAnimation()
-        }
     }
 
     func updatePointerHover(at point: CGPoint?) {
