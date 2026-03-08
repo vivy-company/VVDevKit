@@ -57,12 +57,31 @@ public enum VVTextTruncationMode: Sendable, Hashable {
     case tail
 }
 
+public enum VVTextAlignment: Sendable, Hashable {
+    case leading
+    case center
+    case trailing
+
+    var ctAlignment: CTTextAlignment {
+        switch self {
+        case .leading:
+            return .left
+        case .center:
+            return .center
+        case .trailing:
+            return .right
+        }
+    }
+}
+
 public struct VText: VVView {
     public var text: String
     public var font: VVFontSpec
     public var color: SIMD4<Float>?
     public var lineLimit: Int?
     public var truncationMode: VVTextTruncationMode
+    public var alignment: VVTextAlignment
+    public var lineSpacing: CGFloat
 
     public var maxLines: Int {
         get { lineLimit ?? 0 }
@@ -74,13 +93,17 @@ public struct VText: VVView {
         font: VVFontSpec = .body,
         color: SIMD4<Float>? = nil,
         maxLines: Int = 0,
-        truncationMode: VVTextTruncationMode = .tail
+        truncationMode: VVTextTruncationMode = .tail,
+        alignment: VVTextAlignment = .leading,
+        lineSpacing: CGFloat = 0
     ) {
         self.text = text
         self.font = font
         self.color = color
         self.lineLimit = maxLines > 0 ? maxLines : nil
         self.truncationMode = truncationMode
+        self.alignment = alignment
+        self.lineSpacing = lineSpacing
     }
 
     public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
@@ -92,10 +115,32 @@ public struct VText: VVView {
         let descent = CTFontGetDescent(ctFont)
         let leading = CTFontGetLeading(ctFont)
         let lineHeight = ceil(ascent + descent + leading)
+        let adjustedLineHeight = lineHeight + lineSpacing
+
+        var ctAlignment = alignment.ctAlignment
+        var spacing = lineSpacing
+        let paragraphStyle = withUnsafePointer(to: &ctAlignment) { alignmentPointer in
+            withUnsafePointer(to: &spacing) { spacingPointer in
+                var paragraphSettings = [
+                    CTParagraphStyleSetting(
+                        spec: .alignment,
+                        valueSize: MemoryLayout<CTTextAlignment>.size,
+                        value: alignmentPointer
+                    ),
+                    CTParagraphStyleSetting(
+                        spec: .lineSpacingAdjustment,
+                        valueSize: MemoryLayout<CGFloat>.size,
+                        value: spacingPointer
+                    )
+                ]
+                return CTParagraphStyleCreate(&paragraphSettings, paragraphSettings.count)
+            }
+        }
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: ctFont,
-            .ligature: 1 as NSNumber
+            .ligature: 1 as NSNumber,
+            .paragraphStyle: paragraphStyle
         ]
         let attrString = NSAttributedString(string: text, attributes: attributes)
 
@@ -103,7 +148,7 @@ public struct VText: VVView {
         let framePath = CGMutablePath()
         let frameWidth = max(1, min(constraint.maxWidth, constraint.idealWidth ?? constraint.maxWidth))
         let limitedLines = lineLimit ?? 0
-        let frameHeight: CGFloat = limitedLines > 0 ? lineHeight * CGFloat(limitedLines) + 1 : 100_000
+        let frameHeight: CGFloat = limitedLines > 0 ? adjustedLineHeight * CGFloat(limitedLines) + 1 : 100_000
         framePath.addRect(CGRect(x: 0, y: 0, width: frameWidth, height: frameHeight))
         let frame = CTFramesetterCreateFrame(framesetter, CFRangeMake(0, 0), framePath, nil)
 
@@ -163,7 +208,7 @@ public struct VText: VVView {
                     let glyph = VVTextGlyph(
                         glyphID: glyphID,
                         position: position,
-                        size: CGSize(width: width, height: lineHeight),
+                        size: CGSize(width: width, height: adjustedLineHeight),
                         color: resolvedColor,
                         fontVariant: font.variant,
                         fontSize: runFontSize,
@@ -175,11 +220,11 @@ public struct VText: VVView {
             }
 
             if lineIndex < effectiveLines.count - 1 {
-                y += lineHeight
+                y += adjustedLineHeight
             }
         }
 
-        let totalHeight = y + lineHeight
+        let totalHeight = y + adjustedLineHeight
         let textRun = VVTextRunPrimitive(
             glyphs: allGlyphs,
             style: VVTextRunStyle(color: resolvedColor),
@@ -202,6 +247,18 @@ public struct VText: VVView {
     public func truncationMode(_ mode: VVTextTruncationMode) -> VText {
         var copy = self
         copy.truncationMode = mode
+        return copy
+    }
+
+    public func multilineTextAlignment(_ alignment: VVTextAlignment) -> VText {
+        var copy = self
+        copy.alignment = alignment
+        return copy
+    }
+
+    public func lineSpacing(_ spacing: CGFloat) -> VText {
+        var copy = self
+        copy.lineSpacing = spacing
         return copy
     }
 

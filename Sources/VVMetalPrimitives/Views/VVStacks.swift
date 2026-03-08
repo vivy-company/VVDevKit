@@ -29,7 +29,11 @@ private func vvHorizontalSizingBehavior(for child: any VVView) -> VVHorizontalSi
         return vvHorizontalSizingBehavior(for: modifier.child)
     case let modifier as VVBackgroundModifier:
         return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVBackgroundContentModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
     case let modifier as VVBorderModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVOverlayModifier:
         return vvHorizontalSizingBehavior(for: modifier.child)
     case let modifier as VVShadowModifier:
         return vvHorizontalSizingBehavior(for: modifier.child)
@@ -49,6 +53,8 @@ private func vvHorizontalSizingBehavior(for child: any VVView) -> VVHorizontalSi
         return vvHorizontalSizingBehavior(for: modifier.child)
     case let modifier as VVAnimationModifier:
         return vvHorizontalSizingBehavior(for: modifier.child)
+    case let container as VVScrollContainer:
+        return vvHorizontalSizingBehavior(for: container.child)
     default:
         return .compressible
     }
@@ -71,6 +77,12 @@ public enum VVVerticalAlignment: Sendable {
 public enum VVZStackSizing: Sendable {
     case union
     case firstChild
+}
+
+public enum VVFlowAlignment: Sendable {
+    case leading
+    case center
+    case trailing
 }
 
 // MARK: - VVStack
@@ -359,6 +371,121 @@ public struct VVZStack: VVView {
 
         return VVViewLayout(
             size: containerSize,
+            node: VVNode(children: nodes)
+        )
+    }
+}
+
+// MARK: - VVFlowStack
+
+public struct VVFlowStack: VVView {
+    public var horizontalSpacing: CGFloat
+    public var verticalSpacing: CGFloat
+    public var alignment: VVFlowAlignment
+    public var children: [any VVView]
+
+    public init(
+        horizontalSpacing: CGFloat = 8,
+        verticalSpacing: CGFloat = 8,
+        alignment: VVFlowAlignment = .leading,
+        @VVViewBuilder content: () -> [any VVView]
+    ) {
+        self.horizontalSpacing = horizontalSpacing
+        self.verticalSpacing = verticalSpacing
+        self.alignment = alignment
+        self.children = content()
+    }
+
+    public init(
+        horizontalSpacing: CGFloat = 8,
+        verticalSpacing: CGFloat = 8,
+        alignment: VVFlowAlignment = .leading,
+        children: [any VVView]
+    ) {
+        self.horizontalSpacing = horizontalSpacing
+        self.verticalSpacing = verticalSpacing
+        self.alignment = alignment
+        self.children = children
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        guard !children.isEmpty else { return .empty }
+
+        let maxLineWidth = constraint.hasBoundedWidth ? constraint.maxWidth : .greatestFiniteMagnitude
+        let measured = children.map {
+            $0.layout(
+                in: env,
+                constraint: VVLayoutConstraint(
+                    minWidth: 0,
+                    idealWidth: nil,
+                    maxWidth: maxLineWidth,
+                    minHeight: 0,
+                    idealHeight: nil,
+                    maxHeight: constraint.maxHeight
+                )
+            )
+        }
+
+        struct Line {
+            var items: [(index: Int, layout: VVViewLayout)]
+            var width: CGFloat
+            var height: CGFloat
+        }
+
+        var lines: [Line] = []
+        var currentItems: [(index: Int, layout: VVViewLayout)] = []
+        var currentWidth: CGFloat = 0
+        var currentHeight: CGFloat = 0
+
+        for (index, layout) in measured.enumerated() {
+            let proposedWidth = currentItems.isEmpty ? layout.size.width : currentWidth + horizontalSpacing + layout.size.width
+            let shouldWrap = !currentItems.isEmpty && constraint.hasBoundedWidth && proposedWidth > maxLineWidth
+            if shouldWrap {
+                lines.append(Line(items: currentItems, width: currentWidth, height: currentHeight))
+                currentItems = [(index, layout)]
+                currentWidth = layout.size.width
+                currentHeight = layout.size.height
+            } else {
+                currentItems.append((index, layout))
+                currentWidth = currentItems.count == 1 ? layout.size.width : proposedWidth
+                currentHeight = max(currentHeight, layout.size.height)
+            }
+        }
+
+        if !currentItems.isEmpty {
+            lines.append(Line(items: currentItems, width: currentWidth, height: currentHeight))
+        }
+
+        var nodes: [VVNode] = []
+        var y: CGFloat = 0
+        var maxWidth: CGFloat = 0
+
+        for (lineIndex, line) in lines.enumerated() {
+            let lineX: CGFloat
+            switch alignment {
+            case .leading:
+                lineX = 0
+            case .center:
+                lineX = constraint.hasBoundedWidth ? max(0, (maxLineWidth - line.width) * 0.5) : 0
+            case .trailing:
+                lineX = constraint.hasBoundedWidth ? max(0, maxLineWidth - line.width) : 0
+            }
+
+            var x = lineX
+            for (_, layout) in line.items {
+                nodes.append(VVNode(offset: CGPoint(x: x, y: y), children: [layout.node]))
+                x += layout.size.width + horizontalSpacing
+            }
+            maxWidth = max(maxWidth, line.width)
+            y += line.height
+            if lineIndex < lines.count - 1 {
+                y += verticalSpacing
+            }
+        }
+
+        let finalWidth = constraint.hasBoundedWidth ? max(maxWidth, constraint.minWidth) : maxWidth
+        return VVViewLayout(
+            size: constraint.clamped(size: CGSize(width: finalWidth, height: y)),
             node: VVNode(children: nodes)
         )
     }

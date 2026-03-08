@@ -576,12 +576,13 @@ public final class VVChatTimelineMetalView: MTKView {
         }
 
         let transformedVertices = path.vertices.map { vertex in
-            VVPathVertex(
-                position: CGPoint(
-                    x: transformed(point: vertex.position, by: combinedTransform).x + CGFloat(o.x),
-                    y: transformed(point: vertex.position, by: combinedTransform).y + CGFloat(o.y)
+            let transformedPosition = transformed(point: vertex.position, by: combinedTransform)
+            return PathRenderVertex(
+                position: SIMD2<Float>(
+                    Float(transformedPosition.x) + o.x,
+                    Float(transformedPosition.y) + o.y
                 ),
-                stPosition: vertex.stPosition
+                stPosition: SIMD2<Float>(Float(vertex.stPosition.x), Float(vertex.stPosition.y))
             )
         }
 

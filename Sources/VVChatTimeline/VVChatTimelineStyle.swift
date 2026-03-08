@@ -45,6 +45,28 @@ public struct VVChatBubbleStyle: Hashable, Sendable {
     }
 }
 
+public struct VVChatTimelineMotionStyle: Hashable, Sendable {
+    public var layoutTransition: VVTransition
+    public var layoutAnimation: VVAnimationDescriptor
+    public var viewportFollowAnimation: VVAnimationDescriptor
+    public var viewportClampAnimation: VVAnimationDescriptor
+    public var jumpToLatestAnimation: VVAnimationDescriptor
+
+    public init(
+        layoutTransition: VVTransition = .accordion,
+        layoutAnimation: VVAnimationDescriptor = .smooth(duration: 0.26),
+        viewportFollowAnimation: VVAnimationDescriptor = .smooth(duration: 0.24),
+        viewportClampAnimation: VVAnimationDescriptor = .smooth(duration: 0.22),
+        jumpToLatestAnimation: VVAnimationDescriptor = .smooth(duration: 0.34)
+    ) {
+        self.layoutTransition = layoutTransition
+        self.layoutAnimation = layoutAnimation
+        self.viewportFollowAnimation = viewportFollowAnimation
+        self.viewportClampAnimation = viewportClampAnimation
+        self.jumpToLatestAnimation = jumpToLatestAnimation
+    }
+}
+
 public struct VVChatTimelineStyle {
     public var theme: MarkdownTheme
     public var draftTheme: MarkdownTheme
@@ -108,6 +130,7 @@ public struct VVChatTimelineStyle {
     public var pinThreshold: CGFloat
     public var backgroundColor: SIMD4<Float>
     public var renderedCacheLimit: Int
+    public var motion: VVChatTimelineMotionStyle
 
     public init(
         theme: MarkdownTheme = .dark,
@@ -171,7 +194,8 @@ public struct VVChatTimelineStyle {
         systemInsets: VVInsets = .init(top: 6, left: 16, bottom: 6, right: 16),
         pinThreshold: CGFloat = 24,
         backgroundColor: SIMD4<Float> = .darkBackground,
-        renderedCacheLimit: Int = 50
+        renderedCacheLimit: Int = 50,
+        motion: VVChatTimelineMotionStyle = .init()
     ) {
         func normalizedTheme(_ theme: MarkdownTheme) -> MarkdownTheme {
             var adjusted = theme
@@ -249,6 +273,7 @@ public struct VVChatTimelineStyle {
         self.pinThreshold = pinThreshold
         self.backgroundColor = backgroundColor
         self.renderedCacheLimit = renderedCacheLimit
+        self.motion = motion
     }
 
     public func insets(for role: VVChatMessageRole) -> VVInsets {

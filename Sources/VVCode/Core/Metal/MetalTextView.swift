@@ -3497,6 +3497,7 @@ public final class MetalTextView: MTKView {
         let shaped = shapeOverlayText(text, font: font)
         guard !shaped.isEmpty else { return nil }
         let fontName = CTFontCopyPostScriptName(font as CTFont) as String
+        let storedFontName: String? = isSystemUIFontName(fontName) ? nil : fontName
         var glyphs: [VVTextGlyph] = []
         glyphs.reserveCapacity(shaped.count)
 
@@ -3510,7 +3511,7 @@ public final class MetalTextView: MTKView {
                 color: color,
                 fontVariant: fontVariant,
                 fontSize: font.pointSize,
-                fontName: fontName,
+                fontName: storedFontName,
                 stringIndex: glyph.characterIndex
             ))
         }
@@ -3529,6 +3530,7 @@ public final class MetalTextView: MTKView {
         overrideColor: SIMD4<Float>? = nil
     ) -> VVTextGlyph? {
         let fontName = CTFontCopyPostScriptName(glyph.font) as String
+        let storedFontName: String? = isSystemUIFontName(fontName) ? nil : fontName
         let size = glyphSize(for: glyph.glyphID, font: glyph.font)
         return VVTextGlyph(
             glyphID: UInt16(glyph.glyphID),
@@ -3537,7 +3539,7 @@ public final class MetalTextView: MTKView {
             color: overrideColor ?? glyph.color,
             fontVariant: .monospace,
             fontSize: currentFont.pointSize,
-            fontName: fontName,
+            fontName: storedFontName,
             stringIndex: glyph.characterIndex
         )
     }
@@ -3554,6 +3556,13 @@ public final class MetalTextView: MTKView {
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
         return advance.width
+    }
+
+    private func isSystemUIFontName(_ name: String) -> Bool {
+        if name == ".AppleColorEmojiUI" || name == "AppleColorEmoji" || name == "AppleColorEmojiUI" {
+            return false
+        }
+        return name.hasPrefix(".SF") || name.hasPrefix(".AppleSystem") || name.hasPrefix(".")
     }
 
     private func glyphAdvance(for character: Character, fontSize: CGFloat, variant: VVMarkdown.FontVariant = .monospace) -> CGFloat {

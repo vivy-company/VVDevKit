@@ -56,6 +56,44 @@ public struct VVBackgroundModifier: VVView {
     }
 }
 
+public struct VVBackgroundContentModifier: VVView {
+    public var child: any VVView
+    public var background: any VVView
+    public var alignment: VVFrameAlignment
+
+    public init(child: any VVView, background: any VVView, alignment: VVFrameAlignment = .center) {
+        self.child = child
+        self.background = background
+        self.alignment = alignment
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let childLayout = child.layout(in: env, constraint: constraint)
+        let backgroundLayout = background.layout(
+            in: env,
+            constraint: VVLayoutConstraint(
+                minWidth: 0,
+                idealWidth: childLayout.size.width,
+                maxWidth: childLayout.size.width,
+                minHeight: 0,
+                idealHeight: childLayout.size.height,
+                maxHeight: childLayout.size.height
+            )
+        )
+        let bgOffset = CGPoint(
+            x: alignment.xOffset(containerWidth: childLayout.size.width, childWidth: backgroundLayout.size.width),
+            y: alignment.yOffset(containerHeight: childLayout.size.height, childHeight: backgroundLayout.size.height)
+        )
+        return VVViewLayout(
+            size: childLayout.size,
+            node: VVNode(children: [
+                VVNode(offset: bgOffset, zIndex: -1, children: [backgroundLayout.node]),
+                childLayout.node
+            ])
+        )
+    }
+}
+
 // MARK: - Border Modifier
 
 public struct VVBorderModifier: VVView {
@@ -80,6 +118,46 @@ public struct VVBorderModifier: VVView {
         let borderNode = VVNode(zIndex: 1, primitives: [.quad(quad)])
         let container = VVNode(children: [childLayout.node, borderNode])
         return VVViewLayout(size: childLayout.size, node: container)
+    }
+}
+
+// MARK: - Overlay Modifier
+
+public struct VVOverlayModifier: VVView {
+    public var child: any VVView
+    public var overlay: any VVView
+    public var alignment: VVFrameAlignment
+
+    public init(child: any VVView, overlay: any VVView, alignment: VVFrameAlignment = .center) {
+        self.child = child
+        self.overlay = overlay
+        self.alignment = alignment
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let childLayout = child.layout(in: env, constraint: constraint)
+        let overlayLayout = overlay.layout(
+            in: env,
+            constraint: VVLayoutConstraint(
+                minWidth: 0,
+                idealWidth: childLayout.size.width,
+                maxWidth: childLayout.size.width,
+                minHeight: 0,
+                idealHeight: childLayout.size.height,
+                maxHeight: childLayout.size.height
+            )
+        )
+        let overlayOffset = CGPoint(
+            x: alignment.xOffset(containerWidth: childLayout.size.width, childWidth: overlayLayout.size.width),
+            y: alignment.yOffset(containerHeight: childLayout.size.height, childHeight: overlayLayout.size.height)
+        )
+        return VVViewLayout(
+            size: childLayout.size,
+            node: VVNode(children: [
+                childLayout.node,
+                VVNode(offset: overlayOffset, zIndex: 1, children: [overlayLayout.node])
+            ])
+        )
     }
 }
 
@@ -362,6 +440,62 @@ public struct VVPositionedFrame: VVView {
         let childLayout = child.layout(in: env, constraint: innerConstraint)
         let node = VVNode(offset: frame.origin, clipRect: clipRect, children: [childLayout.node])
         return VVViewLayout(size: frame.size, node: node)
+    }
+}
+
+// MARK: - Scroll Container
+
+public enum VVScrollAxis: Sendable {
+    case vertical
+    case horizontal
+    case both
+}
+
+public struct VVScrollContainer: VVView {
+    public var child: any VVView
+    public var axis: VVScrollAxis
+    public var viewportSize: CGSize?
+    public var contentOffset: CGPoint
+    public var showsClipping: Bool
+
+    public init(
+        child: any VVView,
+        axis: VVScrollAxis = .vertical,
+        viewportSize: CGSize? = nil,
+        contentOffset: CGPoint = .zero,
+        showsClipping: Bool = true
+    ) {
+        self.child = child
+        self.axis = axis
+        self.viewportSize = viewportSize
+        self.contentOffset = contentOffset
+        self.showsClipping = showsClipping
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let resolvedViewport = CGSize(
+            width: viewportSize?.width ?? (constraint.hasBoundedWidth ? constraint.maxWidth : constraint.proposedWidth),
+            height: viewportSize?.height ?? (constraint.hasBoundedHeight ? constraint.maxHeight : constraint.proposedHeight)
+        )
+
+        let childConstraint = VVLayoutConstraint(
+            minWidth: 0,
+            idealWidth: axis == .vertical ? resolvedViewport.width : nil,
+            maxWidth: axis == .vertical ? resolvedViewport.width : .greatestFiniteMagnitude,
+            minHeight: 0,
+            idealHeight: axis == .horizontal ? resolvedViewport.height : nil,
+            maxHeight: axis == .horizontal ? resolvedViewport.height : .greatestFiniteMagnitude
+        )
+        let childLayout = child.layout(in: env, constraint: childConstraint)
+        let clip = showsClipping ? CGRect(origin: .zero, size: resolvedViewport) : nil
+        return VVViewLayout(
+            size: constraint.clamped(size: resolvedViewport),
+            node: VVNode(
+                children: [
+                    VVNode(offset: CGPoint(x: -contentOffset.x, y: -contentOffset.y), clipRect: clip, children: [childLayout.node])
+                ]
+            )
+        )
     }
 }
 

@@ -25,6 +25,14 @@ extension VVView {
         VVBackgroundModifier(child: self, color: color, cornerRadii: VVCornerRadii(cornerRadius))
     }
 
+    public func background(alignment: VVFrameAlignment = .center, @VVViewBuilder content: () -> [any VVView]) -> VVBackgroundContentModifier {
+        VVBackgroundContentModifier(
+            child: self,
+            background: VVZStack(alignment: alignment, sizing: .union, children: content()),
+            alignment: alignment
+        )
+    }
+
     // MARK: - Border
 
     public func border(_ border: VVBorder, cornerRadii: VVCornerRadii = .zero) -> VVBorderModifier {
@@ -33,6 +41,16 @@ extension VVView {
 
     public func border(color: SIMD4<Float>, width: CGFloat = 1, cornerRadii: VVCornerRadii = .zero) -> VVBorderModifier {
         VVBorderModifier(child: self, border: VVBorder(width: width, color: color), cornerRadii: cornerRadii)
+    }
+
+    // MARK: - Overlay
+
+    public func overlay(alignment: VVFrameAlignment = .center, @VVViewBuilder content: () -> [any VVView]) -> VVOverlayModifier {
+        VVOverlayModifier(
+            child: self,
+            overlay: VVZStack(alignment: alignment, sizing: .union, children: content()),
+            alignment: alignment
+        )
     }
 
     // MARK: - Shadow
@@ -80,6 +98,17 @@ extension VVView {
 
     public func fillHeight(alignment: VVFrameAlignment = .center) -> VVFrameModifier {
         frame(minHeight: 0, maxHeight: .greatestFiniteMagnitude, alignment: alignment)
+    }
+
+    // MARK: - Scroll
+
+    public func scrollContainer(
+        axis: VVScrollAxis = .vertical,
+        viewportSize: CGSize? = nil,
+        contentOffset: CGPoint = .zero,
+        showsClipping: Bool = true
+    ) -> VVScrollContainer {
+        VVScrollContainer(child: self, axis: axis, viewportSize: viewportSize, contentOffset: contentOffset, showsClipping: showsClipping)
     }
 
     // MARK: - Opacity

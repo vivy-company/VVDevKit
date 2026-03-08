@@ -236,8 +236,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             didInitialScroll = true
         }
 
-        // Animated layout transition for accordion expand/collapse
-        if let transition = controller.pendingLayoutTransition {
+        let transition = consumePendingOrImplicitTransition(for: update, controller: controller)
+
+        if let transition {
             controller.pendingLayoutTransition = nil
             let heightDelta = controller.totalHeight - transition.previousTotalHeight
             startLayoutAnimation(
@@ -257,7 +258,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                     let clampedY = min(currentY, maxOffset)
                     if abs(clampedY - currentY) > 1 {
                         isAnimatingJump = true
-                        animateScroll(toY: clampedY, duration: 0.2, curve: .smooth, token: nil) { [weak self] in
+                        let motion = style.motion.viewportClampAnimation
+                        animateScroll(toY: clampedY, animation: motion, token: nil) { [weak self] in
                             self?.isAnimatingJump = false
                         }
                     }
@@ -265,7 +267,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                     // Expand: content grew. If pinned to bottom, animate to new bottom.
                     if controller.state.isPinnedToBottom {
                         isAnimatingJump = true
-                        animateScroll(toY: maxOffset, duration: 0.22, curve: .snappy, token: nil) { [weak self] in
+                        let motion = style.motion.viewportFollowAnimation
+                        animateScroll(toY: maxOffset, animation: motion, token: nil) { [weak self] in
                             self?.isAnimatingJump = false
                         }
                     }
@@ -279,6 +282,31 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         requestImagesForVisibleItems()
         metalView.setNeedsDisplay(metalView.bounds)
         onStateChange?(controller.state)
+    }
+
+    private func consumePendingOrImplicitTransition(
+        for update: VVChatTimelineController.Update,
+        controller: VVChatTimelineController
+    ) -> VVChatTimelineController.PendingLayoutTransition? {
+        if let transition = controller.pendingLayoutTransition {
+            return transition
+        }
+
+        guard update.heightDelta != 0,
+              let changedIndex = update.changedIndex,
+              let layout = controller.itemLayout(at: changedIndex) else {
+            return nil
+        }
+
+        let previousTotalHeight = max(0, controller.totalHeight - update.heightDelta)
+        let previousSnapshot = stableLayoutSnapshots[layout.id]
+        let anchorY = previousSnapshot?.frame.origin.y ?? max(0, layout.frame.origin.y - update.heightDelta)
+
+        return VVChatTimelineController.PendingLayoutTransition(
+            anchorID: layout.id,
+            anchorY: anchorY,
+            previousTotalHeight: previousTotalHeight
+        )
     }
 
     private func updateDocumentHeight(_ height: CGFloat) {
@@ -355,7 +383,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         let maxOffset = max(0, contentHeight - visibleRect.height)
         let newOrigin = CGPoint(x: visibleRect.origin.x, y: maxOffset)
         if animated {
-            animateScroll(toY: maxOffset, duration: 0.15, curve: .snappy, token: nil)
+            animateScroll(toY: maxOffset, animation: controller.currentStyle.motion.viewportFollowAnimation, token: nil)
         } else {
             scrollView.contentView.setBoundsOrigin(newOrigin)
             scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -371,6 +399,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     // prepareLayoutTransition is now on the controller — no view-side capture needed
 
     @objc private func handleJumpToLatest() {
+        jumpToLatestAnimated()
+    }
+
+    public func jumpToLatestAnimated() {
         isAnimatingJump = true
         controller?.jumpToLatest()
         animateJumpToLatest()
@@ -395,30 +427,31 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             isAnimatingJump = false
             return
         }
-
-        // Short hops feel better with a single easing curve.
-        if distance < 220 {
-            animateScroll(toY: maxOffset, duration: 0.18, curve: .snappy, token: nil) { [weak self] in
-                self?.isAnimatingJump = false
-            }
-            return
-        }
-
-        // Two-stage motion: fast travel, then soft settle near the bottom.
         let token = UUID()
         jumpAnimationToken = token
-
-        let firstStageProgress: CGFloat = distance > 1400 ? 0.93 : 0.89
-        let stage1TargetY = startY + distance * firstStageProgress
-        let stage1Duration = min(0.16, max(0.08, Double(distance) / 7000))
-        let stage2Duration = min(0.42, max(0.18, Double(distance) / 2600))
-
-        animateScroll(toY: stage1TargetY, duration: stage1Duration, curve: .linear, token: token) { [weak self] in
-            guard let self else { return }
-            self.animateScroll(toY: maxOffset, duration: stage2Duration, curve: .bouncy, token: token) { [weak self] in
-                self?.isAnimatingJump = false
-            }
+        animateScroll(toY: maxOffset, animation: controller.currentStyle.motion.jumpToLatestAnimation, token: token) { [weak self] in
+            self?.isAnimatingJump = false
         }
+    }
+
+    private func animateScroll(
+        toY targetY: CGFloat,
+        animation: VVAnimationDescriptor,
+        token: UUID?,
+        completion: (() -> Void)? = nil
+    ) {
+        scrollAnimationStartY = scrollView.contentView.bounds.origin.y
+        scrollAnimationTargetY = targetY
+        scrollAnimationDuration = max(0.05, animation.duration)
+        scrollAnimationStartTime = CACurrentMediaTime()
+        scrollAnimationCurve = animation.easing
+        scrollAnimationCompletion = { [weak self] in
+            guard let self else { return }
+            if let token, token != self.jumpAnimationToken { return }
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+            completion?()
+        }
+        startDisplayLink()
     }
 
     private func animateScroll(
@@ -428,18 +461,12 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         token: UUID?,
         completion: (() -> Void)? = nil
     ) {
-        scrollAnimationStartY = scrollView.contentView.bounds.origin.y
-        scrollAnimationTargetY = targetY
-        scrollAnimationDuration = max(0.05, duration)
-        scrollAnimationStartTime = CACurrentMediaTime()
-        scrollAnimationCurve = curve
-        scrollAnimationCompletion = { [weak self] in
-            guard let self else { return }
-            if let token, token != self.jumpAnimationToken { return }
-            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
-            completion?()
-        }
-        startDisplayLink()
+        animateScroll(
+            toY: targetY,
+            animation: .timing(duration: duration, easing: curve),
+            token: token,
+            completion: completion
+        )
     }
 
     private func stopScrollAnimation() {
@@ -477,40 +504,47 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             stableLayoutSnapshots = nextSnapshots
             return
         }
-        let anchorSnapshot = previousSnapshots[transition.anchorID]
+        let liveSnapshots = layoutAnimator.isRunning ? layoutAnimator.state().snapshots : [:]
+        let baselineSnapshots = liveSnapshots.isEmpty ? previousSnapshots : liveSnapshots
+        let anchorSnapshot = baselineSnapshots[transition.anchorID] ?? previousSnapshots[transition.anchorID]
         let anchorFrame = anchorSnapshot?.frame ?? CGRect(x: 0, y: transition.anchorY, width: scrollView.contentView.bounds.width, height: 0)
-        var startSnapshots = previousSnapshots
+        var startSnapshots = baselineSnapshots
         var targetSnapshots = nextSnapshots
 
-        for (id, nextSnapshot) in nextSnapshots where previousSnapshots[id] == nil {
+        for (id, nextSnapshot) in nextSnapshots where baselineSnapshots[id] == nil {
             let insertedStartFrame = insertedItemStartFrame(for: nextSnapshot.frame, anchorFrame: anchorFrame)
             startSnapshots[id] = VVLayoutAnimationSnapshot(
                 id: id,
                 frame: insertedStartFrame,
                 contentOffset: nextSnapshot.contentOffset,
-                transition: .accordion,
-                animation: .snappy()
+                transition: nextSnapshot.transition ?? controller?.currentStyle.motion.layoutTransition ?? .accordion,
+                animation: nextSnapshot.animation ?? controller?.currentStyle.motion.layoutAnimation ?? .smooth(duration: 0.2)
             )
-            targetSnapshots[id]?.transition = .accordion
-            targetSnapshots[id]?.animation = .snappy()
+            if targetSnapshots[id]?.transition == nil {
+                targetSnapshots[id]?.transition = controller?.currentStyle.motion.layoutTransition ?? .accordion
+            }
+            if targetSnapshots[id]?.animation == nil {
+                targetSnapshots[id]?.animation = controller?.currentStyle.motion.layoutAnimation ?? .smooth(duration: 0.2)
+            }
         }
 
-        for (id, previousSnapshot) in previousSnapshots where nextSnapshots[id] == nil {
+        for (id, previousSnapshot) in baselineSnapshots where nextSnapshots[id] == nil {
             let targetFrame = previousSnapshot.frame.offsetBy(dx: 0, dy: -min(max(previousSnapshot.frame.height * 0.35, 10), 24))
             targetSnapshots[id] = VVLayoutAnimationSnapshot(
                 id: id,
                 frame: targetFrame,
                 contentOffset: previousSnapshot.contentOffset,
-                transition: .accordion,
-                animation: .snappy()
+                transition: previousSnapshot.transition ?? controller?.currentStyle.motion.layoutTransition ?? .accordion,
+                animation: previousSnapshot.animation ?? controller?.currentStyle.motion.layoutAnimation ?? .smooth(duration: 0.2)
             )
         }
 
+        let motion = controller?.currentStyle.motion ?? .init()
         layoutAnimator.start(
             from: startSnapshots,
             to: targetSnapshots,
-            fallbackTransition: .accordion,
-            fallbackAnimation: .snappy()
+            fallbackTransition: motion.layoutTransition,
+            fallbackAnimation: motion.layoutAnimation
         )
         animatedLayoutSnapshots = layoutAnimator.state().snapshots
         startDisplayLink()

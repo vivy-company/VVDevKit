@@ -228,6 +228,16 @@ public struct PathRenderUniforms {
     }
 }
 
+public struct PathRenderVertex {
+    public var position: SIMD2<Float>
+    public var stPosition: SIMD2<Float>
+
+    public init(position: SIMD2<Float>, stPosition: SIMD2<Float> = .zero) {
+        self.position = position
+        self.stPosition = stPosition
+    }
+}
+
 public struct PieSliceInstance {
     public var center: SIMD2<Float>
     public var radius: Float

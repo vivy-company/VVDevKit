@@ -1538,7 +1538,11 @@ public class MetalMarkdownNSView: NSView {
         }
 
         let vertices = path.vertices.map { vertex in
-            VVPathVertex(position: transformed(point: vertex.position, by: combinedTransform), stPosition: vertex.stPosition)
+            let transformedPosition = transformed(point: vertex.position, by: combinedTransform)
+            return PathRenderVertex(
+                position: SIMD2<Float>(Float(transformedPosition.x), Float(transformedPosition.y)),
+                stPosition: SIMD2<Float>(Float(vertex.stPosition.x), Float(vertex.stPosition.y))
+            )
         }
         guard let buffer = renderer.makeBuffer(for: vertices) else { return }
 

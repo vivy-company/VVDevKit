@@ -2032,45 +2032,8 @@ private struct PlaygroundChatTimelineHost: NSViewRepresentable {
         var lastJumpRequestID = 0
 
         func animateToBottom(in view: VVChatTimelineView, controller: VVChatTimelineController) {
-            guard let scrollView = findScrollView(in: view) else {
-                controller.jumpToLatest()
-                return
-            }
-
-            let contentView = scrollView.contentView
-            let visibleRect = contentView.bounds
-            let contentHeight = max(controller.totalHeight, visibleRect.height)
-            let targetY = max(0, contentHeight - visibleRect.height)
-
-            guard abs(targetY - visibleRect.origin.y) > 1 else {
-                controller.jumpToLatest()
-                view.scrollToBottom(animated: false)
-                return
-            }
-
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.26
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                contentView.animator().setBoundsOrigin(CGPoint(x: visibleRect.origin.x, y: targetY))
-            } completionHandler: {
-                scrollView.reflectScrolledClipView(contentView)
-                Task { @MainActor in
-                    controller.jumpToLatest()
-                    view.scrollToBottom(animated: false)
-                }
-            }
-        }
-
-        private func findScrollView(in root: NSView) -> NSScrollView? {
-            if let scrollView = root as? NSScrollView {
-                return scrollView
-            }
-            for subview in root.subviews {
-                if let scrollView = findScrollView(in: subview) {
-                    return scrollView
-                }
-            }
-            return nil
+            _ = controller
+            view.jumpToLatestAnimated()
         }
     }
 }
@@ -3308,34 +3271,67 @@ enum SampleData {
         variant: VVFontVariant = .regular
     ) -> [VVTextGlyph] {
         let ctFont = font as CTFont
-        let chars = Array(text.utf16)
-        guard !chars.isEmpty else { return [] }
-        var glyphIDs = [CGGlyph](repeating: 0, count: chars.count)
-        CTFontGetGlyphsForCharacters(ctFont, chars, &glyphIDs, chars.count)
-        var advances = [CGSize](repeating: .zero, count: chars.count)
-        CTFontGetAdvancesForGlyphs(ctFont, .horizontal, glyphIDs, &advances, chars.count)
+        guard !text.isEmpty else { return [] }
 
-        let fontSize = font.pointSize
         let ascent = CTFontGetAscent(ctFont)
         let lineHeight = ascent + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont)
         let baselineY = origin.y + ascent
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .ligature: 1
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
+
         var result: [VVTextGlyph] = []
-        var x = origin.x
-        for i in 0..<chars.count {
-            let size = CGSize(width: max(advances[i].width, 1), height: lineHeight)
-            result.append(VVTextGlyph(
-                glyphID: UInt16(glyphIDs[i]),
-                position: CGPoint(x: x, y: baselineY),
-                size: size,
-                color: color,
-                fontVariant: variant,
-                fontSize: fontSize,
-                fontName: font.fontName,
-                stringIndex: i
-            ))
-            x += advances[i].width
+        for run in runs {
+            let glyphCount = CTRunGetGlyphCount(run)
+            guard glyphCount > 0 else { continue }
+
+            let runAttributes = CTRunGetAttributes(run) as NSDictionary
+            let runFont = runAttributes[kCTFontAttributeName] as! CTFont
+            let fontName = CTFontCopyPostScriptName(runFont) as String
+            let storedFontName = isSystemUIFontName(fontName) ? nil : fontName
+            let runFontSize = CTFontGetSize(runFont)
+
+            var glyphIDs = [CGGlyph](repeating: 0, count: glyphCount)
+            CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphIDs)
+
+            var positions = [CGPoint](repeating: .zero, count: glyphCount)
+            CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
+
+            var advances = [CGSize](repeating: .zero, count: glyphCount)
+            CTRunGetAdvances(run, CFRangeMake(0, glyphCount), &advances)
+
+            var stringIndices = [CFIndex](repeating: 0, count: glyphCount)
+            CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &stringIndices)
+
+            for i in 0..<glyphCount {
+                let glyphID = glyphIDs[i]
+                guard glyphID != 0 else { continue }
+
+                result.append(VVTextGlyph(
+                    glyphID: UInt16(glyphID),
+                    position: CGPoint(x: origin.x + positions[i].x, y: baselineY),
+                    size: CGSize(width: max(advances[i].width, 1), height: lineHeight),
+                    color: color,
+                    fontVariant: variant,
+                    fontSize: runFontSize,
+                    fontName: storedFontName,
+                    stringIndex: Int(stringIndices[i])
+                ))
+            }
         }
+
         return result
+    }
+
+    private static func isSystemUIFontName(_ name: String) -> Bool {
+        if name == ".AppleColorEmojiUI" || name == "AppleColorEmoji" || name == "AppleColorEmojiUI" {
+            return false
+        }
+        return name.hasPrefix(".SF") || name.hasPrefix(".AppleSystem") || name.hasPrefix(".")
     }
 
     /// Creates a text run. `origin` is the top-left of the line area.
@@ -4648,21 +4644,16 @@ enum SampleData {
             CGRect(origin: origin, size: cardSize)
         }
 
-        func rectPath(size: CGSize, cornerRadius: CGFloat, fill: SIMD4<Float>, stroke: VVStrokeStyle? = nil, transform: VVTransform2D) -> VVPathPrimitive {
-            var path = VVPathBuilder()
-            path.addRoundedRect(
-                CGRect(
-                    x: -size.width * 0.5,
-                    y: -size.height * 0.5,
-                    width: size.width,
-                    height: size.height
-                ),
-                cornerRadii: VVCornerRadii(cornerRadius)
-            )
-            return path.build(fill: fill, stroke: stroke, transform: transform)
+        func rectPoints(size: CGSize) -> [CGPoint] {
+            [
+                CGPoint(x: -size.width * 0.5, y: -size.height * 0.5),
+                CGPoint(x: size.width * 0.5, y: -size.height * 0.5),
+                CGPoint(x: size.width * 0.5, y: size.height * 0.5),
+                CGPoint(x: -size.width * 0.5, y: size.height * 0.5),
+            ]
         }
 
-        func starPath(outerRadius: CGFloat, innerRadius: CGFloat, fill: SIMD4<Float>, stroke: VVStrokeStyle? = nil, transform: VVTransform2D) -> VVPathPrimitive {
+        func starPoints(outerRadius: CGFloat, innerRadius: CGFloat) -> [CGPoint] {
             var points: [CGPoint] = []
             points.reserveCapacity(10)
             for index in 0..<10 {
@@ -4670,9 +4661,17 @@ enum SampleData {
                 let radius = index.isMultiple(of: 2) ? outerRadius : innerRadius
                 points.append(CGPoint(x: cos(angle) * radius, y: sin(angle) * radius))
             }
+            return points
+        }
+
+        func polygonPath(points: [CGPoint], fill: SIMD4<Float>, stroke: VVStrokeStyle? = nil) -> VVPathPrimitive {
             var path = VVPathBuilder()
             path.addPolygon(points)
-            return path.build(fill: fill, stroke: stroke, transform: transform)
+            return path.build(fill: fill, stroke: stroke)
+        }
+
+        func transformed(_ points: [CGPoint], by transform: VVTransform2D) -> [CGPoint] {
+            points.map { transform.apply(to: $0) }
         }
 
         func addGuideCard(_ frame: CGRect, title: String, detail: String) {
@@ -4714,74 +4713,67 @@ enum SampleData {
 
         let translatedStart = CGPoint(x: topLeft.midX - 54, y: topLeft.midY + 18)
         let translatedEnd = CGPoint(x: topLeft.midX + 44, y: topLeft.midY + 18)
-        builder.add(kind: .path(rectPath(
-            size: CGSize(width: 76, height: 50),
-            cornerRadius: 12,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(rectPoints(size: CGSize(width: 76, height: 50)), by: .identity.translated(by: translatedStart)),
             fill: SIMD4<Float>(0, 0, 0, 0),
-            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
-            transform: .identity.translated(by: translatedStart)
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5)
         )), zIndex: 1)
-        builder.add(kind: .path(rectPath(
-            size: CGSize(width: 76, height: 50),
-            cornerRadius: 12,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(rectPoints(size: CGSize(width: 76, height: 50)), by: .identity.translated(by: translatedEnd)),
             fill: SIMD4(0.3, 0.8, 0.5, 0.82),
-            stroke: VVStrokeStyle(color: SIMD4(0.3, 0.8, 0.5, 1), width: 2),
-            transform: .identity.translated(by: translatedEnd)
+            stroke: VVStrokeStyle(color: SIMD4(0.3, 0.8, 0.5, 1), width: 2)
         )), zIndex: 2)
 
         let scaleCenter = CGPoint(x: topRight.midX, y: topRight.midY + 18)
-        builder.add(kind: .path(rectPath(
-            size: CGSize(width: 62, height: 42),
-            cornerRadius: 10,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(rectPoints(size: CGSize(width: 62, height: 42)), by: .identity.translated(by: scaleCenter)),
             fill: SIMD4<Float>(0, 0, 0, 0),
-            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
-            transform: .identity.translated(by: scaleCenter)
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5)
         )), zIndex: 1)
-        builder.add(kind: .path(rectPath(
-            size: CGSize(width: 62, height: 42),
-            cornerRadius: 10,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(
+                rectPoints(size: CGSize(width: 62, height: 42)),
+                by: .identity
+                    .scaled(x: 1.55, y: 1.95)
+                    .translated(by: scaleCenter)
+            ),
             fill: SIMD4(0.5, 0.6, 0.95, 0.82),
-            stroke: VVStrokeStyle(color: SIMD4(0.5, 0.6, 0.95, 1), width: 2),
-            transform: .identity
-                .scaled(x: 1.55, y: 1.95)
-                .translated(by: scaleCenter)
+            stroke: VVStrokeStyle(color: SIMD4(0.5, 0.6, 0.95, 1), width: 2)
         )), zIndex: 2)
 
         let rotationCenter = CGPoint(x: bottomLeft.midX, y: bottomLeft.midY + 18)
-        builder.add(kind: .path(starPath(
-            outerRadius: 42,
-            innerRadius: 18,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(starPoints(outerRadius: 42, innerRadius: 18), by: .identity.translated(by: rotationCenter)),
             fill: SIMD4<Float>(0, 0, 0, 0),
-            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
-            transform: .identity.translated(by: rotationCenter)
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5)
         )), zIndex: 1)
-        builder.add(kind: .path(starPath(
-            outerRadius: 42,
-            innerRadius: 18,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(
+                starPoints(outerRadius: 42, innerRadius: 18),
+                by: .identity
+                    .rotated(by: .pi / 6)
+                    .translated(by: rotationCenter)
+            ),
             fill: SIMD4(0.95, 0.7, 0.2, 0.92),
-            stroke: VVStrokeStyle(color: SIMD4(0.95, 0.7, 0.2, 1), width: 2),
-            transform: .identity
-                .rotated(by: .pi / 6)
-                .translated(by: rotationCenter)
+            stroke: VVStrokeStyle(color: SIMD4(0.95, 0.7, 0.2, 1), width: 2)
         )), zIndex: 2)
 
         let composedCenter = CGPoint(x: bottomRight.midX, y: bottomRight.midY + 18)
-        builder.add(kind: .path(rectPath(
-            size: CGSize(width: 70, height: 44),
-            cornerRadius: 12,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(rectPoints(size: CGSize(width: 70, height: 44)), by: .identity.translated(by: composedCenter)),
             fill: SIMD4<Float>(0, 0, 0, 0),
-            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
-            transform: .identity.translated(by: composedCenter)
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5)
         )), zIndex: 1)
-        builder.add(kind: .path(rectPath(
-            size: CGSize(width: 70, height: 44),
-            cornerRadius: 12,
+        builder.add(kind: .path(polygonPath(
+            points: transformed(
+                rectPoints(size: CGSize(width: 70, height: 44)),
+                by: .identity
+                    .scaled(x: 1.45, y: 1.25)
+                    .rotated(by: .pi / 8)
+                    .translated(by: composedCenter)
+            ),
             fill: SIMD4(0.9, 0.4, 0.6, 0.84),
-            stroke: VVStrokeStyle(color: SIMD4(0.9, 0.4, 0.6, 1), width: 2),
-            transform: .identity
-                .scaled(x: 1.45, y: 1.25)
-                .rotated(by: .pi / 8)
-                .translated(by: composedCenter)
+            stroke: VVStrokeStyle(color: SIMD4(0.9, 0.4, 0.6, 1), width: 2)
         )), zIndex: 2)
 
         return builder.scene
@@ -5172,6 +5164,12 @@ enum SampleData {
                         VText("12:45", font: .headline)
                     }
                 }
+                .overlay(alignment: .topTrailing) {
+                    VText("LIVE", font: .caption, color: .white)
+                        .padding(horizontal: 8, vertical: 4)
+                        .background(color: .rose.withOpacity(0.9), cornerRadius: 999)
+                        .offset(x: -6, y: 6)
+                }
             }
             .padding(18)
             .background(color: fg.withOpacity(0.05), cornerRadius: cr)
@@ -5191,6 +5189,105 @@ enum SampleData {
                         VRect(color: .teal.withOpacity(0.3), cornerRadius: 4).frame(height: 30)
                         VRect(color: .teal.withOpacity(0.2), cornerRadius: 4).frame(height: 40)
                         VRect(color: .teal.withOpacity(0.14), cornerRadius: 4).frame(height: 24)
+                    }
+                }
+            }
+            .padding(20)
+            .background(color: fg.withOpacity(0.04), cornerRadius: cr)
+            .border(color: fg.withOpacity(0.1), width: 1, cornerRadii: VVCornerRadii(cr))
+
+            VVStack(spacing: 12, alignment: .leading) {
+                VText("Flow Layout", font: .headline)
+                VText("Chips and token-like UI no longer need manual row splitting.", font: .caption, color: fg.withOpacity(0.66))
+                VVFlowStack(horizontalSpacing: 10, verticalSpacing: 10) {
+                    VText("Layout", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .indigo.withOpacity(0.22), cornerRadius: 999)
+                    VText("Animation", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .teal.withOpacity(0.22), cornerRadius: 999)
+                    VText("Containers", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .amber.withOpacity(0.22), cornerRadius: 999)
+                    VText("Scroll", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .rose.withOpacity(0.22), cornerRadius: 999)
+                    VText("Overlay", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: fg.withOpacity(0.08), cornerRadius: 999)
+                    VText("Text Wrapping", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .teal.withOpacity(0.14), cornerRadius: 999)
+                    VText("VVView", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .indigo.withOpacity(0.14), cornerRadius: 999)
+                    VText("Primitives", font: .caption, color: fg.withOpacity(0.92))
+                        .padding(horizontal: 12, vertical: 8)
+                        .background(color: .amber.withOpacity(0.14), cornerRadius: 999)
+                }
+                .fillWidth(alignment: .leading)
+            }
+            .padding(20)
+            .background(color: fg.withOpacity(0.04), cornerRadius: cr)
+            .border(color: fg.withOpacity(0.1), width: 1, cornerRadii: VVCornerRadii(cr))
+
+            VVStack(spacing: 12, alignment: .leading) {
+                VText("Overlay + Scroll Container", font: .headline)
+                VText("Badges, chrome, and clipped scrolling content now work at the VVView layer.", font: .caption, color: fg.withOpacity(0.66))
+                    .lineSpacing(2)
+
+                VVHStack(spacing: 18) {
+                    VVStack(spacing: 8, alignment: .leading) {
+                        VText("Overlay Card", font: .body)
+                        VRect(color: .teal.withOpacity(0.2), cornerRadius: 14)
+                            .frame(width: 220, height: 110)
+                            .overlay(alignment: .bottomTrailing) {
+                                VText("3 new", font: .caption, color: .white)
+                                    .padding(horizontal: 10, vertical: 6)
+                                    .background(color: .teal, cornerRadius: 999)
+                                    .offset(x: -10, y: -10)
+                            }
+                            .background(alignment: .center) {
+                                VRect(color: .black.withOpacity(0.18), cornerRadius: 18)
+                                    .frame(width: 236, height: 126)
+                            }
+                    }
+
+                    VVStack(spacing: 8, alignment: .leading) {
+                        VText("Scroll View", font: .body)
+                        VVStack(spacing: 8, alignment: .leading) {
+                            VText("Scrollable row 1", font: .caption, color: fg.withOpacity(0.9))
+                                .padding(horizontal: 12, vertical: 10)
+                                .fillWidth(alignment: .leading)
+                                .background(color: fg.withOpacity(0.08), cornerRadius: 10)
+                            VText("Scrollable row 2", font: .caption, color: fg.withOpacity(0.9))
+                                .padding(horizontal: 12, vertical: 10)
+                                .fillWidth(alignment: .leading)
+                                .background(color: fg.withOpacity(0.05), cornerRadius: 10)
+                            VText("Scrollable row 3", font: .caption, color: fg.withOpacity(0.9))
+                                .padding(horizontal: 12, vertical: 10)
+                                .fillWidth(alignment: .leading)
+                                .background(color: fg.withOpacity(0.08), cornerRadius: 10)
+                            VText("Scrollable row 4", font: .caption, color: fg.withOpacity(0.9))
+                                .padding(horizontal: 12, vertical: 10)
+                                .fillWidth(alignment: .leading)
+                                .background(color: fg.withOpacity(0.05), cornerRadius: 10)
+                            VText("Scrollable row 5", font: .caption, color: fg.withOpacity(0.9))
+                                .padding(horizontal: 12, vertical: 10)
+                                .fillWidth(alignment: .leading)
+                                .background(color: fg.withOpacity(0.08), cornerRadius: 10)
+                            VText("Scrollable row 6", font: .caption, color: fg.withOpacity(0.9))
+                                .padding(horizontal: 12, vertical: 10)
+                                .fillWidth(alignment: .leading)
+                                .background(color: fg.withOpacity(0.05), cornerRadius: 10)
+                        }
+                        .scrollContainer(
+                            axis: .vertical,
+                            viewportSize: CGSize(width: 260, height: 128),
+                            contentOffset: CGPoint(x: 0, y: 34)
+                        )
+                        .background(color: fg.withOpacity(0.035), cornerRadius: 14)
+                        .border(color: fg.withOpacity(0.08), width: 1, cornerRadii: VVCornerRadii(14))
                     }
                 }
             }
