@@ -53,6 +53,13 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var hoveredFooterActionMessageID: String?
     private var jumpAnimationToken = UUID()
     private var isAnimatingJump = false
+    private var displayLink: CVDisplayLink?
+    private var scrollAnimationStartTime: CFTimeInterval = 0
+    private var scrollAnimationDuration: CFTimeInterval = 0
+    private var scrollAnimationStartY: CGFloat = 0
+    private var scrollAnimationTargetY: CGFloat = 0
+    private var scrollAnimationCompletion: (() -> Void)?
+    private var scrollAnimationEaseOut: Bool = true
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -82,6 +89,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     deinit {
+        stopDisplayLink()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -281,14 +289,11 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         let maxOffset = max(0, contentHeight - visibleRect.height)
         let newOrigin = CGPoint(x: visibleRect.origin.x, y: maxOffset)
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
-                scrollView.contentView.animator().setBoundsOrigin(newOrigin)
-            }
+            animateScroll(toY: maxOffset, duration: 0.15, timing: .easeOut, token: nil)
         } else {
             scrollView.contentView.setBoundsOrigin(newOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
-        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     public func restoreScrollPosition(_ origin: CGPoint) {
@@ -355,25 +360,77 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         token: UUID?,
         completion: (() -> Void)? = nil
     ) {
-        let activeToken = token
-        let currentOrigin = scrollView.contentView.bounds.origin
-        let targetOrigin = CGPoint(x: currentOrigin.x, y: targetY)
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: timing)
-            scrollView.contentView.animator().setBoundsOrigin(targetOrigin)
-        } completionHandler: { [weak self] in
+        stopDisplayLink()
+        scrollAnimationStartY = scrollView.contentView.bounds.origin.y
+        scrollAnimationTargetY = targetY
+        scrollAnimationDuration = max(0.05, duration)
+        scrollAnimationStartTime = CACurrentMediaTime()
+        scrollAnimationEaseOut = (timing == .easeOut || timing == .easeInEaseOut)
+        scrollAnimationCompletion = { [weak self] in
             guard let self else { return }
-            if let activeToken, activeToken != self.jumpAnimationToken {
-                return
-            }
+            if let token, token != self.jumpAnimationToken { return }
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+            completion?()
+        }
+        startDisplayLink()
+    }
+
+    private func startDisplayLink() {
+        guard displayLink == nil else { return }
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let link else { return }
+
+        let raw = Unmanaged.passUnretained(self).toOpaque()
+        CVDisplayLinkSetOutputCallback(link, { (_, _, _, _, _, userInfo) -> CVReturn in
+            guard let userInfo else { return kCVReturnError }
+            let view = Unmanaged<VVChatTimelineView>.fromOpaque(userInfo).takeUnretainedValue()
+            DispatchQueue.main.async { view.displayLinkFired() }
+            return kCVReturnSuccess
+        }, raw)
+
+        CVDisplayLinkStart(link)
+        displayLink = link
+    }
+
+    private func stopDisplayLink() {
+        if let link = displayLink {
+            CVDisplayLinkStop(link)
+            displayLink = nil
+        }
+    }
+
+    private func displayLinkFired() {
+        let elapsed = CACurrentMediaTime() - scrollAnimationStartTime
+        let progress = min(1.0, elapsed / scrollAnimationDuration)
+
+        let t: CGFloat
+        if scrollAnimationEaseOut {
+            // Ease-out: fast start, slow finish
+            let p = CGFloat(progress)
+            t = 1.0 - (1.0 - p) * (1.0 - p)
+        } else {
+            t = CGFloat(progress)
+        }
+
+        let currentY = scrollAnimationStartY + (scrollAnimationTargetY - scrollAnimationStartY) * t
+        let origin = CGPoint(x: scrollView.contentView.bounds.origin.x, y: currentY)
+        scrollView.contentView.setBoundsOrigin(origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        updateMetalViewport()
+        metalView.setNeedsDisplay(metalView.bounds)
+
+        if progress >= 1.0 {
+            stopDisplayLink()
+            let completion = scrollAnimationCompletion
+            scrollAnimationCompletion = nil
             completion?()
         }
     }
 
     private func cancelJumpToLatestAnimation() {
+        stopDisplayLink()
+        scrollAnimationCompletion = nil
         jumpAnimationToken = UUID()
         isAnimatingJump = false
     }
