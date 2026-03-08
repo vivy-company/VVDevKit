@@ -784,15 +784,15 @@ public final class VVChatMessageRenderer {
         let subtitleColor = card.subtitleColor ?? style.headerTextColor
         let dividerColor = card.dividerColor ?? style.theme.thematicBreakColor.withOpacity(0.7)
         let rowDividerColor = card.rowDividerColor ?? dividerColor.withOpacity(0.78)
-        let titleFont = VVFont.boldSystemFont(ofSize: max(style.baseFont.pointSize + 10, 22))
-        let subtitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 2, 15))
-        let rowTitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 1, 15))
+        let titleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 4, 18))
+        let subtitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 1, 14))
+        let rowTitleFont = style.baseFont.withSize(max(style.baseFont.pointSize, 14))
         let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
-        let rowDeltaFont = VVFont.boldSystemFont(ofSize: max(style.baseFont.pointSize + 1, 14))
-        let rowVerticalPadding: CGFloat = 10
-        let dividerSpacingTop: CGFloat = 14
-        let dividerSpacingBottom: CGFloat = 14
-        let rowCornerRadius: CGFloat = 10
+        let rowDeltaFont = style.timestampFont.withSize(max(style.timestampFont.pointSize + 1, 13))
+        let rowVerticalPadding: CGFloat = 7
+        let dividerSpacingTop: CGFloat = 10
+        let dividerSpacingBottom: CGFloat = 10
+        let rowCornerRadius: CGFloat = 8
 
         var builder = VVSceneBuilder()
         var interactiveRegions: [VVChatInteractiveRegion] = []
@@ -805,7 +805,7 @@ public final class VVChatMessageRenderer {
         currentY += max(1, titleRender.height)
 
         if let subtitle = card.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !subtitle.isEmpty {
-            currentY += 10
+            currentY += 6
             let subtitleRender = renderStyledText(subtitle, font: subtitleFont, color: subtitleColor, width: width)
             builder.withOffset(CGPoint(x: 0, y: currentY - subtitleRender.minY)) { builder in
                 builder.add(node: VVNode.fromScene(subtitleRender.scene))
