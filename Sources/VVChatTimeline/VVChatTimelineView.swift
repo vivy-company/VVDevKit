@@ -257,14 +257,19 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func handleScroll() {
         guard let controller else { return }
         updateMetalViewport()
+        requestImagesForVisibleItems()
+        metalView.setNeedsDisplay(metalView.bounds)
+
+        // During a jump animation, skip state updates that could interfere
+        // with the in-flight scroll. Only update the viewport for rendering.
+        guard !isAnimatingJump else { return }
+
         let visibleRect = scrollView.contentView.bounds
         let contentHeight = max(controller.totalHeight, visibleRect.height)
         let maxOffset = max(0, contentHeight - visibleRect.height)
         let distanceFromBottom = maxOffset - visibleRect.origin.y
         controller.updatePinnedState(distanceFromBottom: distanceFromBottom)
         jumpButton.isHidden = !controller.state.hasUnreadNewContent
-        requestImagesForVisibleItems()
-        metalView.setNeedsDisplay(metalView.bounds)
         onStateChange?(controller.state)
     }
 
