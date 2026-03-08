@@ -791,15 +791,29 @@ public final class VVChatMessageRenderer {
 
     /// Replace all glyph colors in a scene with the given color.
     private func recolorScene(_ scene: VVScene, color: SIMD4<Float>) -> VVScene {
-        var primitives = scene.primitives
-        for i in primitives.indices {
-            switch primitives[i].kind {
-            case .glyph(var glyph):
-                glyph.color = color
-                primitives[i] = VVPrimitive(kind: .glyph(glyph), zIndex: primitives[i].zIndex)
-            default:
-                break
+        var primitives: [VVPrimitive] = []
+        primitives.reserveCapacity(scene.primitives.count)
+        for primitive in scene.primitives {
+            var updated = primitive
+            if case .textRun(var run) = updated.kind {
+                var glyphs = run.glyphs
+                for index in glyphs.indices {
+                    let g = glyphs[index]
+                    glyphs[index] = VVTextGlyph(
+                        glyphID: g.glyphID,
+                        position: g.position,
+                        size: g.size,
+                        color: SIMD4<Float>(color.x, color.y, color.z, g.color.w),
+                        fontVariant: g.fontVariant,
+                        fontSize: g.fontSize,
+                        fontName: g.fontName,
+                        stringIndex: g.stringIndex
+                    )
+                }
+                run.glyphs = glyphs
+                updated = VVPrimitive(kind: .textRun(run), zIndex: primitive.zIndex)
             }
+            primitives.append(updated)
         }
         return VVScene(primitives: primitives)
     }
