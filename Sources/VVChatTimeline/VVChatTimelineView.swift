@@ -33,6 +33,11 @@ private final class ChatTimelineDocumentView: NSView {
 }
 
 public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
+    private struct LayoutSnapshot {
+        var frame: CGRect
+        var contentOffset: CGPoint
+    }
+
     private let scrollView: VVChatTimelineScrollView
     private let documentView: ChatTimelineDocumentView
     private let metalView: VVChatTimelineMetalView
@@ -63,8 +68,14 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var scrollAnimationTargetY: CGFloat = 0
     private var scrollAnimationCompletion: (() -> Void)?
     private var scrollAnimationCurve: VVEasing = .easeOut
-
-    // Layout transition animation (no local state — read from controller)
+    private var layoutAnimationTimer: Timer?
+    private var layoutAnimationStartTime: CFTimeInterval = 0
+    private var layoutAnimationDuration: CFTimeInterval = 0
+    private var layoutAnimationCurve: VVEasing = .snappy
+    private var layoutAnimationFromSnapshots: [String: LayoutSnapshot] = [:]
+    private var layoutAnimationToSnapshots: [String: LayoutSnapshot] = [:]
+    private var animatedLayoutSnapshots: [String: LayoutSnapshot] = [:]
+    private var stableLayoutSnapshots: [String: LayoutSnapshot] = [:]
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -96,6 +107,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     deinit {
         stopScrollAnimation()
+        stopLayoutAnimation()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -172,6 +184,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func bindController(oldValue: VVChatTimelineController?) {
         oldValue?.onUpdate = nil
         didInitialScroll = false
+        stopLayoutAnimation()
+        stableLayoutSnapshots.removeAll(keepingCapacity: false)
+        animatedLayoutSnapshots.removeAll(keepingCapacity: false)
         controller?.onUpdate = { [weak self] update in
             self?.apply(update: update)
         }
@@ -192,6 +207,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     private func apply(update: VVChatTimelineController.Update) {
         guard let controller else { return }
+        let latestSnapshots = currentLayoutSnapshots()
         let style = controller.currentStyle
         if !isSameFont(style.baseFont, currentFont) {
             metalView.updateFont(style.baseFont)
@@ -221,6 +237,12 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         if let transition = controller.pendingLayoutTransition {
             controller.pendingLayoutTransition = nil
             let heightDelta = controller.totalHeight - transition.previousTotalHeight
+            startLayoutAnimation(
+                from: stableLayoutSnapshots,
+                to: latestSnapshots,
+                transition: transition
+            )
+
             if abs(heightDelta) > 1 {
                 let visibleRect = scrollView.contentView.bounds
                 let contentHeight = max(controller.totalHeight, visibleRect.height)
@@ -246,6 +268,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                     }
                 }
             }
+        } else {
+            stopLayoutAnimation(commitTargetSnapshots: false)
+            stableLayoutSnapshots = latestSnapshots
         }
 
         requestImagesForVisibleItems()
@@ -451,6 +476,128 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         isAnimatingJump = false
     }
 
+    private func currentLayoutSnapshots() -> [String: LayoutSnapshot] {
+        guard let controller else { return [:] }
+        var snapshots: [String: LayoutSnapshot] = [:]
+        snapshots.reserveCapacity(controller.layouts.count)
+        for layout in controller.layouts {
+            snapshots[layout.id] = LayoutSnapshot(frame: layout.frame, contentOffset: layout.contentOffset)
+        }
+        return snapshots
+    }
+
+    private func startLayoutAnimation(
+        from previousSnapshots: [String: LayoutSnapshot],
+        to nextSnapshots: [String: LayoutSnapshot],
+        transition: VVChatTimelineController.PendingLayoutTransition
+    ) {
+        guard !nextSnapshots.isEmpty else {
+            stableLayoutSnapshots = nextSnapshots
+            return
+        }
+
+        layoutAnimationFromSnapshots.removeAll(keepingCapacity: true)
+        layoutAnimationToSnapshots = nextSnapshots
+        animatedLayoutSnapshots.removeAll(keepingCapacity: true)
+
+        let anchorSnapshot = previousSnapshots[transition.anchorID]
+        let anchorFrame = anchorSnapshot?.frame ?? CGRect(
+            x: 0,
+            y: transition.anchorY,
+            width: scrollView.contentView.bounds.width,
+            height: 0
+        )
+
+        for (id, nextSnapshot) in nextSnapshots {
+            if let previousSnapshot = previousSnapshots[id] {
+                layoutAnimationFromSnapshots[id] = previousSnapshot
+            } else {
+                let insertedStartFrame = insertedItemStartFrame(
+                    for: nextSnapshot.frame,
+                    anchorFrame: anchorFrame
+                )
+                layoutAnimationFromSnapshots[id] = LayoutSnapshot(
+                    frame: insertedStartFrame,
+                    contentOffset: nextSnapshot.contentOffset
+                )
+            }
+        }
+
+        animatedLayoutSnapshots = layoutAnimationFromSnapshots
+        layoutAnimationStartTime = CACurrentMediaTime()
+        layoutAnimationDuration = 0.22
+        layoutAnimationCurve = .snappy
+
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            self?.layoutAnimationTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        layoutAnimationTimer?.invalidate()
+        layoutAnimationTimer = timer
+    }
+
+    private func insertedItemStartFrame(for targetFrame: CGRect, anchorFrame: CGRect) -> CGRect {
+        let verticalShift = min(max(targetFrame.height * 0.55, 16), 42)
+        let anchorBottom = anchorFrame.maxY
+        let startY: CGFloat
+
+        if targetFrame.minY >= anchorBottom {
+            startY = max(anchorBottom - min(targetFrame.height * 0.35, 12), targetFrame.minY - verticalShift)
+        } else {
+            startY = targetFrame.minY - min(verticalShift, 28)
+        }
+
+        return CGRect(
+            x: targetFrame.origin.x,
+            y: startY,
+            width: targetFrame.width,
+            height: targetFrame.height
+        )
+    }
+
+    private func stopLayoutAnimation(commitTargetSnapshots: Bool = true) {
+        layoutAnimationTimer?.invalidate()
+        layoutAnimationTimer = nil
+        if commitTargetSnapshots, !layoutAnimationToSnapshots.isEmpty {
+            stableLayoutSnapshots = layoutAnimationToSnapshots
+        }
+        layoutAnimationFromSnapshots.removeAll(keepingCapacity: true)
+        layoutAnimationToSnapshots.removeAll(keepingCapacity: true)
+        animatedLayoutSnapshots.removeAll(keepingCapacity: true)
+    }
+
+    private func layoutAnimationTick() {
+        let elapsed = CACurrentMediaTime() - layoutAnimationStartTime
+        let progress = min(1.0, elapsed / layoutAnimationDuration)
+        let t = layoutAnimationCurve.value(at: CGFloat(progress))
+
+        var interpolated: [String: LayoutSnapshot] = [:]
+        interpolated.reserveCapacity(layoutAnimationToSnapshots.count)
+
+        for (id, targetSnapshot) in layoutAnimationToSnapshots {
+            let startSnapshot = layoutAnimationFromSnapshots[id] ?? targetSnapshot
+            let frame = CGRect(
+                x: startSnapshot.frame.origin.x + (targetSnapshot.frame.origin.x - startSnapshot.frame.origin.x) * t,
+                y: startSnapshot.frame.origin.y + (targetSnapshot.frame.origin.y - startSnapshot.frame.origin.y) * t,
+                width: startSnapshot.frame.width + (targetSnapshot.frame.width - startSnapshot.frame.width) * t,
+                height: startSnapshot.frame.height + (targetSnapshot.frame.height - startSnapshot.frame.height) * t
+            )
+            let contentOffset = CGPoint(
+                x: startSnapshot.contentOffset.x + (targetSnapshot.contentOffset.x - startSnapshot.contentOffset.x) * t,
+                y: startSnapshot.contentOffset.y + (targetSnapshot.contentOffset.y - startSnapshot.contentOffset.y) * t
+            )
+            interpolated[id] = LayoutSnapshot(frame: frame, contentOffset: contentOffset)
+        }
+
+        animatedLayoutSnapshots = interpolated
+        metalView.setNeedsDisplay(metalView.bounds)
+
+        if progress >= 1.0 {
+            stopLayoutAnimation()
+            metalView.setNeedsDisplay(metalView.bounds)
+        }
+    }
+
     // MARK: - VVChatTimelineRenderDataSource
 
     public var renderItemCount: Int {
@@ -461,7 +608,13 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         guard let controller,
               let layout = controller.itemLayout(at: index),
               let rendered = controller.renderedMessage(for: layout.id) else { return nil }
-        return VVChatTimelineRenderItem(id: layout.id, frame: layout.frame, contentOffset: layout.contentOffset, scene: rendered.scene)
+        let snapshot = animatedLayoutSnapshots[layout.id] ?? stableLayoutSnapshots[layout.id]
+        return VVChatTimelineRenderItem(
+            id: layout.id,
+            frame: snapshot?.frame ?? layout.frame,
+            contentOffset: snapshot?.contentOffset ?? layout.contentOffset,
+            scene: rendered.scene
+        )
     }
 
     public var viewportRect: CGRect {
