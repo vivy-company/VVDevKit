@@ -749,29 +749,30 @@ public final class VVChatMessageRenderer {
             builder.add(node: VVNode.fromScene(textRender.scene))
         }
 
+        let titleTextWidth = Self.singleLineMetaWidth(text, font: style.headerFont)
+        var cursorX = textX + titleTextWidth
+
         // Render colored badges after the header text
         if let badges, !badges.isEmpty {
-            let titleTextWidth = Self.singleLineMetaWidth(text, font: style.headerFont)
-            var badgeX = textX + titleTextWidth
             for badge in badges {
-                badgeX += badgeSpacing
+                cursorX += badgeSpacing
                 let badgeRender = renderMeta(
                     text: badge.text,
                     layoutEngine: headerLayoutEngine,
                     pipeline: headerPipeline,
-                    width: max(1, width - badgeX)
+                    width: max(1, width - cursorX)
                 )
                 let badgeScene = recolorScene(badgeRender.scene, color: badge.color)
-                builder.withOffset(CGPoint(x: badgeX, y: textOffsetY)) { builder in
+                builder.withOffset(CGPoint(x: cursorX, y: textOffsetY)) { builder in
                     builder.add(node: VVNode.fromScene(badgeScene))
                 }
-                badgeX += Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+                cursorX += Self.singleLineMetaWidth(badge.text, font: style.headerFont)
             }
         }
 
         if hasTrailingIcon, let trailingIconURL {
             let trailingIconY = max(0, (height - trailingIconSize) * 0.5)
-            let trailingX = width - trailingIconSize
+            let trailingX = cursorX + trailingIconSpacing
             let trailingIcon = VVImagePrimitive(
                 url: trailingIconURL,
                 frame: CGRect(x: trailingX, y: trailingIconY, width: trailingIconSize, height: trailingIconSize),
