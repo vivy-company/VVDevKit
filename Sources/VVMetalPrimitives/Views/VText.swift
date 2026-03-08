@@ -52,17 +52,35 @@ public struct VVFontSpec: Sendable, Hashable {
 
 // MARK: - VText
 
+public enum VVTextTruncationMode: Sendable, Hashable {
+    case clip
+    case tail
+}
+
 public struct VText: VVView {
     public var text: String
     public var font: VVFontSpec
     public var color: SIMD4<Float>?
-    public var maxLines: Int
+    public var lineLimit: Int?
+    public var truncationMode: VVTextTruncationMode
 
-    public init(_ text: String, font: VVFontSpec = .body, color: SIMD4<Float>? = nil, maxLines: Int = 0) {
+    public var maxLines: Int {
+        get { lineLimit ?? 0 }
+        set { lineLimit = newValue > 0 ? newValue : nil }
+    }
+
+    public init(
+        _ text: String,
+        font: VVFontSpec = .body,
+        color: SIMD4<Float>? = nil,
+        maxLines: Int = 0,
+        truncationMode: VVTextTruncationMode = .tail
+    ) {
         self.text = text
         self.font = font
         self.color = color
-        self.maxLines = maxLines
+        self.lineLimit = maxLines > 0 ? maxLines : nil
+        self.truncationMode = truncationMode
     }
 
     public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
@@ -83,15 +101,25 @@ public struct VText: VVView {
 
         let framesetter = CTFramesetterCreateWithAttributedString(attrString)
         let framePath = CGMutablePath()
-        let frameWidth = max(1, constraint.maxWidth)
-        let frameHeight: CGFloat = maxLines > 0 ? lineHeight * CGFloat(maxLines) + 1 : 100_000
+        let frameWidth = max(1, min(constraint.maxWidth, constraint.idealWidth ?? constraint.maxWidth))
+        let limitedLines = lineLimit ?? 0
+        let frameHeight: CGFloat = limitedLines > 0 ? lineHeight * CGFloat(limitedLines) + 1 : 100_000
         framePath.addRect(CGRect(x: 0, y: 0, width: frameWidth, height: frameHeight))
         let frame = CTFramesetterCreateFrame(framesetter, CFRangeMake(0, 0), framePath, nil)
 
         let lines = CTFrameGetLines(frame) as? [CTLine] ?? []
         guard !lines.isEmpty else { return .empty }
 
-        let effectiveLines = maxLines > 0 ? Array(lines.prefix(maxLines)) : lines
+        var effectiveLines = limitedLines > 0 ? Array(lines.prefix(limitedLines)) : lines
+        let visibleRange = CTFrameGetVisibleStringRange(frame)
+        let requiresTruncation = limitedLines > 0 &&
+            visibleRange.location + visibleRange.length < attrString.length &&
+            truncationMode == .tail &&
+            !effectiveLines.isEmpty
+        if requiresTruncation, let lastLine = effectiveLines.last {
+            let token = CTLineCreateWithAttributedString(NSAttributedString(string: "\u{2026}", attributes: attributes))
+            effectiveLines[effectiveLines.count - 1] = CTLineCreateTruncatedLine(lastLine, Double(frameWidth), .end, token) ?? lastLine
+        }
 
         var allGlyphs: [VVTextGlyph] = []
         var totalWidth: CGFloat = 0
@@ -162,7 +190,19 @@ public struct VText: VVView {
         )
 
         let node = VVNode(primitives: [.textRun(textRun)])
-        return VVViewLayout(size: CGSize(width: min(totalWidth, constraint.maxWidth), height: totalHeight), node: node)
+        return VVViewLayout(size: constraint.clamped(size: CGSize(width: min(totalWidth, frameWidth), height: totalHeight)), node: node)
+    }
+
+    public func lineLimit(_ limit: Int?) -> VText {
+        var copy = self
+        copy.lineLimit = limit
+        return copy
+    }
+
+    public func truncationMode(_ mode: VVTextTruncationMode) -> VText {
+        var copy = self
+        copy.truncationMode = mode
+        return copy
     }
 
     private func isSystemUIFontName(_ name: String) -> Bool {

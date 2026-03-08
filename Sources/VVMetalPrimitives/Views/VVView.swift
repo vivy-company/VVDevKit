@@ -89,6 +89,42 @@ public struct VVViewLayout: Sendable {
     }
 }
 
+// MARK: - Frame Alignment
+
+public enum VVFrameAlignment: Sendable {
+    case topLeading
+    case top
+    case topTrailing
+    case leading
+    case center
+    case trailing
+    case bottomLeading
+    case bottom
+    case bottomTrailing
+
+    func xOffset(containerWidth: CGFloat, childWidth: CGFloat) -> CGFloat {
+        switch self {
+        case .topLeading, .leading, .bottomLeading:
+            return 0
+        case .top, .center, .bottom:
+            return max(0, (containerWidth - childWidth) * 0.5)
+        case .topTrailing, .trailing, .bottomTrailing:
+            return max(0, containerWidth - childWidth)
+        }
+    }
+
+    func yOffset(containerHeight: CGFloat, childHeight: CGFloat) -> CGFloat {
+        switch self {
+        case .topLeading, .top, .topTrailing:
+            return 0
+        case .leading, .center, .trailing:
+            return max(0, (containerHeight - childHeight) * 0.5)
+        case .bottomLeading, .bottom, .bottomTrailing:
+            return max(0, containerHeight - childHeight)
+        }
+    }
+}
+
 // MARK: - VVView Protocol
 
 public protocol VVView: Sendable {

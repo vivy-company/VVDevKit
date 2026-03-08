@@ -17,7 +17,14 @@ private func vvHorizontalSizingBehavior(for child: any VVView) -> VVHorizontalSi
     case is VText, is VVTextBlockView, is VVStack, is VVHStack, is VVZStack, is VVGroup:
         return .compressible
     case let modifier as VVFrameModifier:
-        return modifier.width == nil ? vvHorizontalSizingBehavior(for: modifier.child) : .fixed
+        if let minWidth = modifier.minWidth,
+           let idealWidth = modifier.idealWidth,
+           let maxWidth = modifier.maxWidth,
+           abs(minWidth - idealWidth) < 0.001,
+           abs(minWidth - maxWidth) < 0.001 {
+            return .fixed
+        }
+        return vvHorizontalSizingBehavior(for: modifier.child)
     case let modifier as VVPaddingModifier:
         return vvHorizontalSizingBehavior(for: modifier.child)
     case let modifier as VVBackgroundModifier:
@@ -59,6 +66,11 @@ public enum VVVerticalAlignment: Sendable {
     case top
     case center
     case bottom
+}
+
+public enum VVZStackSizing: Sendable {
+    case union
+    case firstChild
 }
 
 // MARK: - VVStack
@@ -290,13 +302,27 @@ public struct VVHStack: VVView {
 // MARK: - VVZStack
 
 public struct VVZStack: VVView {
+    public var alignment: VVFrameAlignment
+    public var sizing: VVZStackSizing
     public var children: [any VVView]
 
-    public init(@VVViewBuilder content: () -> [any VVView]) {
+    public init(
+        alignment: VVFrameAlignment = .topLeading,
+        sizing: VVZStackSizing = .union,
+        @VVViewBuilder content: () -> [any VVView]
+    ) {
+        self.alignment = alignment
+        self.sizing = sizing
         self.children = content()
     }
 
-    public init(children: [any VVView]) {
+    public init(
+        alignment: VVFrameAlignment = .topLeading,
+        sizing: VVZStackSizing = .union,
+        children: [any VVView]
+    ) {
+        self.alignment = alignment
+        self.sizing = sizing
         self.children = children
     }
 
@@ -314,15 +340,25 @@ public struct VVZStack: VVView {
             maxHeight = max(maxHeight, childLayout.size.height)
         }
 
+        let containerSize: CGSize
+        switch sizing {
+        case .union:
+            containerSize = constraint.clamped(size: CGSize(width: maxWidth, height: maxHeight))
+        case .firstChild:
+            containerSize = constraint.clamped(size: childLayouts.first?.size ?? .zero)
+        }
+
         var nodes: [VVNode] = []
         for (index, childLayout) in childLayouts.enumerated() {
-            var node = childLayout.node
-            node.zIndex = index
-            nodes.append(node)
+            let offset = CGPoint(
+                x: alignment.xOffset(containerWidth: containerSize.width, childWidth: childLayout.size.width),
+                y: alignment.yOffset(containerHeight: containerSize.height, childHeight: childLayout.size.height)
+            )
+            nodes.append(VVNode(offset: offset, zIndex: index, children: [childLayout.node]))
         }
 
         return VVViewLayout(
-            size: constraint.clamped(size: CGSize(width: maxWidth, height: maxHeight)),
+            size: containerSize,
             node: VVNode(children: nodes)
         )
     }

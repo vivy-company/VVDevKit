@@ -49,8 +49,37 @@ extension VVView {
 
     // MARK: - Frame
 
-    public func frame(width: CGFloat? = nil, height: CGFloat? = nil) -> VVFrameModifier {
-        VVFrameModifier(child: self, width: width, height: height)
+    public func frame(width: CGFloat? = nil, height: CGFloat? = nil, alignment: VVFrameAlignment = .center) -> VVFrameModifier {
+        VVFrameModifier(child: self, width: width, height: height, alignment: alignment)
+    }
+
+    public func frame(
+        minWidth: CGFloat? = nil,
+        idealWidth: CGFloat? = nil,
+        maxWidth: CGFloat? = nil,
+        minHeight: CGFloat? = nil,
+        idealHeight: CGFloat? = nil,
+        maxHeight: CGFloat? = nil,
+        alignment: VVFrameAlignment = .center
+    ) -> VVFrameModifier {
+        VVFrameModifier(
+            child: self,
+            minWidth: minWidth,
+            idealWidth: idealWidth,
+            maxWidth: maxWidth,
+            minHeight: minHeight,
+            idealHeight: idealHeight,
+            maxHeight: maxHeight,
+            alignment: alignment
+        )
+    }
+
+    public func fillWidth(alignment: VVFrameAlignment = .center) -> VVFrameModifier {
+        frame(minWidth: 0, maxWidth: .greatestFiniteMagnitude, alignment: alignment)
+    }
+
+    public func fillHeight(alignment: VVFrameAlignment = .center) -> VVFrameModifier {
+        frame(minHeight: 0, maxHeight: .greatestFiniteMagnitude, alignment: alignment)
     }
 
     // MARK: - Opacity

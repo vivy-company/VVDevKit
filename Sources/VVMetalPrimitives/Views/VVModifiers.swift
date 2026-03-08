@@ -135,33 +135,92 @@ public struct VVShadowModifier: VVView {
 
 public struct VVFrameModifier: VVView {
     public var child: any VVView
-    public var width: CGFloat?
-    public var height: CGFloat?
+    public var minWidth: CGFloat?
+    public var idealWidth: CGFloat?
+    public var maxWidth: CGFloat?
+    public var minHeight: CGFloat?
+    public var idealHeight: CGFloat?
+    public var maxHeight: CGFloat?
+    public var alignment: VVFrameAlignment
 
-    public init(child: any VVView, width: CGFloat? = nil, height: CGFloat? = nil) {
+    public init(
+        child: any VVView,
+        minWidth: CGFloat? = nil,
+        idealWidth: CGFloat? = nil,
+        maxWidth: CGFloat? = nil,
+        minHeight: CGFloat? = nil,
+        idealHeight: CGFloat? = nil,
+        maxHeight: CGFloat? = nil,
+        alignment: VVFrameAlignment = .center
+    ) {
         self.child = child
-        self.width = width
-        self.height = height
+        self.minWidth = minWidth
+        self.idealWidth = idealWidth
+        self.maxWidth = maxWidth
+        self.minHeight = minHeight
+        self.idealHeight = idealHeight
+        self.maxHeight = maxHeight
+        self.alignment = alignment
+    }
+
+    public init(child: any VVView, width: CGFloat? = nil, height: CGFloat? = nil, alignment: VVFrameAlignment = .center) {
+        self.child = child
+        self.minWidth = width
+        self.idealWidth = width
+        self.maxWidth = width
+        self.minHeight = height
+        self.idealHeight = height
+        self.maxHeight = height
+        self.alignment = alignment
     }
 
     public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
-        let constrainedWidth = width ?? constraint.maxWidth
-        let constrainedHeight = height ?? constraint.maxHeight
+        let explicitMinWidth = minWidth
+        let explicitIdealWidth = idealWidth
+        let explicitMaxWidth = maxWidth
+        let explicitMinHeight = minHeight
+        let explicitIdealHeight = idealHeight
+        let explicitMaxHeight = maxHeight
+
+        let childMaxWidth: CGFloat = {
+            if let explicitMaxWidth {
+                return explicitMaxWidth.isFinite ? min(explicitMaxWidth, constraint.maxWidth) : constraint.maxWidth
+            }
+            return constraint.maxWidth
+        }()
+        let childMaxHeight: CGFloat = {
+            if let explicitMaxHeight {
+                return explicitMaxHeight.isFinite ? min(explicitMaxHeight, constraint.maxHeight) : constraint.maxHeight
+            }
+            return constraint.maxHeight
+        }()
         let innerConstraint = VVLayoutConstraint(
-            minWidth: width ?? constraint.minWidth,
-            idealWidth: width ?? constraint.idealWidth,
-            maxWidth: constrainedWidth,
-            minHeight: height ?? constraint.minHeight,
-            idealHeight: height ?? constraint.idealHeight,
-            maxHeight: constrainedHeight
+            minWidth: explicitMinWidth ?? 0,
+            idealWidth: explicitIdealWidth ?? constraint.idealWidth,
+            maxWidth: childMaxWidth,
+            minHeight: explicitMinHeight ?? 0,
+            idealHeight: explicitIdealHeight ?? constraint.idealHeight,
+            maxHeight: childMaxHeight
         )
         let childLayout = child.layout(in: env, constraint: innerConstraint)
 
-        let finalWidth = width ?? childLayout.size.width
-        let finalHeight = height ?? childLayout.size.height
+        let expandsToParentWidth = explicitMaxWidth == .greatestFiniteMagnitude && constraint.hasBoundedWidth
+        let expandsToParentHeight = explicitMaxHeight == .greatestFiniteMagnitude && constraint.hasBoundedHeight
+
+        let unclampedWidth = expandsToParentWidth
+            ? constraint.maxWidth
+            : max(explicitMinWidth ?? 0, min(childLayout.size.width, explicitMaxWidth ?? childLayout.size.width))
+        let unclampedHeight = expandsToParentHeight
+            ? constraint.maxHeight
+            : max(explicitMinHeight ?? 0, min(childLayout.size.height, explicitMaxHeight ?? childLayout.size.height))
+        let finalSize = constraint.clamped(size: CGSize(width: unclampedWidth, height: unclampedHeight))
+        let childOffset = CGPoint(
+            x: alignment.xOffset(containerWidth: finalSize.width, childWidth: childLayout.size.width),
+            y: alignment.yOffset(containerHeight: finalSize.height, childHeight: childLayout.size.height)
+        )
         return VVViewLayout(
-            size: constraint.clamped(size: CGSize(width: finalWidth, height: finalHeight)),
-            node: childLayout.node
+            size: finalSize,
+            node: VVNode(offset: childOffset, children: [childLayout.node])
         )
     }
 }
