@@ -213,32 +213,32 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             didInitialScroll = true
         }
 
-        // Animated layout transition: smoothly scroll to compensate for height change
+        // Animated layout transition for accordion expand/collapse
         if let transition = controller.pendingLayoutTransition {
             controller.pendingLayoutTransition = nil
             let heightDelta = controller.totalHeight - transition.previousTotalHeight
             if abs(heightDelta) > 1 {
-                // Find the anchor item's new position
-                if let anchorIndex = controller.layouts.firstIndex(where: { $0.id == transition.anchorID }) {
-                    let newAnchorY = controller.layouts[anchorIndex].frame.origin.y
-                    let anchorDelta = newAnchorY - transition.anchorY
-                    if abs(anchorDelta) > 0.5 {
-                        let currentOrigin = scrollView.contentView.bounds.origin
-                        let compensatedY = currentOrigin.y + anchorDelta
-                        scrollView.contentView.setBoundsOrigin(CGPoint(x: currentOrigin.x, y: compensatedY))
-                        scrollView.reflectScrolledClipView(scrollView.contentView)
+                let visibleRect = scrollView.contentView.bounds
+                let contentHeight = max(controller.totalHeight, visibleRect.height)
+                let maxOffset = max(0, contentHeight - visibleRect.height)
+
+                if heightDelta < 0 {
+                    // Collapse: content shrank. If we're scrolled past the new max, animate to clamp.
+                    let currentY = visibleRect.origin.y
+                    let clampedY = min(currentY, maxOffset)
+                    if abs(clampedY - currentY) > 1 {
+                        isAnimatingJump = true
+                        animateScroll(toY: clampedY, duration: 0.2, timing: .easeOut, token: nil) { [weak self] in
+                            self?.isAnimatingJump = false
+                        }
                     }
-                }
-                // Animate from current position to natural position over ~200ms
-                let currentY = scrollView.contentView.bounds.origin.y
-                let naturalY = currentY + heightDelta
-                let contentHeight = max(controller.totalHeight, scrollView.contentView.bounds.height)
-                let maxOffset = max(0, contentHeight - scrollView.contentView.bounds.height)
-                let targetY = min(max(0, naturalY), maxOffset)
-                if abs(targetY - currentY) > 1 {
-                    isAnimatingJump = true
-                    animateScroll(toY: targetY, duration: 0.22, timing: .easeOut, token: nil) { [weak self] in
-                        self?.isAnimatingJump = false
+                } else {
+                    // Expand: content grew. If pinned to bottom, animate to new bottom.
+                    if controller.state.isPinnedToBottom {
+                        isAnimatingJump = true
+                        animateScroll(toY: maxOffset, duration: 0.22, timing: .easeOut, token: nil) { [weak self] in
+                            self?.isAnimatingJump = false
+                        }
                     }
                 }
             }
