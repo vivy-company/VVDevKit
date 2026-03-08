@@ -802,7 +802,9 @@ public final class VVChatMessageRenderer {
         let rowTitleFont = style.baseFont.withSize(max(style.baseFont.pointSize, 14))
         let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
         let rowDeltaFont = style.timestampFont.withSize(max(style.timestampFont.pointSize + 1, 13))
-        let rowVerticalPadding: CGFloat = 7
+        let rowIconSize: CGFloat = 16
+        let rowIconSpacing: CGFloat = 10
+        let rowVerticalPadding: CGFloat = 10
         let rowHighlightHorizontalInset: CGFloat = 10
         let rowHighlightVerticalInset: CGFloat = 3
         let titleSubtitleSpacing: CGFloat = 4
@@ -886,7 +888,9 @@ public final class VVChatMessageRenderer {
             }
             let trailingSpacing: CGFloat = (additionsRender != nil && deletionsRender != nil) ? 10 : 0
             let trailingWidth = (additionsRender?.width ?? 0) + (deletionsRender?.width ?? 0) + trailingSpacing
-            let titleWidth = max(80, width - trailingWidth - 16)
+            let hasRowIcon = (row.iconURL?.isEmpty == false)
+            let rowTextLeadingInset = hasRowIcon ? (rowIconSize + rowIconSpacing) : 0
+            let titleWidth = max(80, width - trailingWidth - 16 - rowTextLeadingInset)
             let titleRender = renderStyledText(row.title, font: rowTitleFont, color: row.titleColor ?? style.theme.linkColor, width: titleWidth)
             let subtitleRender = row.subtitle.flatMap { subtitle in
                 let trimmed = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -900,12 +904,24 @@ public final class VVChatMessageRenderer {
             let rowHeight = rowContentHeight + rowVerticalPadding * 2
             let rowTop = currentY
             let textBaseY = rowTop + rowVerticalPadding
+            let rowTextX = rowTextLeadingInset
 
-            builder.withOffset(CGPoint(x: 0, y: textBaseY - titleRender.minY)) { builder in
+            if hasRowIcon, let iconURL = row.iconURL {
+                let iconY = rowTop + max(0, (rowHeight - rowIconSize) * 0.5)
+                let icon = VVImagePrimitive(
+                    url: iconURL,
+                    frame: CGRect(x: 0, y: iconY, width: rowIconSize, height: rowIconSize),
+                    cornerRadius: 2
+                )
+                builder.add(kind: .image(icon), zIndex: 0)
+                imageURLs.append(iconURL)
+            }
+
+            builder.withOffset(CGPoint(x: rowTextX, y: textBaseY - titleRender.minY)) { builder in
                 builder.add(node: VVNode.fromScene(titleRender.scene))
             }
             if let subtitleRender {
-                builder.withOffset(CGPoint(x: 0, y: textBaseY + titleRender.height + 4 - subtitleRender.minY)) { builder in
+                builder.withOffset(CGPoint(x: rowTextX, y: textBaseY + titleRender.height + 4 - subtitleRender.minY)) { builder in
                     builder.add(node: VVNode.fromScene(subtitleRender.scene))
                 }
             }

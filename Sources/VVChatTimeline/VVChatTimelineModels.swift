@@ -25,6 +25,7 @@ public struct VVChatSummaryCardRow: Hashable, Sendable {
     public var id: String
     public var title: String
     public var subtitle: String?
+    public var iconURL: String?
     public var actionURL: String?
     public var titleColor: SIMD4<Float>?
     public var subtitleColor: SIMD4<Float>?
@@ -38,6 +39,7 @@ public struct VVChatSummaryCardRow: Hashable, Sendable {
         id: String,
         title: String,
         subtitle: String? = nil,
+        iconURL: String? = nil,
         actionURL: String? = nil,
         titleColor: SIMD4<Float>? = nil,
         subtitleColor: SIMD4<Float>? = nil,
@@ -50,6 +52,7 @@ public struct VVChatSummaryCardRow: Hashable, Sendable {
         self.id = id
         self.title = title
         self.subtitle = subtitle
+        self.iconURL = iconURL
         self.actionURL = actionURL
         self.titleColor = titleColor
         self.subtitleColor = subtitleColor
