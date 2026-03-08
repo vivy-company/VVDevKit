@@ -815,19 +815,21 @@ public final class VVChatMessageRenderer {
             currentY += max(1, subtitleRender.height)
         }
 
-        currentY += dividerSpacingTop
-        builder.add(
-            kind: .line(
-                VVLinePrimitive(
-                    start: CGPoint(x: 0, y: currentY),
-                    end: CGPoint(x: width, y: currentY),
-                    thickness: 1,
-                    color: dividerColor
-                )
-            ),
-            zIndex: 0
-        )
-        currentY += dividerSpacingBottom
+        if !card.rows.isEmpty {
+            currentY += dividerSpacingTop
+            builder.add(
+                kind: .line(
+                    VVLinePrimitive(
+                        start: CGPoint(x: 0, y: currentY),
+                        end: CGPoint(x: width, y: currentY),
+                        thickness: 1,
+                        color: dividerColor
+                    )
+                ),
+                zIndex: 0
+            )
+            currentY += dividerSpacingBottom
+        }
 
         for (index, row) in card.rows.enumerated() {
             if index > 0 {
