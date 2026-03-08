@@ -92,6 +92,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
         scrollView.documentView = documentView
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.onInteractionChange = { [weak self] isInteracting in
