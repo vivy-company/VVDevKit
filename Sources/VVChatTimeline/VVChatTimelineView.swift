@@ -33,11 +33,6 @@ private final class ChatTimelineDocumentView: NSView {
 }
 
 public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
-    private struct LayoutSnapshot {
-        var frame: CGRect
-        var contentOffset: CGPoint
-    }
-
     private let scrollView: VVChatTimelineScrollView
     private let documentView: ChatTimelineDocumentView
     private let metalView: VVChatTimelineMetalView
@@ -61,21 +56,17 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var hoveredInteractiveRegionKey: String?
     private var jumpAnimationToken = UUID()
     private var isAnimatingJump = false
-    private var scrollAnimationTimer: Timer?
     private var scrollAnimationStartTime: CFTimeInterval = 0
     private var scrollAnimationDuration: CFTimeInterval = 0
     private var scrollAnimationStartY: CGFloat = 0
     private var scrollAnimationTargetY: CGFloat = 0
     private var scrollAnimationCompletion: (() -> Void)?
     private var scrollAnimationCurve: VVEasing = .easeOut
-    private var layoutAnimationTimer: Timer?
-    private var layoutAnimationStartTime: CFTimeInterval = 0
-    private var layoutAnimationDuration: CFTimeInterval = 0
-    private var layoutAnimationCurve: VVEasing = .snappy
-    private var layoutAnimationFromSnapshots: [String: LayoutSnapshot] = [:]
-    private var layoutAnimationToSnapshots: [String: LayoutSnapshot] = [:]
-    private var animatedLayoutSnapshots: [String: LayoutSnapshot] = [:]
-    private var stableLayoutSnapshots: [String: LayoutSnapshot] = [:]
+    private var layoutAnimator = VVLayoutTransitionAnimator()
+    private var animatedLayoutSnapshots: [String: VVLayoutAnimationSnapshot] = [:]
+    private var stableLayoutSnapshots: [String: VVLayoutAnimationSnapshot] = [:]
+    private var visibleRenderRange: Range<Int> = 0..<0
+    private var displayLink: CVDisplayLink?
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -106,8 +97,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     deinit {
-        stopScrollAnimation()
-        stopLayoutAnimation()
+        stopDisplayLink()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -168,6 +158,17 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         updateMetalViewport()
         updateContentWidth()
         layoutJumpButton()
+        updateVisibleRenderRange()
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            ensureDisplayLink()
+            updateVisibleRenderRange()
+        } else {
+            stopDisplayLink()
+        }
     }
 
     private func layoutJumpButton() {
@@ -187,6 +188,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         stopLayoutAnimation()
         stableLayoutSnapshots.removeAll(keepingCapacity: false)
         animatedLayoutSnapshots.removeAll(keepingCapacity: false)
+        visibleRenderRange = 0..<0
         controller?.onUpdate = { [weak self] update in
             self?.apply(update: update)
         }
@@ -215,6 +217,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         }
         updateDocumentHeight(controller.totalHeight)
         clampScrollIfNeeded()
+        updateVisibleRenderRange()
         jumpButton.isHidden = !update.hasUnreadNewContent
 
         if update.heightDelta != 0,
@@ -327,6 +330,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func handleScroll() {
         guard let controller else { return }
         updateMetalViewport()
+        updateVisibleRenderRange()
         requestImagesForVisibleItems()
         metalView.setNeedsDisplay(metalView.bounds)
 
@@ -424,7 +428,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         token: UUID?,
         completion: (() -> Void)? = nil
     ) {
-        stopScrollAnimation()
         scrollAnimationStartY = scrollView.contentView.bounds.origin.y
         scrollAnimationTargetY = targetY
         scrollAnimationDuration = max(0.05, duration)
@@ -436,37 +439,12 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
             completion?()
         }
-
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            self?.scrollAnimationTick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        scrollAnimationTimer = timer
+        startDisplayLink()
     }
 
     private func stopScrollAnimation() {
-        scrollAnimationTimer?.invalidate()
-        scrollAnimationTimer = nil
-    }
-
-    private func scrollAnimationTick() {
-        let elapsed = CACurrentMediaTime() - scrollAnimationStartTime
-        let progress = min(1.0, elapsed / scrollAnimationDuration)
-        let t = scrollAnimationCurve.value(at: CGFloat(progress))
-
-        let currentY = scrollAnimationStartY + (scrollAnimationTargetY - scrollAnimationStartY) * t
-        let origin = CGPoint(x: scrollView.contentView.bounds.origin.x, y: currentY)
-        scrollView.contentView.setBoundsOrigin(origin)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-        updateMetalViewport()
-        metalView.setNeedsDisplay(metalView.bounds)
-
-        if progress >= 1.0 {
-            stopScrollAnimation()
-            let completion = scrollAnimationCompletion
-            scrollAnimationCompletion = nil
-            completion?()
-        }
+        scrollAnimationDuration = 0
+        scrollAnimationCompletion = nil
     }
 
     private func cancelJumpToLatestAnimation() {
@@ -476,64 +454,66 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         isAnimatingJump = false
     }
 
-    private func currentLayoutSnapshots() -> [String: LayoutSnapshot] {
+    private func currentLayoutSnapshots() -> [String: VVLayoutAnimationSnapshot] {
         guard let controller else { return [:] }
-        var snapshots: [String: LayoutSnapshot] = [:]
+        var snapshots: [String: VVLayoutAnimationSnapshot] = [:]
         snapshots.reserveCapacity(controller.layouts.count)
         for layout in controller.layouts {
-            snapshots[layout.id] = LayoutSnapshot(frame: layout.frame, contentOffset: layout.contentOffset)
+            snapshots[layout.id] = VVLayoutAnimationSnapshot(
+                id: layout.id,
+                frame: layout.frame,
+                contentOffset: layout.contentOffset
+            )
         }
         return snapshots
     }
 
     private func startLayoutAnimation(
-        from previousSnapshots: [String: LayoutSnapshot],
-        to nextSnapshots: [String: LayoutSnapshot],
+        from previousSnapshots: [String: VVLayoutAnimationSnapshot],
+        to nextSnapshots: [String: VVLayoutAnimationSnapshot],
         transition: VVChatTimelineController.PendingLayoutTransition
     ) {
         guard !nextSnapshots.isEmpty else {
             stableLayoutSnapshots = nextSnapshots
             return
         }
-
-        layoutAnimationFromSnapshots.removeAll(keepingCapacity: true)
-        layoutAnimationToSnapshots = nextSnapshots
-        animatedLayoutSnapshots.removeAll(keepingCapacity: true)
-
         let anchorSnapshot = previousSnapshots[transition.anchorID]
-        let anchorFrame = anchorSnapshot?.frame ?? CGRect(
-            x: 0,
-            y: transition.anchorY,
-            width: scrollView.contentView.bounds.width,
-            height: 0
+        let anchorFrame = anchorSnapshot?.frame ?? CGRect(x: 0, y: transition.anchorY, width: scrollView.contentView.bounds.width, height: 0)
+        var startSnapshots = previousSnapshots
+        var targetSnapshots = nextSnapshots
+
+        for (id, nextSnapshot) in nextSnapshots where previousSnapshots[id] == nil {
+            let insertedStartFrame = insertedItemStartFrame(for: nextSnapshot.frame, anchorFrame: anchorFrame)
+            startSnapshots[id] = VVLayoutAnimationSnapshot(
+                id: id,
+                frame: insertedStartFrame,
+                contentOffset: nextSnapshot.contentOffset,
+                transition: .accordion,
+                animation: .snappy()
+            )
+            targetSnapshots[id]?.transition = .accordion
+            targetSnapshots[id]?.animation = .snappy()
+        }
+
+        for (id, previousSnapshot) in previousSnapshots where nextSnapshots[id] == nil {
+            let targetFrame = previousSnapshot.frame.offsetBy(dx: 0, dy: -min(max(previousSnapshot.frame.height * 0.35, 10), 24))
+            targetSnapshots[id] = VVLayoutAnimationSnapshot(
+                id: id,
+                frame: targetFrame,
+                contentOffset: previousSnapshot.contentOffset,
+                transition: .accordion,
+                animation: .snappy()
+            )
+        }
+
+        layoutAnimator.start(
+            from: startSnapshots,
+            to: targetSnapshots,
+            fallbackTransition: .accordion,
+            fallbackAnimation: .snappy()
         )
-
-        for (id, nextSnapshot) in nextSnapshots {
-            if let previousSnapshot = previousSnapshots[id] {
-                layoutAnimationFromSnapshots[id] = previousSnapshot
-            } else {
-                let insertedStartFrame = insertedItemStartFrame(
-                    for: nextSnapshot.frame,
-                    anchorFrame: anchorFrame
-                )
-                layoutAnimationFromSnapshots[id] = LayoutSnapshot(
-                    frame: insertedStartFrame,
-                    contentOffset: nextSnapshot.contentOffset
-                )
-            }
-        }
-
-        animatedLayoutSnapshots = layoutAnimationFromSnapshots
-        layoutAnimationStartTime = CACurrentMediaTime()
-        layoutAnimationDuration = 0.22
-        layoutAnimationCurve = .snappy
-
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            self?.layoutAnimationTick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        layoutAnimationTimer?.invalidate()
-        layoutAnimationTimer = timer
+        animatedLayoutSnapshots = layoutAnimator.state().snapshots
+        startDisplayLink()
     }
 
     private func insertedItemStartFrame(for targetFrame: CGRect, anchorFrame: CGRect) -> CGRect {
@@ -556,52 +536,148 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func stopLayoutAnimation(commitTargetSnapshots: Bool = true) {
-        layoutAnimationTimer?.invalidate()
-        layoutAnimationTimer = nil
-        if commitTargetSnapshots, !layoutAnimationToSnapshots.isEmpty {
-            stableLayoutSnapshots = layoutAnimationToSnapshots
+        if commitTargetSnapshots {
+            let finalSnapshots = layoutAnimator.state().snapshots
+            if !finalSnapshots.isEmpty {
+                stableLayoutSnapshots = finalSnapshots
+            }
         }
-        layoutAnimationFromSnapshots.removeAll(keepingCapacity: true)
-        layoutAnimationToSnapshots.removeAll(keepingCapacity: true)
+        layoutAnimator.complete(with: stableLayoutSnapshots)
         animatedLayoutSnapshots.removeAll(keepingCapacity: true)
     }
 
-    private func layoutAnimationTick() {
-        let elapsed = CACurrentMediaTime() - layoutAnimationStartTime
-        let progress = min(1.0, elapsed / layoutAnimationDuration)
-        let t = layoutAnimationCurve.value(at: CGFloat(progress))
-
-        var interpolated: [String: LayoutSnapshot] = [:]
-        interpolated.reserveCapacity(layoutAnimationToSnapshots.count)
-
-        for (id, targetSnapshot) in layoutAnimationToSnapshots {
-            let startSnapshot = layoutAnimationFromSnapshots[id] ?? targetSnapshot
-            let frame = CGRect(
-                x: startSnapshot.frame.origin.x + (targetSnapshot.frame.origin.x - startSnapshot.frame.origin.x) * t,
-                y: startSnapshot.frame.origin.y + (targetSnapshot.frame.origin.y - startSnapshot.frame.origin.y) * t,
-                width: startSnapshot.frame.width + (targetSnapshot.frame.width - startSnapshot.frame.width) * t,
-                height: startSnapshot.frame.height + (targetSnapshot.frame.height - startSnapshot.frame.height) * t
-            )
-            let contentOffset = CGPoint(
-                x: startSnapshot.contentOffset.x + (targetSnapshot.contentOffset.x - startSnapshot.contentOffset.x) * t,
-                y: startSnapshot.contentOffset.y + (targetSnapshot.contentOffset.y - startSnapshot.contentOffset.y) * t
-            )
-            interpolated[id] = LayoutSnapshot(frame: frame, contentOffset: contentOffset)
-        }
-
-        animatedLayoutSnapshots = interpolated
+    private func layoutAnimationTick(at now: CFTimeInterval) {
+        let state = layoutAnimator.state(at: now)
+        animatedLayoutSnapshots = state.snapshots
         metalView.setNeedsDisplay(metalView.bounds)
 
-        if progress >= 1.0 {
+        if state.isComplete {
+            stableLayoutSnapshots = state.snapshots
             stopLayoutAnimation()
             metalView.setNeedsDisplay(metalView.bounds)
         }
+    }
+
+    private func scrollAnimationTick(at now: CFTimeInterval) {
+        guard scrollAnimationDuration > 0 else { return }
+        let elapsed = now - scrollAnimationStartTime
+        let progress = min(1.0, elapsed / scrollAnimationDuration)
+        let t = scrollAnimationCurve.value(at: CGFloat(progress))
+
+        let currentY = scrollAnimationStartY + (scrollAnimationTargetY - scrollAnimationStartY) * t
+        let origin = CGPoint(x: scrollView.contentView.bounds.origin.x, y: currentY)
+        scrollView.contentView.setBoundsOrigin(origin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        updateMetalViewport()
+        updateVisibleRenderRange()
+        metalView.setNeedsDisplay(metalView.bounds)
+
+        if progress >= 1.0 {
+            scrollAnimationDuration = 0
+            let completion = scrollAnimationCompletion
+            scrollAnimationCompletion = nil
+            completion?()
+        }
+    }
+
+    private func ensureDisplayLink() {
+        guard displayLink == nil else { return }
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let link else { return }
+
+        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
+            let view = Unmanaged<VVChatTimelineView>.fromOpaque(userInfo!).takeUnretainedValue()
+            DispatchQueue.main.async {
+                view.animationFrameTick()
+            }
+            return kCVReturnSuccess
+        }
+        CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+        displayLink = link
+    }
+
+    private func startDisplayLink() {
+        ensureDisplayLink()
+        guard let displayLink, !CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStart(displayLink)
+    }
+
+    private func stopDisplayLink() {
+        guard let displayLink, CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStop(displayLink)
+    }
+
+    private func animationFrameTick() {
+        let now = CACurrentMediaTime()
+        if scrollAnimationDuration > 0 {
+            scrollAnimationTick(at: now)
+        }
+        if layoutAnimator.isRunning {
+            layoutAnimationTick(at: now)
+        }
+        if scrollAnimationDuration <= 0 && !layoutAnimator.isRunning {
+            stopDisplayLink()
+        }
+    }
+
+    private func updateVisibleRenderRange() {
+        guard let controller else {
+            visibleRenderRange = 0..<0
+            return
+        }
+        let layouts = controller.layouts
+        guard !layouts.isEmpty else {
+            visibleRenderRange = 0..<0
+            return
+        }
+
+        let viewport = scrollView.contentView.bounds
+        let overscan: CGFloat = 900
+        let minY = viewport.minY - overscan
+        let maxY = viewport.maxY + overscan
+
+        let lower = lowerBound(forMaxYAbove: minY, layouts: layouts)
+        let upper = upperBound(forMinYBelow: maxY, layouts: layouts)
+        visibleRenderRange = lower..<max(lower, upper)
+    }
+
+    private func lowerBound(forMaxYAbove value: CGFloat, layouts: [VVChatTimelineController.ItemLayout]) -> Int {
+        var low = 0
+        var high = layouts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if layouts[mid].frame.maxY < value {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    private func upperBound(forMinYBelow value: CGFloat, layouts: [VVChatTimelineController.ItemLayout]) -> Int {
+        var low = 0
+        var high = layouts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if layouts[mid].frame.minY <= value {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
     }
 
     // MARK: - VVChatTimelineRenderDataSource
 
     public var renderItemCount: Int {
         controller?.layouts.count ?? 0
+    }
+
+    public func visibleRenderIndexes() -> Range<Int> {
+        visibleRenderRange
     }
 
     public func renderItem(at index: Int) -> VVChatTimelineRenderItem? {

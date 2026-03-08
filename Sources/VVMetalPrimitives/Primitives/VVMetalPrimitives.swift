@@ -606,6 +606,8 @@ public struct VVPathPrimitive: Hashable, Sendable {
     public var vertices: [VVPathVertex]
     public var fill: SIMD4<Float>?
     public var stroke: VVStrokeStyle?
+    public var fillVertexCount: Int
+    public var strokeVertexCount: Int
     public var bounds: CGRect
     public var transform: VVTransform2D
 
@@ -613,12 +615,16 @@ public struct VVPathPrimitive: Hashable, Sendable {
         vertices: [VVPathVertex],
         fill: SIMD4<Float>? = nil,
         stroke: VVStrokeStyle? = nil,
+        fillVertexCount: Int = 0,
+        strokeVertexCount: Int = 0,
         bounds: CGRect = .zero,
         transform: VVTransform2D = .identity
     ) {
         self.vertices = vertices
         self.fill = fill
         self.stroke = stroke
+        self.fillVertexCount = fillVertexCount
+        self.strokeVertexCount = strokeVertexCount
         self.bounds = bounds
         self.transform = transform
     }
@@ -759,6 +765,7 @@ public struct VVPathBuilder: Sendable {
         let bounds = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
 
         // Triangulate: simple ear-clipping for convex-ish shapes, fan for fill
+        let fillVertexCount: Int
         if fill != nil && points.count >= 3 {
             let center = CGPoint(
                 x: points.reduce(0) { $0 + $1.x } / CGFloat(points.count),
@@ -770,9 +777,13 @@ public struct VVPathBuilder: Sendable {
                 vertices.append(VVPathVertex(position: points[i]))
                 vertices.append(VVPathVertex(position: points[next]))
             }
+            fillVertexCount = vertices.count
+        } else {
+            fillVertexCount = 0
         }
 
         // Stroke: expand each segment into a quad
+        let strokeStartIndex = vertices.count
         if let stroke = stroke, stroke.width > 0 {
             let half = stroke.width / 2
             for i in 0..<points.count {
@@ -798,7 +809,16 @@ public struct VVPathBuilder: Sendable {
             }
         }
 
-        return VVPathPrimitive(vertices: vertices, fill: fill, stroke: stroke, bounds: bounds, transform: transform)
+        let strokeVertexCount = max(0, vertices.count - strokeStartIndex)
+        return VVPathPrimitive(
+            vertices: vertices,
+            fill: fill,
+            stroke: stroke,
+            fillVertexCount: fillVertexCount,
+            strokeVertexCount: strokeVertexCount,
+            bounds: bounds,
+            transform: transform
+        )
     }
 
     private func tessellate() -> [CGPoint] {

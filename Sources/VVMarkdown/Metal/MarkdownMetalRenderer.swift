@@ -85,6 +85,33 @@ public struct QuadInstance {
     }
 }
 
+public struct GradientQuadInstance {
+    public var position: SIMD2<Float>
+    public var size: SIMD2<Float>
+    public var startColor: SIMD4<Float>
+    public var endColor: SIMD4<Float>
+    public var axis: SIMD2<Float>
+    public var cornerRadius: Float
+    public var padding: Float
+
+    public init(
+        position: SIMD2<Float>,
+        size: SIMD2<Float>,
+        startColor: SIMD4<Float>,
+        endColor: SIMD4<Float>,
+        axis: SIMD2<Float>,
+        cornerRadius: Float = 0
+    ) {
+        self.position = position
+        self.size = size
+        self.startColor = startColor
+        self.endColor = endColor
+        self.axis = axis
+        self.cornerRadius = cornerRadius
+        self.padding = 0
+    }
+}
+
 public struct BulletInstance {
     public var position: SIMD2<Float>
     public var size: SIMD2<Float>
@@ -169,15 +196,35 @@ public struct ImageRenderInstance {
     public var uvOrigin: SIMD2<Float>
     public var uvSize: SIMD2<Float>
     public var cornerRadius: Float
-    public var padding: SIMD3<Float>
+    public var opacity: Float
+    public var grayscale: UInt32
+    public var padding: SIMD2<Float>
 
-    public init(position: SIMD2<Float>, size: SIMD2<Float>, uvOrigin: SIMD2<Float> = SIMD2(0, 0), uvSize: SIMD2<Float> = SIMD2(1, 1), cornerRadius: Float = 0) {
+    public init(
+        position: SIMD2<Float>,
+        size: SIMD2<Float>,
+        uvOrigin: SIMD2<Float> = SIMD2(0, 0),
+        uvSize: SIMD2<Float> = SIMD2(1, 1),
+        cornerRadius: Float = 0,
+        opacity: Float = 1,
+        grayscale: Bool = false
+    ) {
         self.position = position
         self.size = size
         self.uvOrigin = uvOrigin
         self.uvSize = uvSize
         self.cornerRadius = cornerRadius
+        self.opacity = opacity
+        self.grayscale = grayscale ? 1 : 0
         self.padding = .zero
+    }
+}
+
+public struct PathRenderUniforms {
+    public var color: SIMD4<Float>
+
+    public init(color: SIMD4<Float>) {
+        self.color = color
     }
 }
 
@@ -330,6 +377,15 @@ public final class MarkdownMetalRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
     }
 
+    public func renderGradientQuads(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
+        guard instanceCount > 0 else { return }
+
+        encoder.setRenderPipelineState(context.gradientQuadPipeline)
+        encoder.setVertexBuffer(instances, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+    }
+
     public func renderBullets(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {
         guard instanceCount > 0 else { return }
 
@@ -410,6 +466,24 @@ public final class MarkdownMetalRenderer {
         encoder.setFragmentSamplerState(context.imageSamplerState, index: 0)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+    }
+
+    public func renderPath(
+        encoder: MTLRenderCommandEncoder,
+        vertices: MTLBuffer,
+        vertexStart: Int = 0,
+        vertexCount: Int,
+        color: SIMD4<Float>
+    ) {
+        guard vertexCount > 0 else { return }
+
+        var uniforms = PathRenderUniforms(color: color)
+        encoder.setRenderPipelineState(context.pathPipeline)
+        encoder.setVertexBuffer(vertices, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffers[currentUniformBufferIndex], offset: 0, index: 1)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<PathRenderUniforms>.stride, index: 2)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: vertexStart, vertexCount: vertexCount)
     }
 
     public func renderPieSlices(encoder: MTLRenderCommandEncoder, instances: MTLBuffer, instanceCount: Int) {

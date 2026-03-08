@@ -53,9 +53,9 @@ public struct VVSceneBuilder {
         scene.add(resolved)
     }
 
-    public mutating func add(kind: VVPrimitiveKind, clipRect: CGRect? = nil, zIndex: Int = 0) {
+    public mutating func add(kind: VVPrimitiveKind, clipRect: CGRect? = nil, zIndex: Int = 0, transform: VVTransform2D? = nil) {
         let resolvedClip = clipRect ?? currentClip
-        var primitive = VVPrimitive(kind: kind, clipRect: resolvedClip, zIndex: zIndex)
+        var primitive = VVPrimitive(kind: kind, clipRect: resolvedClip, zIndex: zIndex, transform: transform)
         if currentOffset != .zero {
             primitive = offsetPrimitive(primitive, by: currentOffset)
         }
@@ -92,6 +92,6 @@ public struct VVSceneBuilder {
     private func offsetPrimitive(_ primitive: VVPrimitive, by offset: CGPoint) -> VVPrimitive {
         let clipRect = primitive.clipRect?.offsetBy(dx: offset.x, dy: offset.y)
         let offsetKind = VVNode.offsetPrimitive(primitive.kind, by: offset)
-        return VVPrimitive(kind: offsetKind, clipRect: clipRect, zIndex: primitive.zIndex)
+        return VVPrimitive(kind: offsetKind, clipRect: clipRect, zIndex: primitive.zIndex, transform: primitive.transform)
     }
 }

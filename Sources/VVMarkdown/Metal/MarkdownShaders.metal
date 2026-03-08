@@ -102,6 +102,7 @@ struct QuadVertexOut {
     float4 color;
     float2 localPos;
     float2 size;
+    uint instanceIndex [[flat]];
 };
 
 struct QuadInstance {
@@ -136,6 +137,7 @@ vertex QuadVertexOut markdownQuadVertexShader(
     out.color = quad.color;
     out.localPos = quadPos * quad.size;
     out.size = quad.size;
+    out.instanceIndex = instanceID;
     return out;
 }
 
@@ -148,18 +150,97 @@ fragment float4 markdownRoundedQuadFragmentShader(
     QuadVertexOut in [[stage_in]],
     constant QuadInstance* quads [[buffer(0)]]
 ) {
+    QuadInstance quad = quads[in.instanceIndex];
     float2 halfSize = in.size * 0.5;
     float2 center = halfSize;
     float2 pos = in.localPos;
 
     // Distance from center
-    float2 d = abs(pos - center) - halfSize + quads[0].cornerRadius;
-    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - quads[0].cornerRadius;
+    float2 d = abs(pos - center) - halfSize + quad.cornerRadius;
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - quad.cornerRadius;
 
     // Anti-aliased edge
     float alpha = 1.0 - smoothstep(-1.0, 1.0, dist);
 
+    if (quad.borderWidth > 0.0) {
+        float inset = min(quad.borderWidth, min(halfSize.x, halfSize.y));
+        float innerRadius = max(0.0, quad.cornerRadius - inset);
+        float2 innerHalfSize = max(float2(0.0), halfSize - inset);
+        float2 innerD = abs(pos - center) - innerHalfSize + innerRadius;
+        float innerDist = length(max(innerD, 0.0)) + min(max(innerD.x, innerD.y), 0.0) - innerRadius;
+        float innerAlpha = 1.0 - smoothstep(-1.0, 1.0, innerDist);
+        alpha *= (1.0 - innerAlpha);
+    }
+
     return float4(in.color.rgb, in.color.a * alpha);
+}
+
+// MARK: - Gradient Quad Rendering
+
+struct GradientQuadInstance {
+    float2 position;
+    float2 size;
+    float4 startColor;
+    float4 endColor;
+    float2 axis;
+    float cornerRadius;
+    float padding;
+};
+
+struct GradientQuadVertexOut {
+    float4 position [[position]];
+    float2 localPos;
+    float2 size;
+    float4 startColor;
+    float4 endColor;
+    float2 axis;
+    float cornerRadius;
+};
+
+vertex GradientQuadVertexOut markdownGradientQuadVertexShader(
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]],
+    constant GradientQuadInstance* gradients [[buffer(0)]],
+    constant MarkdownUniforms& uniforms [[buffer(1)]]
+) {
+    const float2 quadPositions[6] = {
+        float2(0, 0), float2(1, 0), float2(0, 1),
+        float2(1, 0), float2(1, 1), float2(0, 1)
+    };
+
+    GradientQuadInstance gradient = gradients[instanceID];
+    float2 quadPos = quadPositions[vertexID];
+    float2 worldPos = gradient.position + quadPos * gradient.size;
+    float2 scrolledPos = worldPos - uniforms.scrollOffset;
+
+    GradientQuadVertexOut out;
+    out.position = uniforms.projectionMatrix * float4(scrolledPos, 0.0, 1.0);
+    out.localPos = quadPos * gradient.size;
+    out.size = gradient.size;
+    out.startColor = gradient.startColor;
+    out.endColor = gradient.endColor;
+    out.axis = gradient.axis;
+    out.cornerRadius = gradient.cornerRadius;
+    return out;
+}
+
+fragment float4 markdownGradientQuadFragmentShader(GradientQuadVertexOut in [[stage_in]]) {
+    float2 safeSize = max(in.size, float2(1.0));
+    float2 uv = in.localPos / safeSize;
+    float2 axis = normalize(length(in.axis) > 0.0001 ? in.axis : float2(1.0, 0.0));
+    float t = clamp(dot(uv - 0.5, axis) + 0.5, 0.0, 1.0);
+    float4 color = mix(in.startColor, in.endColor, t);
+
+    if (in.cornerRadius <= 0.0) {
+        return color;
+    }
+
+    float2 halfSize = in.size * 0.5;
+    float2 center = halfSize;
+    float2 d = abs(in.localPos - center) - halfSize + in.cornerRadius;
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - in.cornerRadius;
+    float alpha = 1.0 - smoothstep(-1.0, 1.0, dist);
+    return float4(color.rgb, color.a * alpha);
 }
 
 // MARK: - Pie Slice Rendering
@@ -630,8 +711,10 @@ struct ImageVertexOut {
     float4 position [[position]];
     float2 texCoord;
     float cornerRadius;
+    float opacity;
     float2 size;
     float2 localPos;
+    uint grayscale [[flat]];
 };
 
 struct ImageInstance {
@@ -640,7 +723,9 @@ struct ImageInstance {
     float2 uvOrigin;
     float2 uvSize;
     float cornerRadius;
-    float3 padding;
+    float opacity;
+    uint grayscale;
+    float2 padding;
 };
 
 vertex ImageVertexOut imageVertexShader(
@@ -672,8 +757,10 @@ vertex ImageVertexOut imageVertexShader(
     out.position = clipPos;
     out.texCoord = texCoord;
     out.cornerRadius = image.cornerRadius;
+    out.opacity = image.opacity;
     out.size = image.size;
     out.localPos = quadPos * image.size;
+    out.grayscale = image.grayscale;
     return out;
 }
 
@@ -697,5 +784,46 @@ fragment float4 imageFragmentShader(
         color.a *= alpha;
     }
 
-    return color;
+    float3 rgb = color.rgb;
+    if (in.grayscale != 0) {
+        float luminance = dot(rgb, float3(0.299, 0.587, 0.114));
+        rgb = float3(luminance);
+    }
+
+    return float4(rgb, color.a * in.opacity);
+}
+
+// MARK: - Path Rendering
+
+struct PathVertex {
+    float2 position;
+    float2 stPosition;
+};
+
+struct PathUniforms {
+    float4 color;
+};
+
+struct PathVertexOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex PathVertexOut pathVertexShader(
+    uint vertexID [[vertex_id]],
+    constant PathVertex* vertices [[buffer(0)]],
+    constant MarkdownUniforms& uniforms [[buffer(1)]],
+    constant PathUniforms& pathUniforms [[buffer(2)]]
+) {
+    PathVertex pathVertex = vertices[vertexID];
+    float2 scrolledPos = pathVertex.position - uniforms.scrollOffset;
+
+    PathVertexOut out;
+    out.position = uniforms.projectionMatrix * float4(scrolledPos, 0.0, 1.0);
+    out.color = pathUniforms.color;
+    return out;
+}
+
+fragment float4 pathFragmentShader(PathVertexOut in [[stage_in]]) {
+    return in.color;
 }

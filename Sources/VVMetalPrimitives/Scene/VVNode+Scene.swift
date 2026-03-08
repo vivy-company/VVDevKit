@@ -6,10 +6,10 @@ public extension VVNode {
             VVNode(
                 clipRect: primitive.clipRect,
                 zIndex: primitive.zIndex,
+                transform: primitive.transform,
                 primitives: [primitive.kind]
             )
         }
         return VVNode(children: children)
     }
 }
-

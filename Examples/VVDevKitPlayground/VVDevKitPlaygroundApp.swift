@@ -580,6 +580,7 @@ enum PrimitiveShowcase: String, CaseIterable, Identifiable {
     case border = "Border"
     case dashedLine = "Dashed Line"
     case transform = "Transform"
+    case transitions = "Transitions"
     case rule = "Rule"
     case stack = "Stack"
     case layer = "Layer"
@@ -598,7 +599,7 @@ enum PrimitiveShowcase: String, CaseIterable, Identifiable {
         case .shadowQuad: return "Layered quads approximating a soft shadow"
         case .line: return "Line segments with configurable thickness"
         case .bullet: return "Disc, circle, square, number, and checkbox markers"
-        case .image: return "Image placeholder frames with corner radius"
+        case .image: return "Image primitives with texture-backed rendering and rounded corners"
         case .blockQuoteBorder: return "Left border used for block quotes"
         case .tableLine: return "Grid lines for table rendering"
         case .pieSlice: return "Pie chart segments with start/end angles"
@@ -607,25 +608,67 @@ enum PrimitiveShowcase: String, CaseIterable, Identifiable {
         case .border: return "Per-corner radii and per-side borders on quads"
         case .dashedLine: return "Dashed and patterned line styles"
         case .transform: return "2D affine transforms: rotate, scale, translate"
+        case .transitions: return "First-class VVView transitions via .id, .transition, and .animation"
         case .rule: return "VDivider horizontal separators via VVView DSL"
-        case .stack: return "VVStack/VVHStack layout via VVView DSL"
-        case .layer: return "VVZStack overlapping composition via VVView DSL"
-        case .vvview: return "Declarative cards and layouts with VVView DSL"
+        case .stack: return "VVStack/VVHStack layout with flexible rows and spacers"
+        case .layer: return "VVZStack composition for cards, overlays, and stacked surfaces"
+        case .vvview: return "Boxes, containers, padding, images, and UI composition via VVView DSL"
         case .combined: return "All primitives rendered together"
         }
     }
 }
 
 struct PrimitivesPlaygroundView: View {
-    @State private var selected: PrimitiveShowcase = .quad
+    @State private var selected: PrimitiveShowcase = .transitions
     @State private var useDarkBackground = true
     @State private var cornerRadius: Double = 12
+    @State private var transitionAutoPlay = true
+    @State private var transitionReplayToken = 0
+    @State private var transitionSpeed = 1.0
+
+    private struct ShowcaseSection: Identifiable {
+        let title: String
+        let items: [PrimitiveShowcase]
+        var id: String { title }
+    }
+
+    private var sections: [ShowcaseSection] {
+        [
+            ShowcaseSection(
+                title: "Animation",
+                items: [.transitions, .transform]
+            ),
+            ShowcaseSection(
+                title: "Layout",
+                items: [.vvview, .stack, .layer, .rule]
+            ),
+            ShowcaseSection(
+                title: "Drawing",
+                items: [
+                    .quad, .gradientQuad, .shadowQuad, .line, .dashedLine,
+                    .border, .image, .path, .underline, .bullet,
+                    .blockQuoteBorder, .tableLine, .pieSlice
+                ]
+            ),
+            ShowcaseSection(
+                title: "Text",
+                items: [.textRun, .textLayout, .selection]
+            ),
+            ShowcaseSection(
+                title: "Full Scene",
+                items: [.combined]
+            )
+        ]
+    }
 
     private var configuration: PrimitiveSceneConfiguration {
         PrimitiveSceneConfiguration(
             backgroundColor: useDarkBackground ? .darkBackground : .rgba(0.96, 0.96, 0.97),
             showcase: selected,
-            cornerRadius: CGFloat(cornerRadius)
+            cornerRadius: CGFloat(cornerRadius),
+            transitionAutoPlay: transitionAutoPlay,
+            transitionReplayToken: transitionReplayToken,
+            transitionSpeed: transitionSpeed
         )
     }
 
@@ -651,23 +694,100 @@ struct PrimitivesPlaygroundView: View {
 
                 Divider()
 
-                List(PrimitiveShowcase.allCases, selection: $selected) { item in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.rawValue)
-                            .fontWeight(item == selected ? .semibold : .regular)
-                        Text(item.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                List(selection: $selected) {
+                    ForEach(sections) { section in
+                        Section(section.title) {
+                            ForEach(section.items) { item in
+                                primitiveRow(item)
+                                    .tag(item)
+                            }
+                        }
                     }
-                    .padding(.vertical, 4)
-                    .tag(item)
                 }
                 .listStyle(.sidebar)
             }
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
 
-            PrimitiveSceneRepresentable(configuration: configuration)
+            VStack(spacing: 0) {
+                if selected == .transitions {
+                    transitionControls
+                }
+
+                GeometryReader { proxy in
+                    ScrollView([.horizontal, .vertical]) {
+                        PrimitiveSceneRepresentable(configuration: configuration)
+                            .frame(
+                                width: max(proxy.size.width, configuration.minimumCanvasSize.width),
+                                height: max(proxy.size.height, configuration.minimumCanvasSize.height)
+                            )
+                    }
+                    .background(Color.black.opacity(useDarkBackground ? 0.18 : 0.03))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func primitiveRow(_ item: PrimitiveShowcase) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(item.rawValue)
+                    .fontWeight(item == selected ? .semibold : .regular)
+                if item == .transitions {
+                    Text("API")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.18))
+                        .foregroundStyle(.orange)
+                        .clipShape(Capsule())
+                }
+            }
+            Text(item.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var transitionControls: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Transitions API Demo")
+                    .font(.headline)
+                Text("Replay the same first-class `.id`, `.transition`, and `.animation` flow used by the primitives layer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 24)
+
+            Button("Replay") {
+                transitionReplayToken &+= 1
+            }
+            .buttonStyle(.borderedProminent)
+
+            Toggle("Auto Loop", isOn: $transitionAutoPlay)
+                .toggleStyle(.switch)
+                .frame(width: 120)
+
+            HStack(spacing: 8) {
+                Text("Speed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Slider(value: $transitionSpeed, in: 0.55...1.8, step: 0.05)
+                    .frame(width: 120)
+                Text(String(format: "%.2fx", transitionSpeed))
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.thinMaterial)
+        .overlay(alignment: .bottom) {
+            Divider()
         }
     }
 }
@@ -676,6 +796,24 @@ struct PrimitiveSceneConfiguration: Equatable {
     var backgroundColor: SIMD4<Float>
     var showcase: PrimitiveShowcase
     var cornerRadius: CGFloat
+    var transitionAutoPlay: Bool = true
+    var transitionReplayToken: Int = 0
+    var transitionSpeed: Double = 1
+
+    var minimumCanvasSize: CGSize {
+        switch showcase {
+        case .vvview:
+            return CGSize(width: 1400, height: 920)
+        case .transitions:
+            return CGSize(width: 1280, height: 860)
+        case .combined:
+            return CGSize(width: 1500, height: 1100)
+        case .stack, .layer, .image, .path, .transform, .border, .dashedLine:
+            return CGSize(width: 1100, height: 760)
+        default:
+            return CGSize(width: 960, height: 680)
+        }
+    }
 }
 
 struct PrimitiveSceneRepresentable: NSViewRepresentable {
@@ -695,6 +833,13 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
     private var configuration: PrimitiveSceneConfiguration
     private var scene: VVScene
     private var lastSize: CGSize = .zero
+    private var textureCache: [String: MTLTexture] = [:]
+    private var transitionTimer: Timer?
+    private var transitionAnimator = VVLayoutTransitionAnimator()
+    private var isExpanded = false
+    private var scheduledTransitionDate: Date?
+    private var scheduledExpandedState: Bool?
+    private var lastReplayToken = 0
 
     override var isFlipped: Bool { true }
 
@@ -724,14 +869,22 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
     }
 
     func update(configuration: PrimitiveSceneConfiguration) {
+        let previous = self.configuration
         self.configuration = configuration
+        lastReplayToken = max(lastReplayToken, previous.transitionReplayToken)
+        updateTransitionDriver(previous: previous)
         rebuildScene(force: true)
     }
 
     override func layout() {
         super.layout()
         metalView.frame = bounds
+        updateTransitionDriver()
         rebuildScene(force: false)
+    }
+
+    deinit {
+        transitionTimer?.invalidate()
     }
 
     private func rebuildScene(force: Bool) {
@@ -740,11 +893,116 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
             return
         }
         lastSize = bounds.size
-        scene = SampleData.primitivesScene(size: bounds.size, configuration: configuration)
+        scene = currentScene()
         metalView.setNeedsDisplay(bounds)
     }
 
+    private func currentScene() -> VVScene {
+        if configuration.showcase == .transitions {
+            return SampleData.transitionAnimationScene(
+                size: bounds.size,
+                configuration: configuration,
+                state: transitionAnimator.state().snapshots.isEmpty ? SampleData.transitionAnimationSnapshots(size: bounds.size, configuration: configuration, expanded: isExpanded) : transitionAnimator.state().snapshots,
+                expanded: isExpanded
+            )
+        }
+        return SampleData.primitivesScene(size: bounds.size, configuration: configuration)
+    }
+
+    private func updateTransitionDriver(previous: PrimitiveSceneConfiguration? = nil) {
+        guard configuration.showcase == .transitions else {
+            transitionTimer?.invalidate()
+            transitionTimer = nil
+            scheduledTransitionDate = nil
+            scheduledExpandedState = nil
+            return
+        }
+
+        if transitionTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                self?.transitionTick()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            transitionTimer = timer
+        }
+
+        if transitionAnimator.state().snapshots.isEmpty || previous?.showcase != .transitions {
+            setTransitionState(expanded: false)
+            if configuration.transitionAutoPlay {
+                scheduleTransition(to: true, after: 0.45)
+            }
+        }
+
+        if configuration.transitionReplayToken != lastReplayToken {
+            lastReplayToken = configuration.transitionReplayToken
+            replayTransition()
+            return
+        }
+
+        if previous?.transitionAutoPlay != configuration.transitionAutoPlay,
+           configuration.transitionAutoPlay,
+           !transitionAnimator.isRunning,
+           scheduledExpandedState == nil {
+            scheduleTransition(to: !isExpanded, after: 0.9)
+        }
+    }
+
+    private func transitionTick() {
+        guard configuration.showcase == .transitions else { return }
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        let now = Date()
+        if !transitionAnimator.isRunning,
+           let target = scheduledExpandedState,
+           let due = scheduledTransitionDate,
+           now >= due {
+            let from = transitionAnimator.state().snapshots
+            isExpanded = target
+            let to = SampleData.transitionAnimationSnapshots(size: bounds.size, configuration: configuration, expanded: target)
+            transitionAnimator.start(
+                from: from,
+                to: to,
+                fallbackTransition: .morph,
+                fallbackAnimation: .spring(response: 0.42 / max(0.55, configuration.transitionSpeed), dampingFraction: 0.82)
+            )
+            scheduledExpandedState = nil
+            scheduledTransitionDate = nil
+        }
+
+        let wasRunning = transitionAnimator.isRunning
+        let state = transitionAnimator.state()
+        scene = SampleData.transitionAnimationScene(size: bounds.size, configuration: configuration, state: state.snapshots, expanded: isExpanded)
+        metalView.setNeedsDisplay(bounds)
+
+        if wasRunning && state.isComplete {
+            transitionAnimator.complete(with: state.snapshots)
+            if configuration.transitionAutoPlay {
+                scheduleTransition(to: !isExpanded, after: 1.0)
+            }
+        }
+    }
+
+    private func setTransitionState(expanded: Bool) {
+        isExpanded = expanded
+        let snapshots = SampleData.transitionAnimationSnapshots(size: bounds.size, configuration: configuration, expanded: expanded)
+        transitionAnimator.complete(with: snapshots)
+        scene = SampleData.transitionAnimationScene(size: bounds.size, configuration: configuration, state: snapshots, expanded: expanded)
+        metalView.setNeedsDisplay(bounds)
+    }
+
+    private func scheduleTransition(to expanded: Bool, after delay: TimeInterval) {
+        scheduledExpandedState = expanded
+        scheduledTransitionDate = .now.addingTimeInterval(delay / max(0.55, configuration.transitionSpeed))
+    }
+
+    private func replayTransition() {
+        guard configuration.showcase == .transitions else { return }
+        setTransitionState(expanded: false)
+        scheduleTransition(to: true, after: 0.12)
+    }
+
     var renderItemCount: Int { 1 }
+    func visibleRenderIndexes() -> Range<Int> { 0..<1 }
 
     func renderItem(at index: Int) -> VVChatTimelineRenderItem? {
         guard index == 0 else { return nil }
@@ -756,7 +1014,66 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
     var backgroundColor: SIMD4<Float> { configuration.backgroundColor }
 
     func texture(for url: String) -> MTLTexture? {
-        nil
+        if let cached = textureCache[url] {
+            return cached
+        }
+        guard let device = metalView.device else { return nil }
+        let texture = makeDemoTexture(for: url, device: device)
+        textureCache[url] = texture
+        return texture
+    }
+
+    private func makeDemoTexture(for url: String, device: MTLDevice) -> MTLTexture? {
+        let width = 192
+        let height = 128
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let hash = abs(url.hashValue)
+        let baseHue = Float(hash % 360) / 360.0
+        let accentHue = fmodf(baseHue + 0.18, 1)
+
+        func hueColor(_ hue: Float, brightness: Float) -> SIMD3<Float> {
+            let h = hue * 6
+            let c = brightness * 0.9
+            let x = c * (1 - abs(fmodf(h, 2) - 1))
+            switch Int(h) {
+            case 0: return SIMD3(c, x, 0.22)
+            case 1: return SIMD3(x, c, 0.22)
+            case 2: return SIMD3(0.22, c, x)
+            case 3: return SIMD3(0.22, x, c)
+            case 4: return SIMD3(x, 0.22, c)
+            default: return SIMD3(c, 0.22, x)
+            }
+        }
+
+        let topColor = hueColor(baseHue, brightness: 0.95)
+        let bottomColor = hueColor(accentHue, brightness: 0.72)
+
+        for y in 0..<height {
+            let t = Float(y) / Float(max(1, height - 1))
+            let rowColor = topColor + (bottomColor - topColor) * t
+            for x in 0..<width {
+                let xf = Float(x) / Float(max(1, width - 1))
+                let stripe: Float = ((x / 18) + (y / 18)) % 2 == 0 ? 0.08 : -0.04
+                let vignette = Float(1 - pow(Double((xf - 0.5) * 1.35), 2))
+                let highlight = max(Float(0), Float(0.18) - abs(xf - Float(0.24))) * Float(0.6)
+                let r = min(Float(1), max(Float(0), rowColor.x + stripe + highlight + vignette * Float(0.04)))
+                let g = min(Float(1), max(Float(0), rowColor.y + stripe + vignette * Float(0.03)))
+                let b = min(Float(1), max(Float(0), rowColor.z + stripe + vignette * Float(0.02)))
+                let index = (y * width + x) * 4
+                pixels[index] = UInt8(r * 255)
+                pixels[index + 1] = UInt8(g * 255)
+                pixels[index + 2] = UInt8(b * 255)
+                pixels[index + 3] = 255
+            }
+        }
+
+        let bytesPerRow = width * 4
+        texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: pixels, bytesPerRow: bytesPerRow)
+        return texture
     }
 }
 
@@ -768,26 +1085,22 @@ struct ChatPlaygroundView: View {
     @State private var didSeed = false
     @State private var useLightTheme = false
     @State private var fontSize: Double = 14
-    @State private var draftID: String?
-    @State private var draftContent = ""
-    @State private var userIndex = 0
-    @State private var assistantIndex = 0
-    @State private var autoTurnIndex = 0
     @State private var simulationTask: Task<Void, Never>?
     @State private var isAutoRunning = false
-    @State private var streamResponses = true
-    @State private var chunkDelay: Double = 0.06
-    @State private var minChunkSize = 8
-    @State private var maxChunkSize = 28
-    @State private var pauseBetweenMessages: Double = 0.8
-    @State private var useComplexResponses = true
-    @State private var followStreaming = true
-    @State private var includeToolCalls = true
+    @State private var chunkDelay: Double = 0.05
+    @State private var pauseBetweenTurns: Double = 1.1
+    @State private var expandNewToolGroups = true
+    @State private var includeInterrupts = true
+    @State private var timelineItems: [PlaygroundChatTimelineItem] = []
+    @State private var expandedToolGroupIDs: Set<String> = []
+    @State private var nextScriptedTurn = 0
+    @State private var chatState = VVChatTimelineState()
+    @State private var jumpToLatestRequestID = 0
 
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Chat")
+                Text("Aizen Chat")
                     .font(.headline)
 
                 Toggle("Light Theme", isOn: $useLightTheme)
@@ -800,77 +1113,44 @@ struct ChatPlaygroundView: View {
 
                 Divider()
 
-                Button("Seed Messages") {
-                    seedMessages()
+                Button("Seed Aizen Transcript") {
+                    seedTranscript()
                 }
 
-                Button("Append User Message") {
-                    appendUserMessage()
+                Button("Append Scripted Turn") {
+                    Task { await runNextTurn() }
                 }
 
-                Button("Append Assistant Message") {
-                    appendAssistantMessage()
-                }
-
-                Divider()
-
-                Toggle("Stream Responses", isOn: $streamResponses)
-                Toggle("Complex Responses", isOn: $useComplexResponses)
-                Toggle("Follow Stream", isOn: $followStreaming)
-                Toggle("Include Tool Calls", isOn: $includeToolCalls)
+                Toggle("Expand New Tool Groups", isOn: $expandNewToolGroups)
+                Toggle("Include Interrupts", isOn: $includeInterrupts)
 
                 HStack {
                     Text("Chunk Delay")
-                    Slider(value: $chunkDelay, in: 0.02...0.2, step: 0.01)
+                    Slider(value: $chunkDelay, in: 0.02...0.18, step: 0.01)
                     Text(String(format: "%.02fs", chunkDelay))
                         .frame(width: 52, alignment: .trailing)
                 }
 
                 HStack {
-                    Text("Chunk Size")
-                    Stepper(value: $minChunkSize, in: 2...60) {
-                        Text("\(minChunkSize)")
-                            .frame(width: 28, alignment: .trailing)
-                    }
-                    Text("to")
-                    Stepper(value: $maxChunkSize, in: minChunkSize...80) {
-                        Text("\(maxChunkSize)")
-                            .frame(width: 28, alignment: .trailing)
-                    }
-                }
-
-                HStack {
-                    Text("Pause")
-                    Slider(value: $pauseBetweenMessages, in: 0.2...2.0, step: 0.1)
-                    Text(String(format: "%.01fs", pauseBetweenMessages))
+                    Text("Turn Pause")
+                    Slider(value: $pauseBetweenTurns, in: 0.3...2.2, step: 0.1)
+                    Text(String(format: "%.01fs", pauseBetweenTurns))
                         .frame(width: 44, alignment: .trailing)
                 }
 
-                Button("Stream Assistant Response") {
-                    Task { await streamNextAssistantResponse() }
-                }
+                Divider()
 
-                Button("Run Tool Call Turn") {
-                    Task { await runToolCallTurn() }
+                Button(isAutoRunning ? "Stop Auto" : "Start Auto") {
+                    isAutoRunning ? stopAutoSimulation() : startAutoSimulation()
                 }
+                .buttonStyle(.borderedProminent)
 
                 Divider()
 
-                HStack {
-                    Button(isAutoRunning ? "Stop Auto" : "Start Auto") {
-                        isAutoRunning ? stopAutoSimulation() : startAutoSimulation()
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Step Script") {
-                        Task { await runSingleAutoStep() }
-                    }
-                }
-
-                Divider()
-
-                Button("Clear") {
-                    controller.setMessages([], scrollToBottom: true)
+                Button("Clear Timeline") {
+                    stopAutoSimulation()
+                    timelineItems = []
+                    applyTimeline(scrollToBottom: true)
                 }
 
                 Spacer()
@@ -878,11 +1158,44 @@ struct ChatPlaygroundView: View {
             .padding(16)
             .frame(minWidth: 240, idealWidth: 280, maxWidth: 340)
 
-            ChatTimelineRepresentable(controller: controller)
+            ZStack(alignment: .bottomTrailing) {
+                PlaygroundChatTimelineHost(
+                    controller: controller,
+                    jumpToLatestRequestID: jumpToLatestRequestID,
+                    onStateChange: handleStateChange,
+                    onEntryActivate: handleEntryActivate,
+                    onLinkActivate: handleLinkActivate
+                )
+
+                if showJumpToLatestButton {
+                    Button(action: jumpToLatest) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("Latest")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(jumpButtonBackground)
+                        .overlay(
+                            Capsule()
+                                .stroke(jumpButtonBorder, lineWidth: 1)
+                        )
+                        .clipShape(Capsule())
+                        .shadow(color: Color.black.opacity(useLightTheme ? 0.08 : 0.22), radius: 14, y: 8)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 22)
+                    .padding(.bottom, 18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
         }
+        .animation(.easeOut(duration: 0.2), value: showJumpToLatestButton)
         .onAppear {
             if !didSeed {
-                seedMessages()
+                seedTranscript()
                 didSeed = true
             }
         }
@@ -895,61 +1208,431 @@ struct ChatPlaygroundView: View {
         .onChange(of: fontSize) { _ in
             updateChatStyle()
         }
+        .onChange(of: includeInterrupts) { _ in
+            seedTranscript()
+        }
+    }
+
+    private var showJumpToLatestButton: Bool {
+        !chatState.isPinnedToBottom || chatState.hasUnreadNewContent
+    }
+
+    private var jumpButtonBackground: some View {
+        Group {
+            if useLightTheme {
+                Color.white.opacity(0.96)
+            } else {
+                Color(nsColor: NSColor(calibratedWhite: 0.10, alpha: 0.96))
+            }
+        }
+    }
+
+    private var jumpButtonBorder: Color {
+        if useLightTheme {
+            return Color.black.opacity(0.08)
+        }
+        return Color.white.opacity(0.08)
     }
 
     private func updateChatStyle() {
         controller.updateStyle(SampleData.chatStyle(dark: !useLightTheme, fontSize: fontSize))
+        applyTimeline(scrollToBottom: false)
     }
 
-    private func seedMessages() {
-        controller.setMessages(SampleData.chatMessages(), scrollToBottom: true)
-    }
-
-    private func appendUserMessage(content: String? = nil) {
-        let message = content ?? SampleData.userMessages[userIndex % SampleData.userMessages.count]
-        if content == nil {
-            userIndex += 1
-        }
-        controller.appendMessage(
-            VVChatMessage(role: .user, state: .final, content: message, timestamp: Date())
-        )
-    }
-
-    private func appendAssistantMessage(content: String? = nil) {
-        let message = content ?? assistantResponse(forIndex: assistantIndex)
-        if content == nil {
-            assistantIndex += 1
-        }
-        controller.appendMessage(
-            VVChatMessage(role: .assistant, state: .final, content: message, timestamp: Date())
-        )
-    }
-
-    private func appendSystemMessage(content: String) {
-        controller.appendMessage(
-            VVChatMessage(role: .system, state: .final, content: content, timestamp: Date())
-        )
-    }
-
-    private func startDraft() {
-        draftContent = SampleData.draftSteps.first ?? ""
-        draftID = controller.beginStreamingAssistantMessage(content: draftContent)
-    }
-
-    private func appendDraft() {
-        guard let draftID else { return }
-        let nextIndex = draftContent.split(separator: "\n").count
-        if nextIndex < SampleData.draftSteps.count {
-            draftContent += "\n" + SampleData.draftSteps[nextIndex]
-            controller.updateDraftMessage(id: draftID, content: draftContent, throttle: false)
+    private func handleStateChange(_ state: VVChatTimelineState) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            chatState = state
         }
     }
 
-    private func finalizeDraft() {
-        guard let draftID else { return }
-        controller.finalizeMessage(id: draftID, content: draftContent)
-        self.draftID = nil
-        draftContent = ""
+    private func seedTranscript() {
+        stopAutoSimulation()
+        nextScriptedTurn = 0
+        timelineItems = SampleData.aizenSeedTimelineItems(includeInterrupts: includeInterrupts)
+        expandedToolGroupIDs = Set(timelineItems.compactMap { item in
+            guard case .toolGroup(let group) = item else { return nil }
+            return group.id
+        })
+        applyTimeline(scrollToBottom: true)
+    }
+
+    private func applyTimeline(scrollToBottom: Bool, animatedAnchorID: String? = nil) {
+        if let animatedAnchorID {
+            controller.prepareLayoutTransition(anchorItemID: animatedAnchorID)
+        }
+        controller.setEntries(
+            buildEntries(from: timelineItems),
+            scrollToBottom: scrollToBottom,
+            customEntryMessageMapper: customEntryMapper()
+        )
+    }
+
+    private func buildEntries(from items: [PlaygroundChatTimelineItem]) -> [VVChatTimelineEntry] {
+        var entries: [VVChatTimelineEntry] = []
+        entries.reserveCapacity(items.count * 2)
+        var hasRenderedAssistantMessageInTurn = false
+
+        for item in items {
+            switch item {
+            case .message(let message):
+                let startsAssistantLane = message.role == .assistant && !hasRenderedAssistantMessageInTurn
+                entries.append(.message(chatMessage(from: message, startsAssistantLane: startsAssistantLane)))
+                hasRenderedAssistantMessageInTurn = message.role == .assistant
+
+            case .toolGroup(let group):
+                entries.append(.custom(groupEntry(for: group)))
+                if expandedToolGroupIDs.contains(group.id) {
+                    entries.append(contentsOf: group.toolCalls.map { .custom(toolDetailEntry(for: $0, group: group)) })
+                }
+
+            case .turnSummary(let summary):
+                entries.append(.custom(turnSummaryEntry(for: summary)))
+                hasRenderedAssistantMessageInTurn = false
+            }
+        }
+
+        return entries
+    }
+
+    private func chatMessage(from message: PlaygroundChatMessage, startsAssistantLane: Bool) -> VVChatMessage {
+        VVChatMessage(
+            id: message.id,
+            role: message.role,
+            state: message.state,
+            content: message.content,
+            revision: message.revision,
+            timestamp: message.timestamp,
+            presentation: messagePresentation(for: message, startsAssistantLane: startsAssistantLane)
+        )
+    }
+
+    private func messagePresentation(for message: PlaygroundChatMessage, startsAssistantLane: Bool) -> VVChatMessagePresentation? {
+        switch message.role {
+        case .user:
+            return VVChatMessagePresentation(
+                timestampPrefixIconURL: timelineSymbolIconURL("clock", fallbackID: "timestamp-clock"),
+                timestampSuffixIconURL: timelineSymbolIconURL("doc.on.doc", fallbackID: "copy-user"),
+                timestampIconSize: max(14, CGFloat(fontSize) - 0.5),
+                timestampIconSpacing: 6
+            )
+        case .assistant:
+            return VVChatMessagePresentation(
+                bubbleStyle: VVChatBubbleStyle(
+                    isEnabled: true,
+                    color: .clear,
+                    borderColor: .clear,
+                    borderWidth: 0,
+                    cornerRadius: 0,
+                    insets: .init(top: 0, left: 0, bottom: 4, right: 0),
+                    maxWidth: 4000,
+                    alignment: .leading
+                ),
+                showsHeader: false,
+                leadingLaneWidth: 0,
+                leadingIconURL: startsAssistantLane ? timelineSymbolIconURL("sparkles", fallbackID: "assistant-lane") : nil,
+                leadingIconSize: startsAssistantLane ? 0 : nil,
+                leadingIconSpacing: startsAssistantLane ? 0 : nil,
+                showsTimestamp: false
+            )
+        case .system:
+            return VVChatMessagePresentation(
+                showsHeader: false,
+                showsTimestamp: false,
+                contentFontScale: 0.78,
+                textOpacityMultiplier: !useLightTheme ? 0.5 : 0.58
+            )
+        }
+    }
+
+    private func groupEntry(for group: PlaygroundToolGroup) -> VVCustomTimelineEntry {
+        let payload = PlaygroundTimelineCustomPayload(
+            title: group.title,
+            body: "",
+            status: group.status.rawValue,
+            toolKind: nil,
+            showsAgentLaneIcon: false,
+            badges: nil,
+            summaryCard: nil
+        )
+        return VVCustomTimelineEntry(
+            id: group.id,
+            kind: "toolCallGroup",
+            payload: encodeCustomPayload(payload, fallback: group.title),
+            revision: group.revision,
+            timestamp: group.timestamp
+        )
+    }
+
+    private func toolDetailEntry(for call: PlaygroundToolCall, group: PlaygroundToolGroup) -> VVCustomTimelineEntry {
+        let payload = PlaygroundTimelineCustomPayload(
+            title: call.title,
+            body: "",
+            status: call.status.rawValue,
+            toolKind: call.kind.rawValue,
+            showsAgentLaneIcon: false,
+            badges: call.badges.map {
+                PayloadBadge(text: $0.text, r: $0.color.x, g: $0.color.y, b: $0.color.z, a: $0.color.w)
+            },
+            summaryCard: nil
+        )
+        return VVCustomTimelineEntry(
+            id: "\(group.id)::\(call.id)",
+            kind: "toolCallDetail",
+            payload: encodeCustomPayload(payload, fallback: call.title),
+            revision: group.revision ^ call.revision,
+            timestamp: call.timestamp
+        )
+    }
+
+    private func turnSummaryEntry(for summary: PlaygroundTurnSummary) -> VVCustomTimelineEntry {
+        let payload = PlaygroundTimelineCustomPayload(
+            title: nil,
+            body: "\(summary.toolCallCount) tool calls • \(summary.formattedDuration)",
+            status: "completed",
+            toolKind: nil,
+            showsAgentLaneIcon: false,
+            badges: nil,
+            summaryCard: PayloadSummaryCard(
+                title: "Turn Summary",
+                subtitle: "\(summary.toolCallCount) tool call\(summary.toolCallCount == 1 ? "" : "s") • \(summary.formattedDuration)",
+                rows: summary.files.map { file in
+                    PayloadSummaryRow(
+                        id: file.id,
+                        title: file.compactTitle,
+                        subtitle: nil,
+                        iconURL: summaryFileIconURL(for: file.path),
+                        actionURL: "playground-file://\(file.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.path)",
+                        additionsText: "+\(file.linesAdded)",
+                        deletionsText: "-\(file.linesRemoved)"
+                    )
+                }
+            )
+        )
+        return VVCustomTimelineEntry(
+            id: summary.id,
+            kind: "turnSummary",
+            payload: encodeCustomPayload(payload, fallback: "Turn Summary"),
+            revision: summary.revision,
+            timestamp: summary.timestamp
+        )
+    }
+
+    private func customEntryMapper() -> VVChatTimelineController.CustomEntryMessageMapper {
+        { custom in
+            let decoded = decodeCustomPayload(from: custom.payload)
+            let body = decoded?.body ?? String(data: custom.payload, encoding: .utf8) ?? ""
+            let title = decoded?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let statusTint = toolGroupStatusNSColor(statusRawValue: decoded?.status)
+            let showsHeader = title?.isEmpty == false
+
+            switch custom.kind {
+            case "toolCallGroup":
+                return VVChatMessage(
+                    id: custom.id,
+                    role: .assistant,
+                    state: .final,
+                    content: body,
+                    revision: custom.revision,
+                    timestamp: custom.timestamp,
+                    presentation: VVChatMessagePresentation(
+                        bubbleStyle: nil,
+                        showsHeader: showsHeader,
+                        headerTitle: title,
+                        headerIconURL: timelineSymbolIconURL("square.stack.3d.up", fallbackID: "tool-group", tintColor: statusTint),
+                        headerTrailingIconURL: timelineSymbolIconURL(
+                            expandedToolGroupIDs.contains(custom.id) ? "chevron.down" : "chevron.right",
+                            fallbackID: expandedToolGroupIDs.contains(custom.id) ? "chevron-down" : "chevron-right",
+                            tintColor: headerIconTintColor
+                        ),
+                        leadingLaneWidth: 0,
+                        showsTimestamp: false,
+                        contentFontScale: 0.74,
+                        textOpacityMultiplier: dimmedMetaOpacity
+                    )
+                )
+
+            case "toolCallDetail":
+                let badges = decoded?.badges?.map {
+                    VVHeaderBadge(text: $0.text, color: SIMD4<Float>($0.r, $0.g, $0.b, $0.a))
+                }
+                return VVChatMessage(
+                    id: custom.id,
+                    role: .assistant,
+                    state: .final,
+                    content: "",
+                    revision: custom.revision,
+                    timestamp: custom.timestamp,
+                    presentation: VVChatMessagePresentation(
+                        bubbleStyle: nil,
+                        showsHeader: showsHeader,
+                        headerTitle: title,
+                        headerIconURL: timelineSymbolIconURL(
+                            toolHeaderSymbol(for: decoded?.toolKind),
+                            fallbackID: "tool-\(decoded?.toolKind ?? "unknown")",
+                            tintColor: statusTint
+                        ),
+                        leadingLaneWidth: 0,
+                        showsTimestamp: false,
+                        contentFontScale: 0.72,
+                        textOpacityMultiplier: dimmedMetaOpacity * 0.93,
+                        headerBadges: badges
+                    )
+                )
+
+            case "turnSummary":
+                let summaryCard = decoded?.summaryCard.map(makeSummaryCard(from:))
+                return VVChatMessage(
+                    id: custom.id,
+                    role: .assistant,
+                    state: .final,
+                    content: "",
+                    revision: custom.revision,
+                    timestamp: custom.timestamp,
+                    presentation: VVChatMessagePresentation(
+                        bubbleStyle: turnSummaryBubbleStyle,
+                        showsHeader: false,
+                        leadingLaneWidth: 0,
+                        showsTimestamp: false,
+                        contentFontScale: 0.86,
+                        textOpacityMultiplier: !useLightTheme ? 0.86 : 0.90
+                    ),
+                    customContent: summaryCard.map { .summaryCard($0) }
+                )
+
+            default:
+                return VVChatMessage(
+                    id: custom.id,
+                    role: .system,
+                    state: .final,
+                    content: body,
+                    revision: custom.revision,
+                    timestamp: custom.timestamp
+                )
+            }
+        }
+    }
+
+    private var headerIconTintColor: NSColor {
+        if useLightTheme {
+            return NSColor(calibratedWhite: 0.18, alpha: 1)
+        }
+        return NSColor(calibratedWhite: 0.94, alpha: 1)
+    }
+
+    private var dimmedMetaOpacity: Float {
+        useLightTheme ? 0.50 : 0.40
+    }
+
+    private var turnSummaryBubbleStyle: VVChatBubbleStyle {
+        VVChatBubbleStyle(
+            isEnabled: true,
+            color: useLightTheme ? .rgba(0.98, 0.985, 0.992, 0.98) : .rgba(0.12, 0.14, 0.17, 0.92),
+            borderColor: useLightTheme ? .rgba(0.56, 0.60, 0.68, 0.18) : .rgba(0.52, 0.56, 0.62, 0.34),
+            borderWidth: 0.8,
+            cornerRadius: 14,
+            insets: .init(top: 10, left: 14, bottom: 10, right: 14),
+            maxWidth: 4000,
+            alignment: .leading
+        )
+    }
+
+    private func makeSummaryCard(from payload: PayloadSummaryCard) -> VVChatSummaryCard {
+        VVChatSummaryCard(
+            title: payload.title,
+            iconURL: timelineSymbolIconURL("checklist", fallbackID: "turn-summary", tintColor: headerIconTintColor, pointSize: 12),
+            subtitle: payload.subtitle,
+            rows: payload.rows.map { row in
+                VVChatSummaryCardRow(
+                        id: row.id,
+                        title: row.title,
+                        subtitle: row.subtitle,
+                        iconURL: row.iconURL,
+                        actionURL: row.actionURL,
+                    titleColor: useLightTheme ? .rgba(0.12, 0.14, 0.18, 1) : .rgba(0.96, 0.97, 0.99, 1),
+                    subtitleColor: useLightTheme ? .rgba(0.34, 0.38, 0.46, 0.92) : .rgba(0.83, 0.85, 0.90, 0.92),
+                    additionsText: row.additionsText,
+                    additionsColor: useLightTheme ? .rgba(0.11, 0.60, 0.25, 1) : .rgba(0.50, 0.86, 0.62, 1),
+                    deletionsText: row.deletionsText,
+                    deletionsColor: useLightTheme ? .rgba(0.78, 0.36, 0.08, 1) : .rgba(0.94, 0.69, 0.48, 1),
+                    hoverFillColor: useLightTheme ? .rgba(0.14, 0.20, 0.30, 0.03) : .rgba(0.86, 0.90, 0.98, 0.035)
+                )
+            },
+            titleColor: useLightTheme ? .rgba(0.12, 0.14, 0.18, 1) : .rgba(0.96, 0.97, 0.99, 1),
+            subtitleColor: useLightTheme ? .rgba(0.34, 0.38, 0.46, 0.92) : .rgba(0.83, 0.85, 0.90, 0.92),
+            dividerColor: useLightTheme ? .rgba(0.56, 0.60, 0.68, 0.18) : .rgba(0.52, 0.56, 0.62, 0.34),
+            rowDividerColor: useLightTheme ? .rgba(0.56, 0.60, 0.68, 0.12) : .rgba(0.52, 0.56, 0.62, 0.18)
+        )
+    }
+
+    private func timelineSymbolIconURL(
+        _ symbolName: String,
+        fallbackID: String,
+        tintColor: NSColor? = nil,
+        pointSize: CGFloat? = nil
+    ) -> String? {
+        PlaygroundHeaderIconStore.urlString(
+            for: .sfSymbol(symbolName),
+            fallbackAgentId: fallbackID,
+            tintColor: tintColor,
+            targetPointSize: pointSize ?? 14
+        )
+    }
+
+    private func summaryFileIconURL(for path: String) -> String? {
+        let ext = URL(fileURLWithPath: path).pathExtension
+        let contentType = UTType(filenameExtension: ext.isEmpty ? "txt" : ext) ?? .plainText
+        let icon = NSWorkspace.shared.icon(for: contentType)
+        guard let data = icon.tiffRepresentation else { return nil }
+        return PlaygroundHeaderIconStore.urlString(
+            for: .customImage(data),
+            fallbackAgentId: "summary-file-\(path.hashValue)",
+            tintColor: nil,
+            targetPointSize: 16
+        )
+    }
+
+    private func toolHeaderSymbol(for rawKind: String?) -> String {
+        switch rawKind {
+        case "read":
+            return "doc.text.magnifyingglass"
+        case "edit":
+            return "pencil"
+        case "delete":
+            return "trash"
+        case "move":
+            return "arrow.left.and.right.square"
+        case "task":
+            return "checklist"
+        case "execute":
+            return "terminal"
+        case "search":
+            return "magnifyingglass"
+        case "think":
+            return "brain.head.profile"
+        case "fetch":
+            return "globe"
+        case "plan":
+            return "list.bullet.clipboard"
+        case "switchMode":
+            return "arrow.triangle.swap"
+        default:
+            return "wrench.and.screwdriver"
+        }
+    }
+
+    private func toolGroupStatusNSColor(statusRawValue: String?) -> NSColor {
+        switch statusRawValue {
+        case "failed":
+            return useLightTheme
+                ? NSColor(red: 0.82, green: 0.24, blue: 0.28, alpha: 1)
+                : NSColor(red: 0.92, green: 0.42, blue: 0.44, alpha: 1)
+        case "in_progress":
+            return useLightTheme
+                ? NSColor(red: 0.88, green: 0.62, blue: 0.06, alpha: 1)
+                : NSColor(red: 0.98, green: 0.78, blue: 0.36, alpha: 1)
+        default:
+            return headerIconTintColor
+        }
     }
 
     private func startAutoSimulation() {
@@ -960,8 +1643,8 @@ struct ChatPlaygroundView: View {
             while !Task.isCancelled {
                 let running = await MainActor.run { isAutoRunning }
                 if !running { break }
-                await runSingleAutoStep()
-                try? await Task.sleep(nanoseconds: UInt64(pauseBetweenMessages * 1_000_000_000))
+                await runNextTurn()
+                try? await Task.sleep(nanoseconds: UInt64(pauseBetweenTurns * 1_000_000_000))
             }
         }
     }
@@ -972,188 +1655,323 @@ struct ChatPlaygroundView: View {
         simulationTask = nil
     }
 
-    private func runSingleAutoStep() async {
-        if useComplexResponses && includeToolCalls {
-            await runToolCallTurn()
-            return
-        }
-
-        let turn = nextAutoTurn()
-        await MainActor.run {
-            appendUserMessage(content: turn.user)
-        }
-
-        if streamResponses {
-            await streamAssistantMessage(turn.assistant)
-        } else {
-            await MainActor.run {
-                appendAssistantMessage(content: turn.assistant)
-            }
-        }
-    }
-
-    private func streamNextAssistantResponse() async {
-        if useComplexResponses && includeToolCalls {
-            await runToolCallTurn()
-            return
-        }
-        let response = await MainActor.run { assistantResponse(forIndex: assistantIndex) }
-        await streamAssistantMessage(response)
-        await MainActor.run { assistantIndex += 1 }
-    }
-
-    private func runToolCallTurn() async {
-        let turn = nextToolTurn()
+    private func runNextTurn() async {
+        let scriptedTurns = SampleData.aizenScriptedTurns(includeInterrupts: includeInterrupts)
+        guard !scriptedTurns.isEmpty else { return }
+        let sequence = nextScriptedTurn
+        let baseTurn = scriptedTurns[sequence % scriptedTurns.count]
+        let turn = uniquedTurn(baseTurn, sequence: sequence)
+        nextScriptedTurn += 1
 
         await MainActor.run {
-            appendUserMessage(content: turn.user)
+            timelineItems.append(.message(turn.userMessage))
+            prepareAppendTransition()
+            controller.appendMessage(chatMessage(from: turn.userMessage, startsAssistantLane: false))
         }
 
-        if streamResponses {
-            await streamAssistantMessage(turn.preface)
-        } else {
-            await MainActor.run {
-                appendAssistantMessage(content: turn.preface)
-            }
-        }
-
+        let draftID = "assistant-draft-\(UUID().uuidString)"
+        var currentDraft = PlaygroundChatMessage(
+            id: draftID,
+            role: .assistant,
+            state: .draft,
+            content: "",
+            revision: 0,
+            timestamp: turn.agentPreface.timestamp
+        )
         await MainActor.run {
-            appendAssistantMessage(content: SampleData.toolCallMessage(
-                id: turn.callID,
-                name: turn.toolName,
-                argumentsJSON: turn.argumentsJSON
-            ))
+            timelineItems.append(.message(currentDraft))
+            prepareAppendTransition()
+            controller.appendMessage(chatMessage(from: currentDraft, startsAssistantLane: true))
         }
 
-        try? await Task.sleep(nanoseconds: UInt64(max(0.05, chunkDelay) * 1_000_000_000))
-
-        await MainActor.run {
-            appendSystemMessage(content: SampleData.toolResultMessage(
-                id: turn.callID,
-                toolName: turn.toolName,
-                resultJSON: turn.resultJSON
-            ))
-        }
-
-        if streamResponses {
-            await streamAssistantMessage(turn.followup)
-        } else {
+        for chunk in markdownStreamingSegments(for: turn.agentPreface.content) {
+            if Task.isCancelled { return }
+            currentDraft.content += chunk
+            currentDraft.revision += 1
             await MainActor.run {
-                appendAssistantMessage(content: turn.followup)
-            }
-        }
-    }
-
-    private func streamAssistantMessage(_ content: String) async {
-        let chunks = chunkedSegments(for: content)
-        let draftID = await MainActor.run {
-            let shouldFollowNow = followStreaming && controller.state.shouldAutoFollow
-            if shouldFollowNow {
-                controller.jumpToLatest()
-            }
-            return controller.beginStreamingAssistantMessage(content: "")
-        }
-        for chunk in chunks {
-            if Task.isCancelled { break }
-            await MainActor.run {
-                controller.appendToDraftMessage(id: draftID, chunk: chunk, throttle: false)
+                replaceMessage(currentDraft)
+                controller.updateDraftMessage(id: currentDraft.id, content: currentDraft.content, throttle: false)
             }
             try? await Task.sleep(nanoseconds: UInt64(chunkDelay * 1_000_000_000))
         }
+
+        currentDraft.state = .final
+        currentDraft.revision += 1
         await MainActor.run {
-            let finalContent = controller.messages.first(where: { $0.id == draftID })?.content ?? content
-            controller.finalizeMessage(id: draftID, content: finalContent)
-        }
-    }
-
-    private func assistantResponse(forIndex index: Int) -> String {
-        let responses = useComplexResponses ? SampleData.complexAssistantResponses : SampleData.assistantMessages
-        guard !responses.isEmpty else { return "" }
-        let base = responses[index % responses.count]
-        guard index >= responses.count else { return base }
-        return """
-        \(base)
-
-        _Update \(index + 1): appended turn in infinite mode._
-        """
-    }
-
-    private func nextAutoTurn() -> SampleData.AutoTurn {
-        let turns = useComplexResponses ? SampleData.autoComplexTurns : SampleData.autoSimpleTurns
-        guard !turns.isEmpty else { return .init(user: "", assistant: "") }
-        let index = autoTurnIndex
-        let turn = turns[index % turns.count]
-        autoTurnIndex += 1
-        guard index >= turns.count else { return turn }
-        return .init(
-            user: "\(turn.user) (turn \(index + 1))",
-            assistant: """
-            \(turn.assistant)
-
-            _Turn \(index + 1): continued transcript; previous messages are preserved._
-            """
-        )
-    }
-
-    private func nextToolTurn() -> SampleData.ToolTurn {
-        let turns = SampleData.toolTurns
-        guard !turns.isEmpty else {
-            return .init(
-                user: "",
-                preface: "",
-                callID: UUID().uuidString,
-                toolName: "",
-                argumentsJSON: "{}",
-                resultJSON: "{}",
-                followup: ""
+            replaceMessage(currentDraft)
+            controller.prepareLayoutTransition(anchorItemID: currentDraft.id)
+            controller.replaceEntry(
+                id: currentDraft.id,
+                with: .message(chatMessage(from: currentDraft, startsAssistantLane: true))
             )
-        }
-        let index = autoTurnIndex
-        let turn = turns[index % turns.count]
-        autoTurnIndex += 1
-        let sequence = index + 1
-        let user = index < turns.count ? turn.user : "\(turn.user) (turn \(sequence))"
-        let followup = index < turns.count
-            ? turn.followup
-            : """
-            \(turn.followup)
 
-            _Turn \(sequence): continued transcript; previous messages are preserved._
-            """
-        return .init(
-            user: user,
-            preface: turn.preface,
-            callID: "\(turn.callID)_\(sequence)",
-            toolName: turn.toolName,
-            argumentsJSON: turn.argumentsJSON,
-            resultJSON: turn.resultJSON,
-            followup: followup
-        )
-    }
-
-    private func chunkedSegments(for text: String) -> [String] {
-        guard !text.isEmpty else { return [] }
-        var segments: [String] = []
-        let scalars = Array(text)
-        var index = 0
-        while index < scalars.count {
-            let jitter = Int.random(in: minChunkSize...maxChunkSize)
-            let end = min(index + jitter, scalars.count)
-            var slice = String(scalars[index..<end])
-            if end < scalars.count {
-                if let lastSpace = slice.lastIndex(where: { $0.isWhitespace }) {
-                    let prefix = String(slice[..<lastSpace])
-                    if !prefix.isEmpty {
-                        slice = prefix
-                    }
+            timelineItems.append(.toolGroup(turn.toolGroup.inProgressVersion))
+            prepareAppendTransition()
+            controller.appendCustomEntry(groupEntry(for: turn.toolGroup.inProgressVersion))
+            if expandNewToolGroups {
+                expandedToolGroupIDs.insert(turn.toolGroup.inProgressVersion.id)
+                for call in turn.toolGroup.inProgressVersion.toolCalls {
+                    prepareAppendTransition()
+                    controller.appendCustomEntry(toolDetailEntry(for: call, group: turn.toolGroup.inProgressVersion))
                 }
             }
-            if slice.isEmpty {
-                slice = String(scalars[index..<end])
-            }
-            segments.append(slice)
-            index += slice.count
         }
+
+        try? await Task.sleep(nanoseconds: UInt64(max(chunkDelay, 0.05) * 5 * 1_000_000_000))
+
+        await MainActor.run {
+            replaceToolGroup(turn.toolGroup.inProgressVersion.id, with: turn.toolGroup.completedVersion)
+            controller.prepareLayoutTransition(anchorItemID: turn.toolGroup.completedVersion.id)
+            controller.replaceEntry(
+                id: turn.toolGroup.completedVersion.id,
+                with: .custom(groupEntry(for: turn.toolGroup.completedVersion))
+            )
+            if expandedToolGroupIDs.contains(turn.toolGroup.completedVersion.id) {
+                for call in turn.toolGroup.completedVersion.toolCalls {
+                    controller.prepareLayoutTransition(anchorItemID: "\(turn.toolGroup.completedVersion.id)::\(call.id)")
+                    controller.replaceEntry(
+                        id: "\(turn.toolGroup.completedVersion.id)::\(call.id)",
+                        with: .custom(toolDetailEntry(for: call, group: turn.toolGroup.completedVersion))
+                    )
+                }
+            }
+        }
+
+        let finalAssistant = PlaygroundChatMessage(
+            id: "assistant-final-\(UUID().uuidString)",
+            role: .assistant,
+            state: .draft,
+            content: "",
+            revision: 0,
+            timestamp: turn.agentFinal.timestamp
+        )
+        await MainActor.run {
+            timelineItems.append(.message(finalAssistant))
+            prepareAppendTransition()
+            controller.appendMessage(chatMessage(from: finalAssistant, startsAssistantLane: false))
+        }
+        var streamedFinal = finalAssistant
+        for chunk in markdownStreamingSegments(for: turn.agentFinal.content) {
+            if Task.isCancelled { return }
+            streamedFinal.content += chunk
+            streamedFinal.revision += 1
+            await MainActor.run {
+                replaceMessage(streamedFinal)
+                controller.updateDraftMessage(id: streamedFinal.id, content: streamedFinal.content, throttle: false)
+            }
+            try? await Task.sleep(nanoseconds: UInt64(chunkDelay * 1_000_000_000))
+        }
+
+        streamedFinal.state = .final
+        streamedFinal.revision += 1
+        await MainActor.run {
+            replaceMessage(streamedFinal)
+            controller.prepareLayoutTransition(anchorItemID: streamedFinal.id)
+            controller.replaceEntry(
+                id: streamedFinal.id,
+                with: .message(chatMessage(from: streamedFinal, startsAssistantLane: false))
+            )
+
+            timelineItems.append(.turnSummary(turn.summary))
+            prepareAppendTransition()
+            controller.appendCustomEntry(turnSummaryEntry(for: turn.summary))
+            if let systemMessage = turn.systemMessage, includeInterrupts {
+                timelineItems.append(.message(systemMessage))
+                prepareAppendTransition()
+                controller.appendMessage(chatMessage(from: systemMessage, startsAssistantLane: false))
+            }
+        }
+    }
+
+    private func prepareAppendTransition() {
+        let anchorID = controller.entries.last?.id ?? timelineItems.last.flatMap(itemID(for:))
+        if let anchorID {
+            controller.prepareLayoutTransition(anchorItemID: anchorID)
+        }
+    }
+
+    private func itemID(for item: PlaygroundChatTimelineItem) -> String {
+        switch item {
+        case .message(let message):
+            return message.id
+        case .toolGroup(let group):
+            return group.id
+        case .turnSummary(let summary):
+            return summary.id
+        }
+    }
+
+    private func replaceMessage(_ message: PlaygroundChatMessage) {
+        guard let index = timelineItems.firstIndex(where: { item in
+            guard case .message(let existing) = item else { return false }
+            return existing.id == message.id
+        }) else { return }
+        timelineItems[index] = .message(message)
+    }
+
+    private func replaceToolGroup(_ id: String, with group: PlaygroundToolGroup) {
+        guard let index = timelineItems.firstIndex(where: { item in
+            guard case .toolGroup(let existing) = item else { return false }
+            return existing.id == id
+        }) else { return }
+        timelineItems[index] = .toolGroup(group)
+        if expandedToolGroupIDs.contains(id) {
+            expandedToolGroupIDs.remove(id)
+            expandedToolGroupIDs.insert(group.id)
+        }
+    }
+
+    private func handleEntryActivate(_ entryID: String) {
+        if expandedToolGroupIDs.contains(entryID) {
+            expandedToolGroupIDs.remove(entryID)
+        } else if timelineItems.contains(where: { item in
+            guard case .toolGroup(let group) = item else { return false }
+            return group.id == entryID
+        }) {
+            expandedToolGroupIDs.insert(entryID)
+        }
+        applyTimeline(scrollToBottom: false)
+    }
+
+    private func handleLinkActivate(_ url: String) {
+        guard let parsed = URL(string: url), parsed.scheme == "playground-file" else { return }
+    }
+
+    private func jumpToLatest() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            chatState.hasUnreadNewContent = false
+        }
+        jumpToLatestRequestID &+= 1
+    }
+
+    private func uniquedTurn(_ turn: PlaygroundScriptedTurn, sequence: Int) -> PlaygroundScriptedTurn {
+        let suffix = "-loop-\(sequence + 1)"
+        let offset = TimeInterval(sequence * 60)
+
+        func uniquedMessage(_ message: PlaygroundChatMessage?) -> PlaygroundChatMessage? {
+            guard let message else { return nil }
+            return PlaygroundChatMessage(
+                id: message.id + suffix,
+                role: message.role,
+                state: message.state,
+                content: sequence == 0 ? message.content : "\(message.content)\n\n_Turn \(sequence + 1)_",
+                revision: message.revision,
+                timestamp: message.timestamp?.addingTimeInterval(offset)
+            )
+        }
+
+        let inProgressCalls = turn.toolGroup.inProgressVersion.toolCalls.map { call in
+            PlaygroundToolCall(
+                id: call.id + suffix,
+                title: call.title,
+                kind: call.kind,
+                status: call.status,
+                badges: call.badges,
+                timestamp: call.timestamp.addingTimeInterval(offset),
+                revision: call.revision
+            )
+        }
+        let completedCalls = turn.toolGroup.completedVersion.toolCalls.map { call in
+            PlaygroundToolCall(
+                id: call.id + suffix,
+                title: call.title,
+                kind: call.kind,
+                status: call.status,
+                badges: call.badges,
+                timestamp: call.timestamp.addingTimeInterval(offset),
+                revision: call.revision
+            )
+        }
+
+        let inProgressGroup = PlaygroundToolGroup(
+            id: turn.toolGroup.inProgressVersion.id + suffix,
+            title: turn.toolGroup.inProgressVersion.title,
+            status: turn.toolGroup.inProgressVersion.status,
+            toolCalls: inProgressCalls,
+            timestamp: turn.toolGroup.inProgressVersion.timestamp.addingTimeInterval(offset),
+            revision: turn.toolGroup.inProgressVersion.revision
+        )
+        let completedGroup = PlaygroundToolGroup(
+            id: turn.toolGroup.completedVersion.id + suffix,
+            title: turn.toolGroup.completedVersion.title,
+            status: turn.toolGroup.completedVersion.status,
+            toolCalls: completedCalls,
+            timestamp: turn.toolGroup.completedVersion.timestamp.addingTimeInterval(offset),
+            revision: turn.toolGroup.completedVersion.revision
+        )
+
+        let summary = PlaygroundTurnSummary(
+            id: turn.summary.id + suffix,
+            timestamp: turn.summary.timestamp.addingTimeInterval(offset),
+            duration: turn.summary.duration,
+            toolCallCount: turn.summary.toolCallCount,
+            files: turn.summary.files,
+            revision: turn.summary.revision
+        )
+
+        return PlaygroundScriptedTurn(
+            userMessage: uniquedMessage(turn.userMessage)!,
+            agentPreface: uniquedMessage(turn.agentPreface)!,
+            toolGroup: PlaygroundToolGroupTransition(
+                inProgressVersion: inProgressGroup,
+                completedVersion: completedGroup
+            ),
+            agentFinal: uniquedMessage(turn.agentFinal)!,
+            summary: summary,
+            systemMessage: uniquedMessage(turn.systemMessage)
+        )
+    }
+
+    private func markdownStreamingSegments(for text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var segments: [String] = []
+        var current = ""
+        var inCodeFence = false
+
+        func flushCurrent() {
+            guard !current.isEmpty else { return }
+            segments.append(current)
+            current = ""
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            current += line
+            current += "\n"
+
+            if trimmed.hasPrefix("```") {
+                inCodeFence.toggle()
+                if !inCodeFence {
+                    flushCurrent()
+                }
+                continue
+            }
+
+            if inCodeFence {
+                continue
+            }
+
+            let isBlockBoundary =
+                trimmed.isEmpty ||
+                trimmed.hasPrefix("#") ||
+                trimmed.hasPrefix("- ") ||
+                trimmed.hasPrefix("* ") ||
+                trimmed.hasPrefix(">") ||
+                trimmed.hasPrefix("|") ||
+                trimmed.hasPrefix("1.") ||
+                trimmed.hasPrefix("2.") ||
+                trimmed.hasPrefix("3.") ||
+                trimmed.hasPrefix("```")
+
+            if isBlockBoundary || current.count > 220 {
+                flushCurrent()
+            }
+        }
+
+        flushCurrent()
         return segments
     }
 }
@@ -1171,6 +1989,346 @@ struct ChatTimelineRepresentable: NSViewRepresentable {
         if nsView.controller !== controller {
             nsView.controller = controller
         }
+    }
+}
+
+private struct PlaygroundChatTimelineHost: NSViewRepresentable {
+    let controller: VVChatTimelineController
+    let jumpToLatestRequestID: Int
+    let onStateChange: (VVChatTimelineState) -> Void
+    let onEntryActivate: (String) -> Void
+    let onLinkActivate: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> VVChatTimelineView {
+        let view = VVChatTimelineView(frame: .zero)
+        view.controller = controller
+        view.onStateChange = onStateChange
+        view.onEntryActivate = onEntryActivate
+        view.onLinkActivate = onLinkActivate
+        context.coordinator.lastJumpRequestID = jumpToLatestRequestID
+        return view
+    }
+
+    func updateNSView(_ nsView: VVChatTimelineView, context: Context) {
+        if nsView.controller !== controller {
+            nsView.controller = controller
+        }
+        nsView.onStateChange = onStateChange
+        nsView.onEntryActivate = onEntryActivate
+        nsView.onLinkActivate = onLinkActivate
+
+        if context.coordinator.lastJumpRequestID != jumpToLatestRequestID {
+            context.coordinator.lastJumpRequestID = jumpToLatestRequestID
+            context.coordinator.animateToBottom(in: nsView, controller: controller)
+        }
+    }
+
+    @MainActor
+    final class Coordinator {
+        var lastJumpRequestID = 0
+
+        func animateToBottom(in view: VVChatTimelineView, controller: VVChatTimelineController) {
+            guard let scrollView = findScrollView(in: view) else {
+                controller.jumpToLatest()
+                return
+            }
+
+            let contentView = scrollView.contentView
+            let visibleRect = contentView.bounds
+            let contentHeight = max(controller.totalHeight, visibleRect.height)
+            let targetY = max(0, contentHeight - visibleRect.height)
+
+            guard abs(targetY - visibleRect.origin.y) > 1 else {
+                controller.jumpToLatest()
+                view.scrollToBottom(animated: false)
+                return
+            }
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.26
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                contentView.animator().setBoundsOrigin(CGPoint(x: visibleRect.origin.x, y: targetY))
+            } completionHandler: {
+                scrollView.reflectScrolledClipView(contentView)
+                Task { @MainActor in
+                    controller.jumpToLatest()
+                    view.scrollToBottom(animated: false)
+                }
+            }
+        }
+
+        private func findScrollView(in root: NSView) -> NSScrollView? {
+            if let scrollView = root as? NSScrollView {
+                return scrollView
+            }
+            for subview in root.subviews {
+                if let scrollView = findScrollView(in: subview) {
+                    return scrollView
+                }
+            }
+            return nil
+        }
+    }
+}
+
+private struct PlaygroundChatMessage: Identifiable, Hashable {
+    let id: String
+    let role: VVChatMessageRole
+    var state: VVChatMessageState
+    var content: String
+    var revision: Int
+    let timestamp: Date?
+}
+
+private struct PlaygroundToolBadge: Hashable {
+    let text: String
+    let color: SIMD4<Float>
+}
+
+private enum PlaygroundToolKind: String, Hashable {
+    case read
+    case edit
+    case execute
+    case search
+    case think
+    case fetch
+    case plan
+    case switchMode
+    case delete
+    case move
+    case task
+}
+
+private enum PlaygroundToolStatus: String, Hashable {
+    case completed = "completed"
+    case inProgress = "in_progress"
+    case failed = "failed"
+}
+
+private struct PlaygroundToolCall: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let kind: PlaygroundToolKind
+    let status: PlaygroundToolStatus
+    let badges: [PlaygroundToolBadge]
+    let timestamp: Date
+    let revision: Int
+}
+
+private struct PlaygroundToolGroup: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let status: PlaygroundToolStatus
+    let toolCalls: [PlaygroundToolCall]
+    let timestamp: Date
+    let revision: Int
+}
+
+private struct PlaygroundFileChange: Identifiable, Hashable {
+    let path: String
+    let linesAdded: Int
+    let linesRemoved: Int
+
+    var id: String { path }
+
+    var compactTitle: String {
+        let parts = path.split(separator: "/")
+        if parts.count <= 4 {
+            return path
+        }
+        return "…/" + parts.suffix(4).joined(separator: "/")
+    }
+}
+
+private struct PlaygroundTurnSummary: Identifiable, Hashable {
+    let id: String
+    let timestamp: Date
+    let duration: TimeInterval
+    let toolCallCount: Int
+    let files: [PlaygroundFileChange]
+    let revision: Int
+
+    var formattedDuration: String {
+        if duration < 1 {
+            return "<1s"
+        }
+        if duration < 60 {
+            return "\(Int(duration))s"
+        }
+        return "\(Int(duration) / 60)m \(Int(duration) % 60)s"
+    }
+}
+
+private enum PlaygroundChatTimelineItem: Hashable {
+    case message(PlaygroundChatMessage)
+    case toolGroup(PlaygroundToolGroup)
+    case turnSummary(PlaygroundTurnSummary)
+}
+
+private struct PlaygroundToolGroupTransition: Hashable {
+    let inProgressVersion: PlaygroundToolGroup
+    let completedVersion: PlaygroundToolGroup
+}
+
+private struct PlaygroundScriptedTurn: Hashable {
+    let userMessage: PlaygroundChatMessage
+    let agentPreface: PlaygroundChatMessage
+    let toolGroup: PlaygroundToolGroupTransition
+    let agentFinal: PlaygroundChatMessage
+    let summary: PlaygroundTurnSummary
+    let systemMessage: PlaygroundChatMessage?
+}
+
+private struct PayloadBadge: Codable {
+    var text: String
+    var r: Float
+    var g: Float
+    var b: Float
+    var a: Float
+}
+
+private struct PayloadSummaryRow: Codable {
+    var id: String
+    var title: String
+    var subtitle: String?
+    var iconURL: String?
+    var actionURL: String?
+    var additionsText: String?
+    var deletionsText: String?
+}
+
+private struct PayloadSummaryCard: Codable {
+    var title: String
+    var subtitle: String?
+    var rows: [PayloadSummaryRow]
+}
+
+private struct PlaygroundTimelineCustomPayload: Codable {
+    var title: String?
+    var body: String
+    var status: String?
+    var toolKind: String?
+    var showsAgentLaneIcon: Bool?
+    var badges: [PayloadBadge]?
+    var summaryCard: PayloadSummaryCard?
+}
+
+private func encodeCustomPayload(_ payload: PlaygroundTimelineCustomPayload, fallback: String) -> Data {
+    if let encoded = try? JSONEncoder().encode(payload) {
+        return encoded
+    }
+    return Data(fallback.utf8)
+}
+
+private func decodeCustomPayload(from data: Data) -> PlaygroundTimelineCustomPayload? {
+    try? JSONDecoder().decode(PlaygroundTimelineCustomPayload.self, from: data)
+}
+
+private enum PlaygroundHeaderIconType {
+    case sfSymbol(String)
+    case customImage(Data)
+}
+
+private enum PlaygroundHeaderIconStore {
+    private static var cache: [String: String] = [:]
+    private static let lock = NSLock()
+    private static let fileManager = FileManager.default
+    private static let directoryURL: URL = {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("vvdevkit-playground-chat-icons", isDirectory: true)
+        try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+
+    static func urlString(
+        for iconType: PlaygroundHeaderIconType,
+        fallbackAgentId: String,
+        tintColor: NSColor?,
+        targetPointSize: CGFloat
+    ) -> String? {
+        let cacheKey = "\(fallbackAgentId)-\(targetPointSize)-\(tintColor?.description ?? "default")"
+        lock.lock()
+        if let cached = cache[cacheKey] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        guard let pngData = pngData(for: iconType, tintColor: tintColor, targetPointSize: targetPointSize) else {
+            return nil
+        }
+        let fileURL = directoryURL.appendingPathComponent("\(abs(cacheKey.hashValue)).png")
+        if !fileManager.fileExists(atPath: fileURL.path) {
+            try? pngData.write(to: fileURL, options: .atomic)
+        }
+        lock.lock()
+        cache[cacheKey] = fileURL.path
+        lock.unlock()
+        return fileURL.path
+    }
+
+    private static func pngData(
+        for iconType: PlaygroundHeaderIconType,
+        tintColor: NSColor?,
+        targetPointSize: CGFloat
+    ) -> Data? {
+        let image: NSImage?
+        switch iconType {
+        case .sfSymbol(let symbol):
+            image = NSImage(
+                systemSymbolName: symbol,
+                accessibilityDescription: nil
+            )?.withSymbolConfiguration(.init(pointSize: max(12, targetPointSize), weight: .regular))
+        case .customImage(let data):
+            image = NSImage(data: data)
+        }
+        guard let image else { return nil }
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let pixels = Int(ceil(targetPointSize * scale))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+
+        rep.size = NSSize(width: targetPointSize, height: targetPointSize)
+        NSGraphicsContext.saveGraphicsState()
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
+            NSGraphicsContext.restoreGraphicsState()
+            return nil
+        }
+        NSGraphicsContext.current = context
+        let rect = NSRect(origin: .zero, size: NSSize(width: targetPointSize, height: targetPointSize))
+        if let tintColor {
+            let tinted = tintedImage(from: image, color: tintColor) ?? image
+            tinted.draw(in: rect)
+        } else {
+            image.draw(in: rect)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func tintedImage(from image: NSImage, color: NSColor) -> NSImage? {
+        let tinted = NSImage(size: image.size)
+        tinted.lockFocus()
+        let rect = NSRect(origin: .zero, size: image.size)
+        image.draw(in: rect)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        tinted.unlockFocus()
+        return tinted
     }
 }
 
@@ -1628,6 +2786,385 @@ enum SampleData {
         )
     ]
 
+    fileprivate static func aizenSeedTimelineItems(includeInterrupts: Bool) -> [PlaygroundChatTimelineItem] {
+        let base = Date().addingTimeInterval(-1800)
+
+        let firstUser = PlaygroundChatMessage(
+            id: "seed-user-1",
+            role: .user,
+            state: .final,
+            content: "Make the chat timeline in the playground match what I see in Aizen.",
+            revision: 1,
+            timestamp: base
+        )
+        let firstAssistant = PlaygroundChatMessage(
+            id: "seed-assistant-1",
+            role: .assistant,
+            state: .final,
+            content: """
+            I inspected the Aizen timeline and rebuilt this transcript with the same VVDevKit presentation model:
+
+            - user messages stay in timestamped bubbles
+            - assistant output renders as an open lane
+            - tool work collapses into grouped rows with per-call detail
+            - completed turns end with a summary card
+            """,
+            revision: 1,
+            timestamp: base.addingTimeInterval(3)
+        )
+        let firstGroup = PlaygroundToolGroup(
+            id: "seed-group-1",
+            title: "Read 3, Searched 1, Planned 1 • 6s",
+            status: .completed,
+            toolCalls: [
+                PlaygroundToolCall(
+                    id: "seed-read-1",
+                    title: "Read",
+                    kind: .read,
+                    status: .completed,
+                    badges: [
+                        PlaygroundToolBadge(text: "…/aizen/Views/Chat/Components/ChatMessageList.swift", color: .rgba(0.72, 0.74, 0.79, 0.72)),
+                        PlaygroundToolBadge(text: "219 lines", color: .rgba(0.72, 0.74, 0.79, 0.72))
+                    ],
+                    timestamp: base.addingTimeInterval(4),
+                    revision: 1
+                ),
+                PlaygroundToolCall(
+                    id: "seed-search-1",
+                    title: "Searched",
+                    kind: .search,
+                    status: .completed,
+                    badges: [
+                        PlaygroundToolBadge(text: "VVChatTimeline", color: .rgba(0.72, 0.74, 0.79, 0.72)),
+                        PlaygroundToolBadge(text: "12 matches", color: .rgba(0.72, 0.74, 0.79, 0.72))
+                    ],
+                    timestamp: base.addingTimeInterval(5),
+                    revision: 1
+                ),
+                PlaygroundToolCall(
+                    id: "seed-plan-1",
+                    title: "Planned",
+                    kind: .plan,
+                    status: .completed,
+                    badges: [
+                        PlaygroundToolBadge(text: "3 steps", color: .rgba(0.72, 0.74, 0.79, 0.72))
+                    ],
+                    timestamp: base.addingTimeInterval(6),
+                    revision: 1
+                )
+            ],
+            timestamp: base.addingTimeInterval(4),
+            revision: 1
+        )
+        let firstAssistantFinal = PlaygroundChatMessage(
+            id: "seed-assistant-2",
+            role: .assistant,
+            state: .final,
+            content: """
+            The playground now uses the same entry categories Aizen does, so you can evaluate real user/agent turn boundaries instead of plain markdown messages.
+            """,
+            revision: 1,
+            timestamp: base.addingTimeInterval(8)
+        )
+        let firstSummary = PlaygroundTurnSummary(
+            id: "seed-summary-1",
+            timestamp: base.addingTimeInterval(9),
+            duration: 6,
+            toolCallCount: 5,
+            files: [
+                PlaygroundFileChange(path: "Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift", linesAdded: 198, linesRemoved: 42),
+                PlaygroundFileChange(path: "Sources/VVChatTimeline/VVChatTimelineModels.swift", linesAdded: 0, linesRemoved: 0)
+            ],
+            revision: 1
+        )
+
+        let secondUser = PlaygroundChatMessage(
+            id: "seed-user-2",
+            role: .user,
+            state: .final,
+            content: "Show me a failing turn too, not just a happy path.",
+            revision: 1,
+            timestamp: base.addingTimeInterval(14)
+        )
+        let secondAssistant = PlaygroundChatMessage(
+            id: "seed-assistant-3",
+            role: .assistant,
+            state: .final,
+            content: "I can simulate a failed edit pass and keep the turn summary visible below it.",
+            revision: 1,
+            timestamp: base.addingTimeInterval(17)
+        )
+        let secondGroup = PlaygroundToolGroup(
+            id: "seed-group-2",
+            title: "Edited 1, Ran 1 • 4s",
+            status: .failed,
+            toolCalls: [
+                PlaygroundToolCall(
+                    id: "seed-edit-1",
+                    title: "Edited",
+                    kind: .edit,
+                    status: .completed,
+                    badges: [
+                        PlaygroundToolBadge(text: "…/Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift", color: .rgba(0.72, 0.74, 0.79, 0.72)),
+                        PlaygroundToolBadge(text: "+34", color: .rgba(0.42, 0.82, 0.52, 1)),
+                        PlaygroundToolBadge(text: "-8", color: .rgba(0.92, 0.42, 0.44, 1))
+                    ],
+                    timestamp: base.addingTimeInterval(18),
+                    revision: 1
+                ),
+                PlaygroundToolCall(
+                    id: "seed-run-1",
+                    title: "Ran",
+                    kind: .execute,
+                    status: .failed,
+                    badges: [
+                        PlaygroundToolBadge(text: "swift build --product VVDevKitPlayground", color: .rgba(0.72, 0.74, 0.79, 0.72)),
+                        PlaygroundToolBadge(text: "failed", color: .rgba(0.92, 0.42, 0.44, 1))
+                    ],
+                    timestamp: base.addingTimeInterval(20),
+                    revision: 1
+                )
+            ],
+            timestamp: base.addingTimeInterval(18),
+            revision: 1
+        )
+        let secondAssistantFinal = PlaygroundChatMessage(
+            id: "seed-assistant-4",
+            role: .assistant,
+            state: .final,
+            content: "That failed build state is preserved exactly the way Aizen renders it: failed tool row, then the assistant follow-up, then a summary card.",
+            revision: 1,
+            timestamp: base.addingTimeInterval(22)
+        )
+        let secondSummary = PlaygroundTurnSummary(
+            id: "seed-summary-2",
+            timestamp: base.addingTimeInterval(23),
+            duration: 4,
+            toolCallCount: 2,
+            files: [
+                PlaygroundFileChange(path: "Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift", linesAdded: 34, linesRemoved: 8)
+            ],
+            revision: 1
+        )
+
+        var items: [PlaygroundChatTimelineItem] = [
+            .message(PlaygroundChatMessage(
+                id: "seed-system-0",
+                role: .system,
+                state: .final,
+                content: "Restored Aizen-style session transcript.",
+                revision: 1,
+                timestamp: base.addingTimeInterval(-3)
+            )),
+            .message(firstUser),
+            .message(firstAssistant),
+            .toolGroup(firstGroup),
+            .message(firstAssistantFinal),
+            .turnSummary(firstSummary)
+        ]
+
+        if includeInterrupts {
+            items.append(.message(PlaygroundChatMessage(
+                id: "seed-system-1",
+                role: .system,
+                state: .final,
+                content: "**Plan approval requested**\n\nWrite access outside the active worktree requires confirmation.",
+                revision: 1,
+                timestamp: base.addingTimeInterval(12)
+            )))
+        }
+
+        items.append(contentsOf: [
+            .message(secondUser),
+            .message(secondAssistant),
+            .toolGroup(secondGroup),
+            .message(secondAssistantFinal),
+            .turnSummary(secondSummary)
+        ])
+
+        return items
+    }
+
+    fileprivate static func aizenScriptedTurns(includeInterrupts: Bool) -> [PlaygroundScriptedTurn] {
+        let base = Date()
+        let neutral: SIMD4<Float> = .rgba(0.72, 0.74, 0.79, 0.72)
+        let green: SIMD4<Float> = .rgba(0.42, 0.82, 0.52, 1)
+        let red: SIMD4<Float> = .rgba(0.92, 0.42, 0.44, 1)
+
+        let turn1 = PlaygroundScriptedTurn(
+            userMessage: PlaygroundChatMessage(
+                id: "turn-user-1",
+                role: .user,
+                state: .final,
+                content: "Simulate the exact Aizen turn loop for a read-heavy investigation.",
+                revision: 1,
+                timestamp: base
+            ),
+            agentPreface: PlaygroundChatMessage(
+                id: "turn-preface-1",
+                role: .assistant,
+                state: .draft,
+                content: "I’m going to inspect the Aizen chat layer, group the exploration work, then summarize what changed in VVDevKit.",
+                revision: 0,
+                timestamp: base.addingTimeInterval(2)
+            ),
+            toolGroup: PlaygroundToolGroupTransition(
+                inProgressVersion: PlaygroundToolGroup(
+                    id: "turn-group-1",
+                    title: "Read 2, Searched 2 • 3s",
+                    status: .inProgress,
+                    toolCalls: [
+                        PlaygroundToolCall(id: "turn1-read1", title: "Read", kind: .read, status: .completed, badges: [PlaygroundToolBadge(text: "…/ChatMessageList.swift", color: neutral)], timestamp: base.addingTimeInterval(3), revision: 1),
+                        PlaygroundToolCall(id: "turn1-read2", title: "Read", kind: .read, status: .completed, badges: [PlaygroundToolBadge(text: "…/ChatSessionViewModel+Timeline.swift", color: neutral)], timestamp: base.addingTimeInterval(4), revision: 1),
+                        PlaygroundToolCall(id: "turn1-search1", title: "Searched", kind: .search, status: .completed, badges: [PlaygroundToolBadge(text: "toolCallGroup", color: neutral)], timestamp: base.addingTimeInterval(5), revision: 1),
+                        PlaygroundToolCall(id: "turn1-plan1", title: "Planned…", kind: .plan, status: .inProgress, badges: [PlaygroundToolBadge(text: "1 step running", color: neutral)], timestamp: base.addingTimeInterval(6), revision: 1)
+                    ],
+                    timestamp: base.addingTimeInterval(3),
+                    revision: 1
+                ),
+                completedVersion: PlaygroundToolGroup(
+                    id: "turn-group-1",
+                    title: "Read 2, Searched 2, Planned 1 • 5s",
+                    status: .completed,
+                    toolCalls: [
+                        PlaygroundToolCall(id: "turn1-read1", title: "Read", kind: .read, status: .completed, badges: [PlaygroundToolBadge(text: "…/ChatMessageList.swift", color: neutral), PlaygroundToolBadge(text: "182 lines", color: neutral)], timestamp: base.addingTimeInterval(3), revision: 2),
+                        PlaygroundToolCall(id: "turn1-read2", title: "Read", kind: .read, status: .completed, badges: [PlaygroundToolBadge(text: "…/ChatSessionViewModel+Timeline.swift", color: neutral), PlaygroundToolBadge(text: "247 lines", color: neutral)], timestamp: base.addingTimeInterval(4), revision: 2),
+                        PlaygroundToolCall(id: "turn1-search1", title: "Searched", kind: .search, status: .completed, badges: [PlaygroundToolBadge(text: "toolCallGroup", color: neutral), PlaygroundToolBadge(text: "7 matches", color: neutral)], timestamp: base.addingTimeInterval(5), revision: 2),
+                        PlaygroundToolCall(id: "turn1-plan1", title: "Planned", kind: .plan, status: .completed, badges: [PlaygroundToolBadge(text: "3 steps", color: neutral)], timestamp: base.addingTimeInterval(6), revision: 2)
+                    ],
+                    timestamp: base.addingTimeInterval(3),
+                    revision: 2
+                )
+            ),
+            agentFinal: PlaygroundChatMessage(
+                id: "turn-final-1",
+                role: .assistant,
+                state: .draft,
+                content: """
+                ## Investigation Result
+
+                The investigation turn now matches Aizen’s structure:
+
+                - the assistant speaks in an open lane
+                - exploration work sits in grouped tool rows
+                - completion closes with a turn summary card
+
+                ### Rendering Notes
+
+                | Area | Behavior |
+                | --- | --- |
+                | Messages | Markdown reflows as blocks complete |
+                | Tools | Group rows stay compact until expanded |
+                | Summary | File rows hover independently |
+
+                ```swift
+                controller.prepareLayoutTransition(anchorItemID: draftID)
+                controller.setEntries(entries, scrollToBottom: true)
+                ```
+
+                > The key improvement is that the markdown stays readable while it streams instead of waiting for the full response.
+                """,
+                revision: 0,
+                timestamp: base.addingTimeInterval(8)
+            ),
+            summary: PlaygroundTurnSummary(
+                id: "turn-summary-1",
+                timestamp: base.addingTimeInterval(9),
+                duration: 5,
+                toolCallCount: 5,
+                files: [PlaygroundFileChange(path: "Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift", linesAdded: 52, linesRemoved: 14)],
+                revision: 1
+            ),
+            systemMessage: includeInterrupts ? PlaygroundChatMessage(
+                id: "turn-system-1",
+                role: .system,
+                state: .final,
+                content: "**Plan approval requested**\n\nAllow write access outside the worktree?",
+                revision: 1,
+                timestamp: base.addingTimeInterval(10)
+            ) : nil
+        )
+
+        let turn2 = PlaygroundScriptedTurn(
+            userMessage: PlaygroundChatMessage(
+                id: "turn-user-2",
+                role: .user,
+                state: .final,
+                content: "Simulate an edit pass with a failing build so I can see the error state.",
+                revision: 1,
+                timestamp: base.addingTimeInterval(40)
+            ),
+            agentPreface: PlaygroundChatMessage(
+                id: "turn-preface-2",
+                role: .assistant,
+                state: .draft,
+                content: "I’ll stage the edit, run a build, and preserve the failed tool row the same way Aizen does.",
+                revision: 0,
+                timestamp: base.addingTimeInterval(42)
+            ),
+            toolGroup: PlaygroundToolGroupTransition(
+                inProgressVersion: PlaygroundToolGroup(
+                    id: "turn-group-2",
+                    title: "Edited 1, Ran 1 • 2s",
+                    status: .inProgress,
+                    toolCalls: [
+                        PlaygroundToolCall(id: "turn2-edit1", title: "Edited", kind: .edit, status: .completed, badges: [PlaygroundToolBadge(text: "…/VVDevKitPlaygroundApp.swift", color: neutral), PlaygroundToolBadge(text: "+18", color: green), PlaygroundToolBadge(text: "-3", color: red)], timestamp: base.addingTimeInterval(43), revision: 1),
+                        PlaygroundToolCall(id: "turn2-run1", title: "Ran…", kind: .execute, status: .inProgress, badges: [PlaygroundToolBadge(text: "swift build --product VVDevKitPlayground", color: neutral)], timestamp: base.addingTimeInterval(44), revision: 1)
+                    ],
+                    timestamp: base.addingTimeInterval(43),
+                    revision: 1
+                ),
+                completedVersion: PlaygroundToolGroup(
+                    id: "turn-group-2",
+                    title: "Edited 1, Ran 1 • 4s",
+                    status: .failed,
+                    toolCalls: [
+                        PlaygroundToolCall(id: "turn2-edit1", title: "Edited", kind: .edit, status: .completed, badges: [PlaygroundToolBadge(text: "…/VVDevKitPlaygroundApp.swift", color: neutral), PlaygroundToolBadge(text: "+18", color: green), PlaygroundToolBadge(text: "-3", color: red)], timestamp: base.addingTimeInterval(43), revision: 2),
+                        PlaygroundToolCall(id: "turn2-run1", title: "Ran", kind: .execute, status: .failed, badges: [PlaygroundToolBadge(text: "swift build --product VVDevKitPlayground", color: neutral), PlaygroundToolBadge(text: "failed", color: red)], timestamp: base.addingTimeInterval(46), revision: 2)
+                    ],
+                    timestamp: base.addingTimeInterval(43),
+                    revision: 2
+                )
+            ),
+            agentFinal: PlaygroundChatMessage(
+                id: "turn-final-2",
+                role: .assistant,
+                state: .draft,
+                content: """
+                ## Failed Build Turn
+
+                The failure is represented inline inside the tool group, then the assistant explanation and turn summary follow beneath it.
+
+                ### What You See
+
+                1. The edit row lands first.
+                2. The build row flips into a failed state.
+                3. The assistant writes a markdown explanation below the failed tool cluster.
+
+                ```text
+                swift build --product VVDevKitPlayground
+                error: build failed in Example target
+                ```
+
+                That gives the transcript a clear turn boundary even when the execution path is unsuccessful.
+                """,
+                revision: 0,
+                timestamp: base.addingTimeInterval(48)
+            ),
+            summary: PlaygroundTurnSummary(
+                id: "turn-summary-2",
+                timestamp: base.addingTimeInterval(49),
+                duration: 4,
+                toolCallCount: 2,
+                files: [PlaygroundFileChange(path: "Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift", linesAdded: 18, linesRemoved: 3)],
+                revision: 1
+            ),
+            systemMessage: nil
+        )
+
+        return [turn1, turn2]
+    }
+
     static func toolCallMessage(id: String, name: String, argumentsJSON: String) -> String {
         """
         Tool call started:
@@ -1676,21 +3213,57 @@ enum SampleData {
     }
 
     static func chatStyle(dark: Bool, fontSize: Double) -> VVChatTimelineStyle {
-        let theme = dark ? MarkdownTheme.dark : MarkdownTheme.light
+        var theme = dark ? MarkdownTheme.dark : MarkdownTheme.light
+        theme.paragraphSpacing = 10
+        theme.headingSpacing = 22
+        theme.contentPadding = 0
+        var draftTheme = theme
+        draftTheme.textColor = theme.textColor.withOpacity(theme.textColor.w * 0.72)
         let baseFont = NSFont.systemFont(ofSize: fontSize)
-        let background: SIMD4<Float> = dark ? .darkBackground : .rgba(0.96, 0.96, 0.97)
-        let bubbleColor: SIMD4<Float> = dark ? .rgba(0.18, 0.26, 0.38) : .rgba(0.82, 0.9, 1)
-        let headerColor: SIMD4<Float> = dark ? .rgba(0.75, 0.8, 0.9) : .rgba(0.25, 0.3, 0.35)
-        let timestampColor: SIMD4<Float> = dark ? .gray60 : .gray40
+        let headerColor: SIMD4<Float> = dark ? .rgba(0.98, 0.98, 1.0, 1.0) : .rgba(0.14, 0.16, 0.20, 1.0)
+        let timestampColor: SIMD4<Float> = dark ? .rgba(0.66, 0.69, 0.75, 1.0) : .rgba(0.45, 0.48, 0.54, 1.0)
         return VVChatTimelineStyle(
             theme: theme,
+            draftTheme: draftTheme,
             baseFont: baseFont,
+            draftFont: baseFont,
+            headerFont: NSFont.systemFont(ofSize: max(fontSize - 1.5, 11.5)),
+            timestampFont: NSFont.systemFont(ofSize: max(fontSize - 0.25, 12.5), weight: .medium),
             headerTextColor: headerColor,
             timestampTextColor: timestampColor,
-            userBubbleColor: bubbleColor,
-            userInsets: VVInsets(top: 6, left: 120, bottom: 6, right: 16),
-            assistantInsets: VVInsets(top: 6, left: 16, bottom: 6, right: 120),
-            backgroundColor: background
+            userBubbleColor: dark ? .rgba(0.20, 0.22, 0.25, 0.78) : .rgba(0.91, 0.93, 0.96, 0.92),
+            userBubbleBorderColor: dark ? .rgba(0.52, 0.56, 0.62, 0.32) : .rgba(0.56, 0.60, 0.68, 0.18),
+            userBubbleBorderWidth: 0.6,
+            userBubbleCornerRadius: 16,
+            userBubbleInsets: .init(top: 8, left: 14, bottom: 8, right: 14),
+            userBubbleMaxWidth: 560,
+            assistantBubbleEnabled: false,
+            assistantBubbleMaxWidth: 4000,
+            assistantBubbleAlignment: .leading,
+            systemBubbleEnabled: true,
+            systemBubbleColor: .clear,
+            systemBubbleBorderColor: .clear,
+            systemBubbleBorderWidth: 0,
+            systemBubbleInsets: .init(top: 0, left: 0, bottom: 0, right: 0),
+            systemBubbleMaxWidth: 4000,
+            systemBubbleAlignment: .center,
+            userHeaderEnabled: false,
+            assistantHeaderEnabled: false,
+            systemHeaderEnabled: false,
+            assistantHeaderTitle: "",
+            systemHeaderTitle: "",
+            userTimestampEnabled: true,
+            assistantTimestampEnabled: false,
+            systemTimestampEnabled: false,
+            bubbleMetadataMinWidth: 1,
+            headerSpacing: 1,
+            footerSpacing: 0,
+            timelineInsets: .init(top: 10, left: 20, bottom: 10, right: 20),
+            messageSpacing: 6,
+            userInsets: .init(top: 7, left: 20, bottom: 7, right: 20),
+            assistantInsets: .init(top: 3, left: 20, bottom: 4, right: 20),
+            systemInsets: .init(top: 15, left: 20, bottom: 15, right: 20),
+            backgroundColor: .clear
         )
     }
 
@@ -1713,6 +3286,7 @@ enum SampleData {
         case .border: return borderScene(size: size, config: configuration)
         case .dashedLine: return dashedLineScene(size: size, config: configuration)
         case .transform: return transformScene(size: size, config: configuration)
+        case .transitions: return transitionAnimationScene(size: size, configuration: configuration, state: transitionAnimationSnapshots(size: size, configuration: configuration, expanded: false), expanded: false)
         case .rule: return ruleScene(size: size, config: configuration)
         case .stack: return stackScene(size: size, config: configuration)
         case .layer: return layerScene(size: size, config: configuration)
@@ -2169,10 +3743,25 @@ enum SampleData {
 
     private static func gradientQuadScene(size: CGSize, config: PrimitiveSceneConfiguration) -> VVScene {
         var builder = VVSceneBuilder()
+        let fg = foregroundColor(for: config.backgroundColor)
         let pad: CGFloat = 40
         let gap: CGFloat = 28
         let tileW: CGFloat = 200
         let tileH: CGFloat = 100
+
+        builder.add(kind: .textRun(makeTextRun(
+            text: "Gradient Quad",
+            font: NSFont.systemFont(ofSize: 26, weight: .bold),
+            origin: CGPoint(x: pad, y: 18),
+            color: fg,
+            variant: .bold
+        )), zIndex: 2)
+        builder.add(kind: .textRun(makeTextRun(
+            text: "Single-pass gradients with proper rounded corners and directional control.",
+            font: NSFont.systemFont(ofSize: 13, weight: .regular),
+            origin: CGPoint(x: pad, y: 50),
+            color: SIMD4<Float>(fg.x, fg.y, fg.z, 0.62)
+        )), zIndex: 2)
 
         // Horizontal gradients
         let hGradients: [(SIMD4<Float>, SIMD4<Float>, String)] = [
@@ -2219,6 +3808,27 @@ enum SampleData {
             cornerRadius: config.cornerRadius,
             steps: 24
         )), zIndex: 1)
+
+        builder.add(kind: .gradientQuad(VVGradientQuadPrimitive(
+            frame: CGRect(x: pad, y: row3Y + 118, width: bigW, height: 120),
+            startColor: SIMD4(0.15, 0.65, 0.95, 1),
+            endColor: SIMD4(0.9, 0.28, 0.54, 1),
+            angle: -.pi / 4.5,
+            cornerRadii: VVCornerRadii(config.cornerRadius),
+            steps: 32
+        )), zIndex: 1)
+        builder.add(kind: .textRun(makeTextRun(
+            text: "Angled gradient",
+            font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            origin: CGPoint(x: pad + 18, y: row3Y + 132),
+            color: SIMD4<Float>(1, 1, 1, 0.88)
+        )), zIndex: 2)
+        builder.add(kind: .textRun(makeTextRun(
+            text: "The shader now clips the full fill once, instead of stacking many rounded strips.",
+            font: NSFont.systemFont(ofSize: 13, weight: .regular),
+            origin: CGPoint(x: pad + 18, y: row3Y + 156),
+            color: SIMD4<Float>(1, 1, 1, 0.7)
+        )), zIndex: 2)
 
         return builder.scene
     }
@@ -2637,8 +4247,8 @@ enum SampleData {
         let fg = foregroundColor(for: config.backgroundColor)
         let pad: CGFloat = 40
         let gap: CGFloat = 28
+        let borderColor = SIMD4(fg.x, fg.y, fg.z, 0.3)
 
-        // Image primitives show placeholder frames (no texture loaded, so we add background quads)
         let imageSizes: [(CGFloat, CGFloat, CGFloat)] = [
             (180, 120, 4),
             (120, 120, config.cornerRadius),
@@ -2650,30 +4260,19 @@ enum SampleData {
         for (w, h, cr) in imageSizes {
             let frame = CGRect(x: x, y: pad, width: w, height: h)
 
-            // Background to show the image area
             builder.add(kind: .quad(VVQuadPrimitive(
                 frame: frame,
                 color: SIMD4(fg.x, fg.y, fg.z, 0.08),
                 cornerRadius: cr
             )), zIndex: 0)
 
-            // Border outline
-            let borderTop = VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.minY), end: CGPoint(x: frame.maxX, y: frame.minY), thickness: 1, color: SIMD4(fg.x, fg.y, fg.z, 0.3))
-            let borderBottom = VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.maxY), end: CGPoint(x: frame.maxX, y: frame.maxY), thickness: 1, color: SIMD4(fg.x, fg.y, fg.z, 0.3))
-            let borderLeft = VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.minY), end: CGPoint(x: frame.minX, y: frame.maxY), thickness: 1, color: SIMD4(fg.x, fg.y, fg.z, 0.3))
-            let borderRight = VVLinePrimitive(start: CGPoint(x: frame.maxX, y: frame.minY), end: CGPoint(x: frame.maxX, y: frame.maxY), thickness: 1, color: SIMD4(fg.x, fg.y, fg.z, 0.3))
-            builder.add(kind: .line(borderTop), zIndex: 1)
-            builder.add(kind: .line(borderBottom), zIndex: 1)
-            builder.add(kind: .line(borderLeft), zIndex: 1)
-            builder.add(kind: .line(borderRight), zIndex: 1)
+            builder.add(kind: .quad(VVQuadPrimitive(
+                frame: frame,
+                color: SIMD4<Float>(0, 0, 0, 0),
+                cornerRadii: VVCornerRadii(cr),
+                border: VVBorder(width: 1, color: borderColor)
+            )), zIndex: 1)
 
-            // Diagonal cross to indicate image placeholder
-            let diag1 = VVLinePrimitive(start: CGPoint(x: frame.minX + 4, y: frame.minY + 4), end: CGPoint(x: frame.maxX - 4, y: frame.maxY - 4), thickness: 1, color: SIMD4(fg.x, fg.y, fg.z, 0.15))
-            let diag2 = VVLinePrimitive(start: CGPoint(x: frame.maxX - 4, y: frame.minY + 4), end: CGPoint(x: frame.minX + 4, y: frame.maxY - 4), thickness: 1, color: SIMD4(fg.x, fg.y, fg.z, 0.15))
-            builder.add(kind: .line(diag1), zIndex: 1)
-            builder.add(kind: .line(diag2), zIndex: 1)
-
-            // The actual image primitive (won't render visually without texture)
             builder.add(kind: .image(VVImagePrimitive(url: "placeholder://image\(Int(w))", frame: frame, cornerRadius: cr)), zIndex: 2)
             x += w + gap
         }
@@ -2692,6 +4291,12 @@ enum SampleData {
                 color: SIMD4(0.35, 0.6, 0.9, 0.2),
                 cornerRadius: cr
             )), zIndex: 0)
+            builder.add(kind: .quad(VVQuadPrimitive(
+                frame: frame,
+                color: SIMD4<Float>(0, 0, 0, 0),
+                cornerRadii: VVCornerRadii(cr),
+                border: VVBorder(width: 1, color: borderColor)
+            )), zIndex: 1)
             builder.add(kind: .image(VVImagePrimitive(url: "placeholder://corner\(i)", frame: frame, cornerRadius: cr)), zIndex: 2)
         }
 
@@ -3030,64 +4635,495 @@ enum SampleData {
     private static func transformScene(size: CGSize, config: PrimitiveSceneConfiguration) -> VVScene {
         let fg = foregroundColor(for: config.backgroundColor)
         var builder = VVSceneBuilder()
-        let inset: CGFloat = 60
+        let inset: CGFloat = 44
+        let cardSize = CGSize(width: 240, height: 170)
+        let spacing = CGSize(width: 36, height: 36)
+        let guideFill = SIMD4(fg.x, fg.y, fg.z, 0.04)
+        let guideBorder = SIMD4(fg.x, fg.y, fg.z, 0.12)
+        let ghostStroke = SIMD4(fg.x, fg.y, fg.z, 0.38)
+        let originColor = SIMD4<Float>(1, 1, 1, 0.9)
 
-        // Original rect (no transform)
-        let baseRect = CGRect(x: inset, y: inset, width: 80, height: 50)
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: baseRect,
-            color: SIMD4(fg.x, fg.y, fg.z, 0.3),
-            cornerRadii: VVCornerRadii(4)
-        )))
-
-        // Translated path (rect moved by transform)
-        var translatedBuilder = VVPathBuilder()
-        translatedBuilder.addRect(baseRect)
-        let translateT = VVTransform2D.identity.translated(by: CGPoint(x: 150, y: 0))
-        builder.add(kind: .path(translatedBuilder.build(
-            fill: SIMD4(0.3, 0.8, 0.5, 0.8),
-            transform: translateT
-        )))
-
-        // Scaled path
-        var scaledBuilder = VVPathBuilder()
-        scaledBuilder.addRect(CGRect(x: inset, y: inset + 100, width: 60, height: 40))
-        let scaleT = VVTransform2D.identity.scaled(x: 1.5, y: 2.0)
-        builder.add(kind: .path(scaledBuilder.build(
-            fill: SIMD4(0.5, 0.6, 0.95, 0.8),
-            transform: scaleT
-        )))
-
-        // Rotated star
-        var starBuilder = VVPathBuilder()
-        let cx: CGFloat = inset + 350
-        let cy: CGFloat = inset + 80
-        let outerR: CGFloat = 40
-        let innerR: CGFloat = 18
-        var starPoints: [CGPoint] = []
-        for i in 0..<10 {
-            let angle = CGFloat(i) * .pi / 5 - .pi / 2
-            let r: CGFloat = i % 2 == 0 ? outerR : innerR
-            starPoints.append(CGPoint(x: cx + r * cos(angle), y: cy + r * sin(angle)))
+        func card(at origin: CGPoint) -> CGRect {
+            CGRect(origin: origin, size: cardSize)
         }
-        starBuilder.addPolygon(starPoints)
-        let rotateT = VVTransform2D.identity.rotated(by: .pi / 6)
-        builder.add(kind: .path(starBuilder.build(
-            fill: SIMD4(0.95, 0.7, 0.2, 0.9),
-            transform: rotateT
-        )))
 
-        // Composed: scale + rotate
-        var composedBuilder = VVPathBuilder()
-        composedBuilder.addRect(CGRect(x: inset + 200, y: inset + 200, width: 60, height: 40))
-        let composedT = VVTransform2D.identity.scaled(by: 1.5).rotated(by: .pi / 8)
-        builder.add(kind: .path(composedBuilder.build(
-            fill: SIMD4(0.9, 0.4, 0.6, 0.8),
+        func rectPath(size: CGSize, cornerRadius: CGFloat, fill: SIMD4<Float>, stroke: VVStrokeStyle? = nil, transform: VVTransform2D) -> VVPathPrimitive {
+            var path = VVPathBuilder()
+            path.addRoundedRect(
+                CGRect(
+                    x: -size.width * 0.5,
+                    y: -size.height * 0.5,
+                    width: size.width,
+                    height: size.height
+                ),
+                cornerRadii: VVCornerRadii(cornerRadius)
+            )
+            return path.build(fill: fill, stroke: stroke, transform: transform)
+        }
+
+        func starPath(outerRadius: CGFloat, innerRadius: CGFloat, fill: SIMD4<Float>, stroke: VVStrokeStyle? = nil, transform: VVTransform2D) -> VVPathPrimitive {
+            var points: [CGPoint] = []
+            points.reserveCapacity(10)
+            for index in 0..<10 {
+                let angle = CGFloat(index) * .pi / 5 - .pi / 2
+                let radius = index.isMultiple(of: 2) ? outerRadius : innerRadius
+                points.append(CGPoint(x: cos(angle) * radius, y: sin(angle) * radius))
+            }
+            var path = VVPathBuilder()
+            path.addPolygon(points)
+            return path.build(fill: fill, stroke: stroke, transform: transform)
+        }
+
+        func addGuideCard(_ frame: CGRect) {
+            builder.add(kind: .quad(VVQuadPrimitive(
+                frame: frame,
+                color: guideFill,
+                cornerRadii: VVCornerRadii(18),
+                border: VVBorder(width: 1, color: guideBorder)
+            )), zIndex: 0)
+
+            let center = CGPoint(x: frame.midX, y: frame.midY)
+            builder.add(kind: .quad(VVQuadPrimitive(
+                frame: CGRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4),
+                color: originColor,
+                cornerRadii: VVCornerRadii(2)
+            )), zIndex: 3)
+        }
+
+        let topLeft = card(at: CGPoint(x: inset, y: inset))
+        let topRight = card(at: CGPoint(x: topLeft.maxX + spacing.width, y: inset))
+        let bottomLeft = card(at: CGPoint(x: inset, y: topLeft.maxY + spacing.height))
+        let bottomRight = card(at: CGPoint(x: topRight.minX, y: bottomLeft.minY))
+
+        for frame in [topLeft, topRight, bottomLeft, bottomRight] {
+            addGuideCard(frame)
+        }
+
+        let translatedStart = CGPoint(x: topLeft.midX - 54, y: topLeft.midY)
+        let translatedEnd = CGPoint(x: topLeft.midX + 44, y: topLeft.midY)
+        builder.add(kind: .path(rectPath(
+            size: CGSize(width: 76, height: 50),
+            cornerRadius: 12,
+            fill: SIMD4<Float>(0, 0, 0, 0),
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
+            transform: .identity.translated(by: translatedStart)
+        )), zIndex: 1)
+        builder.add(kind: .path(rectPath(
+            size: CGSize(width: 76, height: 50),
+            cornerRadius: 12,
+            fill: SIMD4(0.3, 0.8, 0.5, 0.82),
+            stroke: VVStrokeStyle(color: SIMD4(0.3, 0.8, 0.5, 1), width: 2),
+            transform: .identity.translated(by: translatedEnd)
+        )), zIndex: 2)
+
+        let scaleCenter = CGPoint(x: topRight.midX, y: topRight.midY)
+        builder.add(kind: .path(rectPath(
+            size: CGSize(width: 62, height: 42),
+            cornerRadius: 10,
+            fill: SIMD4<Float>(0, 0, 0, 0),
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
+            transform: .identity.translated(by: scaleCenter)
+        )), zIndex: 1)
+        builder.add(kind: .path(rectPath(
+            size: CGSize(width: 62, height: 42),
+            cornerRadius: 10,
+            fill: SIMD4(0.5, 0.6, 0.95, 0.82),
+            stroke: VVStrokeStyle(color: SIMD4(0.5, 0.6, 0.95, 1), width: 2),
+            transform: .identity
+                .scaled(x: 1.55, y: 1.95)
+                .translated(by: scaleCenter)
+        )), zIndex: 2)
+
+        let rotationCenter = CGPoint(x: bottomLeft.midX, y: bottomLeft.midY)
+        builder.add(kind: .path(starPath(
+            outerRadius: 42,
+            innerRadius: 18,
+            fill: SIMD4<Float>(0, 0, 0, 0),
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
+            transform: .identity.translated(by: rotationCenter)
+        )), zIndex: 1)
+        builder.add(kind: .path(starPath(
+            outerRadius: 42,
+            innerRadius: 18,
+            fill: SIMD4(0.95, 0.7, 0.2, 0.92),
+            stroke: VVStrokeStyle(color: SIMD4(0.95, 0.7, 0.2, 1), width: 2),
+            transform: .identity
+                .rotated(by: .pi / 6)
+                .translated(by: rotationCenter)
+        )), zIndex: 2)
+
+        let composedCenter = CGPoint(x: bottomRight.midX, y: bottomRight.midY)
+        builder.add(kind: .path(rectPath(
+            size: CGSize(width: 70, height: 44),
+            cornerRadius: 12,
+            fill: SIMD4<Float>(0, 0, 0, 0),
+            stroke: VVStrokeStyle(color: ghostStroke, width: 1.5),
+            transform: .identity.translated(by: composedCenter)
+        )), zIndex: 1)
+        builder.add(kind: .path(rectPath(
+            size: CGSize(width: 70, height: 44),
+            cornerRadius: 12,
+            fill: SIMD4(0.9, 0.4, 0.6, 0.84),
             stroke: VVStrokeStyle(color: SIMD4(0.9, 0.4, 0.6, 1), width: 2),
-            transform: composedT
-        )))
+            transform: .identity
+                .scaled(x: 1.45, y: 1.25)
+                .rotated(by: .pi / 8)
+                .translated(by: composedCenter)
+        )), zIndex: 2)
 
         return builder.scene
+    }
+
+    static func transitionAnimationSnapshots(
+        size: CGSize,
+        configuration: PrimitiveSceneConfiguration,
+        expanded: Bool
+    ) -> [String: VVLayoutAnimationSnapshot] {
+        let fg = foregroundColor(for: configuration.backgroundColor)
+        let env = VVLayoutEnvironment(scale: 1, defaultTextColor: fg, defaultCornerRadius: configuration.cornerRadius)
+        let width = min(max(540, size.width * 0.52), 720)
+        let mediaSize = expanded ? CGSize(width: 180, height: 156) : CGSize(width: 132, height: 112)
+        let copyWidth = max(260, width - mediaSize.width - 20)
+
+        let view = VVStack(spacing: 18, alignment: .leading) {
+            VVStack(spacing: 6, alignment: .leading) {
+                VText("Payment Summary", font: .headline, color: .white)
+                VText(
+                    expanded ? "3 items, delivery, payment method, and contact details." : "Compact order card with expandable detail rows.",
+                    font: .caption,
+                    color: SIMD4<Float>(1, 1, 1, 0.78),
+                    maxLines: expanded ? 2 : 1
+                )
+            }
+            .padding(18)
+            .frame(width: width)
+            .background(color: .indigo.withOpacity(0.16), cornerRadius: configuration.cornerRadius)
+                .id("hero")
+                .transition(.morph)
+                .animation(.spring(response: 0.34, dampingFraction: 0.78))
+
+            VVHStack(spacing: 14) {
+                VVImage(
+                    url: expanded ? "placeholder://hero-expanded" : "placeholder://hero-collapsed",
+                    size: mediaSize,
+                    cornerRadius: 16
+                )
+                    .id("media")
+                    .transition(.morph)
+
+                VVStack(spacing: 10, alignment: .leading) {
+                    VText("Design Review", font: .headline)
+                    VText(
+                        "Reusable motion for cards, details, and contextual expansion. Containers should size from content, not from manual scene math.",
+                        font: .body,
+                        color: fg.withOpacity(0.72),
+                        maxLines: expanded ? 3 : 2
+                    )
+                    VText("Shared Animation Layer", font: .caption, color: .amber)
+                    if expanded {
+                        VText(
+                            "Auto-layout shifts siblings while preserving identity.",
+                            font: .caption,
+                            color: fg.withOpacity(0.82),
+                            maxLines: 2
+                        )
+                            .padding(horizontal: 10, vertical: 8)
+                            .background(color: fg.withOpacity(0.06), cornerRadius: 10)
+                            .id("detail-line")
+                            .transition(.accordion)
+                    }
+                }
+                .padding(16)
+                .frame(width: copyWidth)
+                .background(color: fg.withOpacity(0.055), cornerRadius: 16)
+                .id("copy")
+                .transition(.morph)
+            }
+            .id("row")
+            .transition(.morph)
+
+            if expanded {
+                VVStack(spacing: 10, alignment: .leading) {
+                    VVHStack(spacing: 18) {
+                        VText("Shipping", font: .caption, color: fg.withOpacity(0.62))
+                            .frame(width: 88)
+                        VText("Express delivery", font: .caption, color: fg.withOpacity(0.95))
+                    }
+                    VVHStack(spacing: 18) {
+                        VText("Payment", font: .caption, color: fg.withOpacity(0.62))
+                            .frame(width: 88)
+                        VText("Visa ending in 4021", font: .caption, color: fg.withOpacity(0.95))
+                    }
+                    VVHStack(spacing: 18) {
+                        VText("Contact", font: .caption, color: fg.withOpacity(0.62))
+                            .frame(width: 88)
+                        VText("notifications@vv.dev", font: .caption, color: fg.withOpacity(0.95))
+                    }
+                }
+                .padding(18)
+                .background(color: fg.withOpacity(0.045), cornerRadius: configuration.cornerRadius)
+                .border(color: fg.withOpacity(0.12), width: 1, cornerRadii: VVCornerRadii(configuration.cornerRadius))
+                .frame(width: width)
+                .id("accordion")
+                .transition(.accordion)
+                .animation(.spring(response: 0.4, dampingFraction: 0.8))
+            }
+        }
+        .padding(40)
+
+        return view.renderAnimationSnapshots(width: width, env: env)
+    }
+
+    static func transitionAnimationScene(
+        size: CGSize,
+        configuration: PrimitiveSceneConfiguration,
+        state: [String: VVLayoutAnimationSnapshot],
+        expanded: Bool
+    ) -> VVScene {
+        let fg = foregroundColor(for: configuration.backgroundColor)
+        let warm = SIMD4<Float>(0.96, 0.67, 0.18, 1)
+        let cool = SIMD4<Float>(0.26, 0.73, 0.88, 1)
+        let canvas = CGRect(x: 44, y: 36, width: max(1080, size.width - 88), height: max(740, size.height - 72))
+        let stage = CGRect(x: canvas.minX + 28, y: canvas.minY + 74, width: min(canvas.width - 300, 760), height: canvas.height - 118)
+        let rail = CGRect(x: stage.maxX + 24, y: stage.minY, width: 220, height: stage.height)
+        let env = VVLayoutEnvironment(scale: 1, defaultTextColor: fg, defaultCornerRadius: configuration.cornerRadius)
+        let checkpoints = [
+            ("Stable identity via `.id(...)`", cool),
+            ("Reusable transitions: `.morph` and `.accordion`", warm),
+            ("Shared spring animation driver", cool),
+            ("Works for arbitrary VVView trees", warm)
+        ]
+
+        var children: [any VVView] = [
+            transitionPositioned(
+                canvas,
+                child: transitionGradientPanel(
+                    size: canvas.size,
+                    start: SIMD4<Float>(0.08, 0.09, 0.14, 0.92),
+                    end: SIMD4<Float>(0.05, 0.09, 0.12, 0.98),
+                    cornerRadius: 30,
+                    angle: -.pi / 7,
+                    border: VVBorder(width: 1, color: SIMD4<Float>(fg.x, fg.y, fg.z, 0.09))
+                )
+            ),
+            transitionPositioned(
+                CGRect(x: canvas.minX + 30, y: canvas.minY + 22, width: canvas.width - 60, height: 56),
+                child: VVStack(spacing: 6, alignment: .leading) {
+                    VText("First-Class VVView Animations", font: .title)
+                    VText("The sample below is laid out as VVView content inside animated frames instead of manual text overlays.", font: .caption, color: fg.withOpacity(0.64))
+                }
+            ),
+            transitionPositioned(
+                stage,
+                child: transitionPanel(size: stage.size, color: SIMD4<Float>(0.07, 0.08, 0.11, 0.9), cornerRadius: 24, border: VVBorder(width: 1, color: fg.withOpacity(0.08)))
+            ),
+            transitionPositioned(
+                CGRect(x: stage.minX + 18, y: stage.minY + 18, width: stage.width - 36, height: 150),
+                child: transitionGradientPanel(
+                    size: CGSize(width: stage.width - 36, height: 150),
+                    start: SIMD4<Float>(0.18, 0.2, 0.34, 0.56),
+                    end: SIMD4<Float>(0.08, 0.09, 0.12, 0.08),
+                    cornerRadius: 18,
+                    angle: -.pi / 5
+                )
+            ),
+            transitionPositioned(
+                CGRect(x: stage.minX + 28, y: stage.minY + 24, width: stage.width - 56, height: 40),
+                child: VVStack(spacing: 4, alignment: .leading) {
+                    VText(expanded ? "Checkout Flow · Expanded" : "Checkout Flow · Compact", font: .caption, color: fg.withOpacity(0.74))
+                    VText("The animated regions below clip and size their own content.", font: .caption, color: fg.withOpacity(0.52))
+                }
+            ),
+            transitionPositioned(
+                rail,
+                child: transitionPanel(size: rail.size, color: SIMD4<Float>(0.06, 0.07, 0.1, 0.86), cornerRadius: 22, border: VVBorder(width: 1, color: fg.withOpacity(0.08)))
+            ),
+            transitionPositioned(
+                CGRect(x: rail.minX + 18, y: rail.minY + 18, width: rail.width - 36, height: 60),
+                child: VVStack(spacing: 6, alignment: .leading) {
+                    VText(expanded ? "Expanded State" : "Collapsed State", font: .headline)
+                    VText(expanded ? "Details are inserted and the card stack reflows without manual positioning." : "Replay or enable Auto Loop to inspect the transition path.", font: .caption, color: fg.withOpacity(0.66), maxLines: 3)
+                }
+            )
+        ]
+
+        for (index, entry) in checkpoints.enumerated() {
+            let y = rail.minY + 116 + CGFloat(index) * 82
+            children.append(
+                transitionPositioned(
+                    CGRect(x: rail.minX + 18, y: y, width: rail.width - 36, height: 60),
+                    child: VVHStack(spacing: 12) {
+                        VRect(color: entry.1, cornerRadius: 5).frame(width: 10, height: 10)
+                        VText(entry.0, font: .caption, color: fg.withOpacity(0.92), maxLines: 2)
+                    }
+                    .padding(16)
+                    .background(color: fg.withOpacity(0.04), cornerRadius: 14)
+                    .border(color: fg.withOpacity(0.06), width: 1, cornerRadii: VVCornerRadii(14))
+                )
+            )
+        }
+
+        if let rowSnapshot = state["row"] {
+            let rowFrame = transitionSnapshotFrame(rowSnapshot)
+            children.append(
+                transitionPositioned(
+                    rowFrame,
+                    child: transitionPanel(
+                        size: rowFrame.size,
+                        color: SIMD4<Float>(fg.x, fg.y, fg.z, 0.045 * rowSnapshot.opacity),
+                        cornerRadius: 20
+                    ).opacity(rowSnapshot.opacity)
+                )
+            )
+        }
+
+        if let heroSnapshot = state["hero"] {
+            let frame = transitionSnapshotFrame(heroSnapshot)
+            children.append(
+                transitionPositioned(
+                    frame,
+                    child: VVZStack(children: [
+                        transitionGradientPanel(
+                            size: frame.size,
+                            start: SIMD4<Float>(0.27, 0.45, 0.98, 0.96 * heroSnapshot.opacity),
+                            end: SIMD4<Float>(0.88, 0.31, 0.56, 0.92 * heroSnapshot.opacity),
+                            cornerRadius: configuration.cornerRadius,
+                            angle: -.pi / 8
+                        ),
+                        VVStack(spacing: 6, alignment: .leading) {
+                            VText("Payment Summary", font: .headline, color: .white)
+                            VText(expanded ? "3 items, delivery, payment method, and contact details." : "Compact order card with expandable detail rows.", font: .caption, color: SIMD4<Float>(1, 1, 1, 0.8), maxLines: 2)
+                        }
+                        .padding(18)
+                    ]).opacity(heroSnapshot.opacity)
+                )
+            )
+        }
+
+        if let mediaSnapshot = state["media"] {
+            let frame = transitionSnapshotFrame(mediaSnapshot)
+            children.append(
+                transitionPositioned(
+                    frame,
+                    child: VVImage(
+                        url: expanded ? "placeholder://hero-expanded" : "placeholder://hero-collapsed",
+                        size: frame.size,
+                        cornerRadius: 16
+                    )
+                    .opacity(mediaSnapshot.opacity)
+                    .border(color: SIMD4<Float>(1, 1, 1, 0.08 * mediaSnapshot.opacity), width: 1, cornerRadii: VVCornerRadii(16))
+                )
+            )
+        }
+
+        if let copySnapshot = state["copy"] {
+            let frame = transitionSnapshotFrame(copySnapshot)
+            children.append(
+                transitionPositioned(
+                    frame,
+                    child: VVStack(spacing: 10, alignment: .leading) {
+                        VText("Design Review", font: .headline)
+                        VText("Reusable motion for cards, details, and contextual expansion. Containers should size from content, not from manual scene math.", font: .body, color: fg.withOpacity(0.72), maxLines: expanded ? 3 : 2)
+                        VText("Shared Animation Layer", font: .caption, color: .amber)
+                    }
+                    .padding(16)
+                    .background(color: fg.withOpacity(0.055), cornerRadius: 16)
+                    .opacity(copySnapshot.opacity)
+                )
+            )
+        }
+
+        if let detailSnapshot = state["detail-line"] {
+            let frame = transitionSnapshotFrame(detailSnapshot)
+            children.append(
+                transitionPositioned(
+                    frame,
+                    child: VText("Auto-layout shifts siblings while preserving identity.", font: .caption, color: fg.withOpacity(0.82), maxLines: 2)
+                        .padding(horizontal: 10, vertical: 8)
+                        .background(color: fg.withOpacity(0.06), cornerRadius: 10)
+                        .opacity(detailSnapshot.opacity)
+                )
+            )
+        }
+
+        if let accordionSnapshot = state["accordion"] {
+            let frame = transitionSnapshotFrame(accordionSnapshot)
+            children.append(
+                transitionPositioned(
+                    frame,
+                    child: VVStack(spacing: 10, alignment: .leading) {
+                        VVHStack(spacing: 18) {
+                            VText("Shipping", font: .caption, color: fg.withOpacity(0.62)).frame(width: 88)
+                            VText("Express delivery", font: .caption, color: fg.withOpacity(0.95))
+                        }
+                        VVHStack(spacing: 18) {
+                            VText("Payment", font: .caption, color: fg.withOpacity(0.62)).frame(width: 88)
+                            VText("Visa ending in 4021", font: .caption, color: fg.withOpacity(0.95))
+                        }
+                        VVHStack(spacing: 18) {
+                            VText("Contact", font: .caption, color: fg.withOpacity(0.62)).frame(width: 88)
+                            VText("notifications@vv.dev", font: .caption, color: fg.withOpacity(0.95))
+                        }
+                    }
+                    .padding(18)
+                    .background(color: fg.withOpacity(0.045), cornerRadius: configuration.cornerRadius)
+                    .border(color: fg.withOpacity(0.14 * accordionSnapshot.opacity), width: 1, cornerRadii: VVCornerRadii(configuration.cornerRadius))
+                    .opacity(accordionSnapshot.opacity)
+                )
+            )
+        }
+
+        return VVZStack(children: children).renderScene(width: canvas.maxX + 40, env: env)
+    }
+
+    private static func transitionSnapshotFrame(_ snapshot: VVLayoutAnimationSnapshot) -> CGRect {
+        CGRect(
+            x: snapshot.frame.midX - snapshot.frame.width * snapshot.scale * 0.5,
+            y: snapshot.frame.midY - snapshot.frame.height * snapshot.scale * 0.5,
+            width: snapshot.frame.width * snapshot.scale,
+            height: snapshot.frame.height * snapshot.scale
+        )
+    }
+
+    private static func transitionPositioned(_ frame: CGRect, child: any VVView) -> VVPositionedFrame {
+        VVPositionedFrame(frame: frame, child: child, clipRect: CGRect(origin: .zero, size: frame.size))
+    }
+
+    private static func transitionPanel(
+        size: CGSize,
+        color: SIMD4<Float>,
+        cornerRadius: CGFloat,
+        border: VVBorder? = nil
+    ) -> VVNodeView {
+        let base = VVQuadPrimitive(frame: CGRect(origin: .zero, size: size), color: color, cornerRadii: VVCornerRadii(cornerRadius))
+        if let border {
+            let borderQuad = VVQuadPrimitive(frame: CGRect(origin: .zero, size: size), color: .clear, cornerRadii: VVCornerRadii(cornerRadius), border: border)
+            return VVNodeView(node: VVNode(children: [VVNode(primitives: [.quad(base)]), VVNode(zIndex: 1, primitives: [.quad(borderQuad)])]), size: size)
+        }
+        return VVNodeView(node: VVNode(primitives: [.quad(base)]), size: size)
+    }
+
+    private static func transitionGradientPanel(
+        size: CGSize,
+        start: SIMD4<Float>,
+        end: SIMD4<Float>,
+        cornerRadius: CGFloat,
+        angle: CGFloat,
+        border: VVBorder? = nil
+    ) -> VVNodeView {
+        let gradient = VVGradientQuadPrimitive(
+            frame: CGRect(origin: .zero, size: size),
+            startColor: start,
+            endColor: end,
+            angle: angle,
+            cornerRadii: VVCornerRadii(cornerRadius),
+            steps: 32
+        )
+        if let border {
+            let borderQuad = VVQuadPrimitive(frame: CGRect(origin: .zero, size: size), color: .clear, cornerRadii: VVCornerRadii(cornerRadius), border: border)
+            return VVNodeView(node: VVNode(children: [VVNode(primitives: [.gradientQuad(gradient)]), VVNode(zIndex: 1, primitives: [.quad(borderQuad)])]), size: size)
+        }
+        return VVNodeView(node: VVNode(primitives: [.gradientQuad(gradient)]), size: size)
     }
 
     private static func vvviewScene(size: CGSize, config: PrimitiveSceneConfiguration) -> VVScene {
@@ -3097,39 +5133,48 @@ enum SampleData {
         let width = max(size.width - 80, 600)
 
         let view = VVStack(spacing: 24) {
-            // Card 1: basic text card
             VVStack(spacing: 8) {
                 VText("VVView Declarative DSL", font: .title)
                 VDivider()
-                VText("Build Metal-rendered UIs without coordinate math.", font: .body)
-                VText("Uses @resultBuilder for SwiftUI-like syntax.", font: .caption, color: fg.withOpacity(0.6))
+                VText("Build boxes, rows, surfaces, and media cards without dropping into manual coordinates.", font: .body)
+                VText("This pass exercises padding, background, border, spacer, shadow, and image composition.", font: .caption, color: fg.withOpacity(0.6))
             }
             .padding(20)
             .background(color: fg.withOpacity(0.06), cornerRadius: cr)
 
-            // Card 2: VVHStack with colored tiles
-            VVHStack(spacing: 12) {
-                for color in [SIMD4<Float>.blue, .rose, .teal, .amber] {
-                    VVStack(spacing: 6) {
-                        VRect(color: color.withOpacity(0.85), cornerRadius: cr).frame(height: 60)
-                        VText("Tile", font: .caption, color: fg.withOpacity(0.5))
+            VVStack(spacing: 10) {
+                VText("Container + Flexible Row", font: .headline)
+                VVHStack(spacing: 12) {
+                    VVImage(url: "placeholder://hero", size: CGSize(width: 96, height: 72), cornerRadius: cr)
+                    VVStack(spacing: 6, alignment: .leading) {
+                        VText("Media Card", font: .headline)
+                        VText("The row uses a real spacer instead of equal-width slicing.", font: .caption, color: fg.withOpacity(0.65))
+                    }
+                    VSpacer(minLength: 12)
+                    VVStack(spacing: 6, alignment: .trailing) {
+                        VText("LIVE", font: .caption, color: .teal)
+                        VText("12:45", font: .headline)
                     }
                 }
             }
+            .padding(18)
+            .background(color: fg.withOpacity(0.05), cornerRadius: cr)
+            .border(color: fg.withOpacity(0.1), width: 1, cornerRadii: VVCornerRadii(cr))
 
-            // Card 3: nested layout
             VVStack(spacing: 12) {
-                VText("Nested Layout", font: .headline)
+                VText("Basic UI Blocks", font: .headline)
                 VVHStack(spacing: 16) {
                     VVStack(spacing: 8) {
-                        VText("Left Column", font: .body)
+                        VText("Panel", font: .body)
                         VRect(color: .indigo.withOpacity(0.3), cornerRadius: 4).frame(height: 40)
                         VRect(color: .indigo.withOpacity(0.2), cornerRadius: 4).frame(height: 30)
+                        VRect(color: .indigo.withOpacity(0.14), cornerRadius: 4).frame(height: 18)
                     }
                     VVStack(spacing: 8) {
-                        VText("Right Column", font: .body)
+                        VText("Sidebar", font: .body)
                         VRect(color: .teal.withOpacity(0.3), cornerRadius: 4).frame(height: 30)
                         VRect(color: .teal.withOpacity(0.2), cornerRadius: 4).frame(height: 40)
+                        VRect(color: .teal.withOpacity(0.14), cornerRadius: 4).frame(height: 24)
                     }
                 }
             }
@@ -3137,27 +5182,38 @@ enum SampleData {
             .background(color: fg.withOpacity(0.04), cornerRadius: cr)
             .border(color: fg.withOpacity(0.1), width: 1, cornerRadii: VVCornerRadii(cr))
 
-            // Card 4: shadow demo
-            VVStack(spacing: 8) {
-                VText("Shadow & Opacity", font: .headline)
-                VText("Cards with depth and layering effects.", font: .body, color: fg.withOpacity(0.7))
-            }
-            .padding(20)
-            .background(color: .darkSurface, cornerRadius: cr)
-            .shadow(color: .black.withOpacity(0.4), spread: 12, cornerRadii: VVCornerRadii(cr))
+            VVHStack(spacing: 16) {
+                VVStack(spacing: 8, alignment: .leading) {
+                    VText("Accordion State A", font: .headline)
+                    VText("Expanded content can be represented with stacked blocks and clip-driven transitions.", font: .caption, color: fg.withOpacity(0.65))
+                    VRect(color: .amber.withOpacity(0.25), cornerRadius: 8).frame(height: 42)
+                    VRect(color: .amber.withOpacity(0.16), cornerRadius: 8).frame(height: 32)
+                    VRect(color: .amber.withOpacity(0.1), cornerRadius: 8).frame(height: 20)
+                }
+                .padding(18)
+                .background(color: .darkSurface, cornerRadius: cr)
+                .shadow(color: .black.withOpacity(0.25), spread: 10, cornerRadii: VVCornerRadii(cr))
 
-            // Card 5: conditional content
+                VVStack(spacing: 8, alignment: .leading) {
+                    VText("Accordion State B", font: .headline)
+                    VText("Collapsed content keeps the same shell while layout above and below remains composable.", font: .caption, color: fg.withOpacity(0.65))
+                    VRect(color: .rose.withOpacity(0.22), cornerRadius: 8).frame(height: 18)
+                }
+                .padding(18)
+                .background(color: fg.withOpacity(0.05), cornerRadius: cr)
+                .border(color: fg.withOpacity(0.12), width: 1, cornerRadii: VVCornerRadii(cr))
+            }
+
             VVStack(spacing: 8) {
                 VText("Conditional Content", font: .headline)
                 if config.cornerRadius > 10 {
-                    VText("Corner radius > 10 (rounded)", font: .body, color: .teal)
+                    VText("Rounded shell active", font: .body, color: .teal)
                 } else {
-                    VText("Corner radius <= 10 (sharp)", font: .body, color: .amber)
+                    VText("Sharper shell active", font: .body, color: .amber)
                 }
                 VDivider(color: fg.withOpacity(0.15))
-                VText("for-in loops supported too:", font: .caption, color: fg.withOpacity(0.5))
                 for i in 1...3 {
-                    VText("  Item \(i)", font: .code, color: fg.withOpacity(0.7))
+                    VText("Action \(i)", font: .code, color: fg.withOpacity(0.7))
                 }
             }
             .padding(16)

@@ -3,12 +3,67 @@ import CoreGraphics
 // MARK: - Layout Constraint
 
 public struct VVLayoutConstraint: Sendable {
+    public var minWidth: CGFloat
+    public var idealWidth: CGFloat?
     public var maxWidth: CGFloat
+    public var minHeight: CGFloat
+    public var idealHeight: CGFloat?
     public var maxHeight: CGFloat
 
-    public init(maxWidth: CGFloat, maxHeight: CGFloat = .greatestFiniteMagnitude) {
+    public init(
+        minWidth: CGFloat = 0,
+        idealWidth: CGFloat? = nil,
+        maxWidth: CGFloat,
+        minHeight: CGFloat = 0,
+        idealHeight: CGFloat? = nil,
+        maxHeight: CGFloat = .greatestFiniteMagnitude
+    ) {
+        self.minWidth = minWidth
+        self.idealWidth = idealWidth
         self.maxWidth = maxWidth
+        self.minHeight = minHeight
+        self.idealHeight = idealHeight
         self.maxHeight = maxHeight
+    }
+
+    public var proposedWidth: CGFloat {
+        if let idealWidth {
+            return min(max(idealWidth, minWidth), maxWidth)
+        }
+        return maxWidth
+    }
+
+    public var proposedHeight: CGFloat {
+        if let idealHeight {
+            return min(max(idealHeight, minHeight), maxHeight)
+        }
+        return maxHeight
+    }
+
+    public var hasBoundedWidth: Bool {
+        maxWidth.isFinite
+    }
+
+    public var hasBoundedHeight: Bool {
+        maxHeight.isFinite
+    }
+
+    public func insetBy(dx: CGFloat, dy: CGFloat) -> VVLayoutConstraint {
+        VVLayoutConstraint(
+            minWidth: max(0, minWidth - dx),
+            idealWidth: idealWidth.map { max(0, $0 - dx) },
+            maxWidth: max(0, maxWidth - dx),
+            minHeight: max(0, minHeight - dy),
+            idealHeight: idealHeight.map { max(0, $0 - dy) },
+            maxHeight: max(0, maxHeight - dy)
+        )
+    }
+
+    public func clamped(size: CGSize) -> CGSize {
+        CGSize(
+            width: min(max(size.width, minWidth), maxWidth),
+            height: min(max(size.height, minHeight), maxHeight)
+        )
     }
 }
 
@@ -20,10 +75,18 @@ public struct VVViewLayout: Sendable {
 
     public init(size: CGSize, node: VVNode) {
         self.size = size
-        self.node = node
+        var resolvedNode = node
+        if resolvedNode.layoutSize == nil {
+            resolvedNode.layoutSize = size
+        }
+        self.node = resolvedNode
     }
 
     public static let empty = VVViewLayout(size: .zero, node: VVNode())
+
+    public func animationSnapshots() -> [String: VVLayoutAnimationSnapshot] {
+        node.animationSnapshots()
+    }
 }
 
 // MARK: - VVView Protocol

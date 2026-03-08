@@ -1,5 +1,52 @@
 import CoreGraphics
 
+private enum VVHorizontalSizingBehavior {
+    case fixed
+    case compressible
+    case spacer(minLength: CGFloat)
+}
+
+private func vvHorizontalSizingBehavior(for child: any VVView) -> VVHorizontalSizingBehavior {
+    switch child {
+    case let spacer as VSpacer:
+        return .spacer(minLength: max(spacer.width, spacer.minLength))
+    case is VVImage, is VVNodeView, is VVPositionedFrame:
+        return .fixed
+    case let rect as VRect:
+        return rect.width == nil ? .compressible : .fixed
+    case is VText, is VVTextBlockView, is VVStack, is VVHStack, is VVZStack, is VVGroup:
+        return .compressible
+    case let modifier as VVFrameModifier:
+        return modifier.width == nil ? vvHorizontalSizingBehavior(for: modifier.child) : .fixed
+    case let modifier as VVPaddingModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVBackgroundModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVBorderModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVShadowModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVOpacityModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVClipModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVZIndexModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVOffsetModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVTransformModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVIdentityModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVTransitionModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    case let modifier as VVAnimationModifier:
+        return vvHorizontalSizingBehavior(for: modifier.child)
+    default:
+        return .compressible
+    }
+}
+
 // MARK: - Alignment
 
 public enum VVAlignment: Sendable {
@@ -50,7 +97,7 @@ public struct VVStack: VVView {
             maxWidth = max(maxWidth, childLayout.size.width)
         }
 
-        let containerWidth = min(constraint.maxWidth, max(maxWidth, constraint.maxWidth))
+        let containerWidth = max(maxWidth, constraint.minWidth)
         var nodes: [VVNode] = []
 
         for (childLayout, childY) in childLayouts {
@@ -67,7 +114,7 @@ public struct VVStack: VVView {
         }
 
         return VVViewLayout(
-            size: CGSize(width: containerWidth, height: y),
+            size: constraint.clamped(size: CGSize(width: containerWidth, height: y)),
             node: VVNode(children: nodes)
         )
     }
@@ -96,16 +143,121 @@ public struct VVHStack: VVView {
         guard !children.isEmpty else { return .empty }
 
         let totalSpacing = spacing * CGFloat(max(0, children.count - 1))
-        let availableWidth = max(0, constraint.maxWidth - totalSpacing)
-        let childWidth = availableWidth / CGFloat(children.count)
+        let availableWidth = constraint.hasBoundedWidth
+            ? max(0, constraint.maxWidth - totalSpacing)
+            : .greatestFiniteMagnitude
+        let behaviors = children.map(vvHorizontalSizingBehavior)
 
-        var x: CGFloat = 0
+        var naturalLayouts: [Int: VVViewLayout] = [:]
+        var naturalWidths: [Int: CGFloat] = [:]
+        var fixedWidth: CGFloat = 0
+        var compressibleWidth: CGFloat = 0
+        var spacerMinWidth: CGFloat = 0
         var maxHeight: CGFloat = 0
-        var childLayouts: [(layout: VVViewLayout, x: CGFloat)] = []
 
         for (index, child) in children.enumerated() {
-            let childConstraint = VVLayoutConstraint(maxWidth: childWidth, maxHeight: constraint.maxHeight)
-            let childLayout = child.layout(in: env, constraint: childConstraint)
+            switch behaviors[index] {
+            case .spacer(let minLength):
+                spacerMinWidth += minLength
+                maxHeight = max(maxHeight, minLength > 0 ? minLength : 0)
+            case .fixed, .compressible:
+                let naturalConstraint = VVLayoutConstraint(
+                    minWidth: 0,
+                    idealWidth: nil,
+                    maxWidth: .greatestFiniteMagnitude,
+                    minHeight: constraint.minHeight,
+                    idealHeight: constraint.idealHeight,
+                    maxHeight: constraint.maxHeight
+                )
+                let naturalLayout = child.layout(in: env, constraint: naturalConstraint)
+                naturalLayouts[index] = naturalLayout
+                naturalWidths[index] = naturalLayout.size.width
+                switch behaviors[index] {
+                case .fixed:
+                    fixedWidth += naturalLayout.size.width
+                case .compressible:
+                    compressibleWidth += naturalLayout.size.width
+                case .spacer:
+                    break
+                }
+                maxHeight = max(maxHeight, naturalLayout.size.height)
+            }
+        }
+
+        let boundedContentWidth = constraint.hasBoundedWidth
+            ? max(0, availableWidth - spacerMinWidth)
+            : availableWidth
+        let compressibleBudget = constraint.hasBoundedWidth
+            ? max(0, boundedContentWidth - fixedWidth)
+            : compressibleWidth
+        let compressionRatio: CGFloat = {
+            guard constraint.hasBoundedWidth, compressibleWidth > compressibleBudget, compressibleWidth > 0 else { return 1 }
+            return max(0, compressibleBudget / compressibleWidth)
+        }()
+
+        var resolvedLayouts: [Int: VVViewLayout] = [:]
+        var consumedNonSpacerWidth: CGFloat = 0
+
+        for (index, child) in children.enumerated() {
+            switch behaviors[index] {
+            case .spacer:
+                continue
+            case .fixed:
+                if let naturalLayout = naturalLayouts[index] {
+                    resolvedLayouts[index] = naturalLayout
+                    consumedNonSpacerWidth += naturalLayout.size.width
+                    maxHeight = max(maxHeight, naturalLayout.size.height)
+                }
+            case .compressible:
+                let naturalWidth = naturalWidths[index] ?? 0
+                let targetWidth = constraint.hasBoundedWidth ? max(0, naturalWidth * compressionRatio) : naturalWidth
+                let childConstraint = VVLayoutConstraint(
+                    minWidth: 0,
+                    idealWidth: targetWidth,
+                    maxWidth: max(0, targetWidth),
+                    minHeight: constraint.minHeight,
+                    idealHeight: constraint.idealHeight,
+                    maxHeight: constraint.maxHeight
+                )
+                let childLayout = child.layout(in: env, constraint: childConstraint)
+                resolvedLayouts[index] = childLayout
+                consumedNonSpacerWidth += childLayout.size.width
+                maxHeight = max(maxHeight, childLayout.size.height)
+            }
+        }
+
+        let spacerIndexes = children.indices.filter {
+            if case .spacer = behaviors[$0] { return true }
+            return false
+        }
+        let remainingWidth = constraint.hasBoundedWidth
+            ? max(0, availableWidth - consumedNonSpacerWidth)
+            : spacerMinWidth
+        let extraSpacerWidth = spacerIndexes.isEmpty ? 0 : remainingWidth / CGFloat(spacerIndexes.count)
+
+        var x: CGFloat = 0
+        var childLayouts: [(layout: VVViewLayout, x: CGFloat)] = []
+
+        for index in children.indices {
+            let childLayout: VVViewLayout
+            switch behaviors[index] {
+            case .spacer(let minLength):
+                let spacerWidth = constraint.hasBoundedWidth ? max(minLength, extraSpacerWidth) : minLength
+                let spacerLayout = children[index].layout(
+                    in: env,
+                    constraint: VVLayoutConstraint(
+                        minWidth: spacerWidth,
+                        idealWidth: spacerWidth,
+                        maxWidth: spacerWidth,
+                        minHeight: 0,
+                        idealHeight: nil,
+                        maxHeight: constraint.maxHeight
+                    )
+                )
+                childLayout = spacerLayout
+            case .fixed, .compressible:
+                childLayout = resolvedLayouts[index] ?? naturalLayouts[index] ?? .empty
+            }
             childLayouts.append((childLayout, x))
             x += childLayout.size.width
             if index < children.count - 1 {
@@ -129,7 +281,7 @@ public struct VVHStack: VVView {
         }
 
         return VVViewLayout(
-            size: CGSize(width: x, height: maxHeight),
+            size: constraint.clamped(size: CGSize(width: x, height: maxHeight)),
             node: VVNode(children: nodes)
         )
     }
@@ -170,7 +322,7 @@ public struct VVZStack: VVView {
         }
 
         return VVViewLayout(
-            size: CGSize(width: maxWidth, height: maxHeight),
+            size: constraint.clamped(size: CGSize(width: maxWidth, height: maxHeight)),
             node: VVNode(children: nodes)
         )
     }

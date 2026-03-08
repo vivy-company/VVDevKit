@@ -1207,37 +1207,16 @@ public final class MetalTextView: MTKView {
     }
 
     private func renderPrimitive(_ primitive: VVPrimitive, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
+        let transform = primitive.transform
         switch primitive.kind {
         case .quad(let quad):
-            let instance = QuadInstance(
-                position: SIMD2<Float>(Float(quad.frame.origin.x), Float(quad.frame.origin.y)),
-                size: SIMD2<Float>(Float(quad.frame.width), Float(quad.frame.height)),
-                color: quad.color,
-                cornerRadius: Float(quad.cornerRadius)
-            )
-            if let buffer = renderer.makeBuffer(for: [instance]) {
-                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
-            }
+            renderQuadPrimitive(quad, transform: transform, encoder: encoder, renderer: renderer)
 
         case .gradientQuad(let quad):
-            renderGradientQuad(quad, encoder: encoder, renderer: renderer)
+            renderGradientQuad(quad, transform: transform, encoder: encoder, renderer: renderer)
 
         case .line(let line):
-            let minX = min(line.start.x, line.end.x)
-            let minY = min(line.start.y, line.end.y)
-            let width = abs(line.end.x - line.start.x)
-            let height = abs(line.end.y - line.start.y)
-            let rectWidth = width > 0 ? width : line.thickness
-            let rectHeight = height > 0 ? height : line.thickness
-            let instance = LineInstance(
-                position: SIMD2<Float>(Float(minX), Float(minY)),
-                width: Float(rectWidth),
-                height: Float(rectHeight),
-                color: line.color
-            )
-            if let buffer = renderer.makeBuffer(for: [instance]) {
-                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
-            }
+            renderLinePrimitive(line, transform: transform, encoder: encoder, renderer: renderer)
 
         case .bullet(let bullet):
             switch bullet.type {
@@ -1275,17 +1254,25 @@ public final class MetalTextView: MTKView {
         case .image(let image):
             let borderColor: SIMD4<Float> = .gray(0.35)
             let background: SIMD4<Float> = .gray(0.12)
+            let frame = transformed(rect: image.frame, by: transform)
             let border = QuadInstance(
-                position: SIMD2<Float>(Float(image.frame.origin.x), Float(image.frame.origin.y)),
-                size: SIMD2<Float>(Float(image.frame.width), Float(image.frame.height)),
-                color: borderColor,
+                position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
+                size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
+                color: SIMD4<Float>(borderColor.x, borderColor.y, borderColor.z, borderColor.w * image.opacity),
                 cornerRadius: Float(image.cornerRadius)
             )
-            let innerFrame = image.frame.insetBy(dx: 1, dy: 1)
+            let innerFrame = frame.insetBy(dx: 1, dy: 1)
+            var fillColor = background
+            fillColor.w *= image.opacity
+            if image.grayscale {
+                let luminance = (fillColor.x * 0.299) + (fillColor.y * 0.587) + (fillColor.z * 0.114)
+                fillColor = SIMD4<Float>(repeating: luminance)
+                fillColor.w = background.w * image.opacity
+            }
             let fill = QuadInstance(
                 position: SIMD2<Float>(Float(innerFrame.origin.x), Float(innerFrame.origin.y)),
                 size: SIMD2<Float>(Float(innerFrame.width), Float(innerFrame.height)),
-                color: background,
+                color: fillColor,
                 cornerRadius: Float(max(0, image.cornerRadius - 1))
             )
             if let buffer = renderer.makeBuffer(for: [border, fill]) {
@@ -1330,73 +1317,274 @@ public final class MetalTextView: MTKView {
             break
 
         case .underline(let underline):
+            let transformedOrigin = transformed(point: underline.origin, by: transform)
+            let transformedSize = transformed(size: CGSize(width: underline.width, height: underline.thickness), by: transform)
             let instance = LineInstance(
-                position: SIMD2<Float>(Float(underline.origin.x), Float(underline.origin.y)),
-                width: Float(underline.width),
-                height: Float(underline.thickness),
+                position: SIMD2<Float>(Float(transformedOrigin.x), Float(transformedOrigin.y)),
+                width: Float(max(1, transformedSize.width)),
+                height: Float(max(underline.thickness, transformedSize.height)),
                 color: underline.color
             )
             if let buffer = renderer.makeBuffer(for: [instance]) {
                 renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
             }
 
-        case .path:
-            break
+        case .path(let path):
+            renderPathPrimitive(path, inheritedTransform: transform, encoder: encoder, renderer: renderer)
         }
     }
 
     private func renderGradientQuad(
         _ gradient: VVGradientQuadPrimitive,
+        transform: VVTransform2D? = nil,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer
     ) {
-        let stepCount = max(2, min(48, gradient.steps))
-        let frame = gradient.frame.integral
+        let frame = transformed(rect: gradient.frame, by: transform).integral
+        guard frame.width > 0, frame.height > 0 else { return }
+        let axis: SIMD2<Float>
+        if let angle = gradient.angle {
+            axis = SIMD2<Float>(Float(cos(angle)), Float(sin(angle)))
+        } else {
+            switch gradient.direction {
+            case .horizontal: axis = SIMD2<Float>(1, 0)
+            case .vertical: axis = SIMD2<Float>(0, 1)
+            }
+        }
+        let instance = GradientQuadInstance(
+            position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
+            size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
+            startColor: gradient.startColor,
+            endColor: gradient.endColor,
+            axis: axis,
+            cornerRadius: Float(gradient.cornerRadius)
+        )
+        guard let buffer = renderer.makeBuffer(for: [instance]) else { return }
+        renderer.renderGradientQuads(encoder: encoder, instances: buffer, instanceCount: 1)
+    }
+
+    private func renderQuadPrimitive(
+        _ quad: VVQuadPrimitive,
+        transform: VVTransform2D?,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
+        let frame = transformed(rect: quad.frame, by: transform)
         guard frame.width > 0, frame.height > 0 else { return }
 
-        var instances: [QuadInstance] = []
-        instances.reserveCapacity(stepCount)
+        let instance = QuadInstance(
+            position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
+            size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
+            color: SIMD4<Float>(quad.color.x, quad.color.y, quad.color.z, quad.color.w * quad.opacity),
+            cornerRadius: Float(quad.cornerRadius)
+        )
+        if let buffer = renderer.makeBuffer(for: [instance]) {
+            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
+        }
 
-        switch gradient.direction {
-        case .horizontal:
-            let segmentWidth = frame.width / CGFloat(stepCount)
-            for index in 0..<stepCount {
-                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
-                let x = frame.minX + CGFloat(index) * segmentWidth
-                let width = index == stepCount - 1 ? max(0, frame.maxX - x) : segmentWidth + 0.75
-                guard width > 0 else { continue }
-                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
-                instances.append(
-                    QuadInstance(
-                        position: SIMD2<Float>(Float(x), Float(frame.minY)),
-                        size: SIMD2<Float>(Float(width), Float(frame.height)),
-                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
-                        cornerRadius: Float(cornerRadius)
-                    )
-                )
+        guard let border = quad.border else { return }
+        if canRenderBorderAsSingleRing(border) {
+            let borderInstance = QuadInstance(
+                position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
+                size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
+                color: border.color,
+                cornerRadius: Float(quad.cornerRadius),
+                borderWidth: Float(border.widths.top)
+            )
+            if let buffer = renderer.makeBuffer(for: [borderInstance]) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: true)
             }
+            return
+        }
+        let segments = borderSegments(for: frame, border: border, cornerRadius: quad.cornerRadius)
+        if let buffer = renderer.makeBuffer(for: segments) {
+            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: segments.count, rounded: false)
+        }
+    }
 
-        case .vertical:
-            let segmentHeight = frame.height / CGFloat(stepCount)
-            for index in 0..<stepCount {
-                let t = stepCount <= 1 ? Float(0) : Float(index) / Float(stepCount - 1)
-                let y = frame.minY + CGFloat(index) * segmentHeight
-                let height = index == stepCount - 1 ? max(0, frame.maxY - y) : segmentHeight + 0.75
-                guard height > 0 else { continue }
-                let cornerRadius = (index == 0 || index == stepCount - 1) ? gradient.cornerRadius : 0
-                instances.append(
-                    QuadInstance(
-                        position: SIMD2<Float>(Float(frame.minX), Float(y)),
-                        size: SIMD2<Float>(Float(frame.width), Float(height)),
-                        color: lerpColor(gradient.startColor, gradient.endColor, t: t),
-                        cornerRadius: Float(cornerRadius)
-                    )
+    private func renderLinePrimitive(
+        _ line: VVLinePrimitive,
+        transform: VVTransform2D?,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
+        let transformedLine = VVLinePrimitive(
+            start: transformed(point: line.start, by: transform),
+            end: transformed(point: line.end, by: transform),
+            thickness: line.thickness,
+            color: line.color,
+            dash: line.dash
+        )
+        let segments = dashedSegments(for: transformedLine)
+        let instances = segments.map { segment -> LineInstance in
+            let minX = min(segment.start.x, segment.end.x)
+            let minY = min(segment.start.y, segment.end.y)
+            let width = abs(segment.end.x - segment.start.x)
+            let height = abs(segment.end.y - segment.start.y)
+            return LineInstance(
+                position: SIMD2<Float>(Float(minX), Float(minY)),
+                width: Float(width > 0 ? width : segment.thickness),
+                height: Float(height > 0 ? height : segment.thickness),
+                color: segment.color
+            )
+        }
+        if let buffer = renderer.makeBuffer(for: instances) {
+            renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: instances.count)
+        }
+    }
+
+    private func renderPathPrimitive(
+        _ path: VVPathPrimitive,
+        inheritedTransform: VVTransform2D?,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
+        let combinedTransform: VVTransform2D
+        switch (inheritedTransform, path.transform.isIdentity ? nil : path.transform) {
+        case let (lhs?, rhs?):
+            combinedTransform = lhs.composed(with: rhs)
+        case let (lhs?, nil):
+            combinedTransform = lhs
+        case let (nil, rhs?):
+            combinedTransform = rhs
+        case (nil, nil):
+            combinedTransform = .identity
+        }
+
+        let transformedVertices = path.vertices.map {
+            VVPathVertex(position: transformed(point: $0.position, by: combinedTransform), stPosition: $0.stPosition)
+        }
+
+        guard let buffer = renderer.makeBuffer(for: transformedVertices) else { return }
+        if let fill = path.fill, path.fillVertexCount > 0 {
+            renderer.renderPath(encoder: encoder, vertices: buffer, vertexStart: 0, vertexCount: path.fillVertexCount, color: fill)
+        }
+        if let stroke = path.stroke, path.strokeVertexCount > 0 {
+            renderer.renderPath(encoder: encoder, vertices: buffer, vertexStart: path.fillVertexCount, vertexCount: path.strokeVertexCount, color: stroke.color)
+        }
+    }
+
+    private func transformed(rect: CGRect, by transform: VVTransform2D?) -> CGRect {
+        guard let transform, !transform.isIdentity else { return rect }
+        let corners = [
+            rect.origin,
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY)
+        ].map { transform.apply(to: $0) }
+        let xs = corners.map(\.x)
+        let ys = corners.map(\.y)
+        return CGRect(
+            x: xs.min() ?? rect.minX,
+            y: ys.min() ?? rect.minY,
+            width: (xs.max() ?? rect.maxX) - (xs.min() ?? rect.minX),
+            height: (ys.max() ?? rect.maxY) - (ys.min() ?? rect.minY)
+        )
+    }
+
+    private func transformed(point: CGPoint, by transform: VVTransform2D?) -> CGPoint {
+        guard let transform, !transform.isIdentity else { return point }
+        return transform.apply(to: point)
+    }
+
+    private func transformed(size: CGSize, by transform: VVTransform2D?) -> CGSize {
+        guard let transform, !transform.isIdentity else { return size }
+        return transformed(rect: CGRect(origin: .zero, size: size), by: transform).size
+    }
+
+    private func dashedSegments(for line: VVLinePrimitive) -> [VVLinePrimitive] {
+        switch line.dash {
+        case .solid:
+            return [line]
+        case .dashed(let on, let off):
+            return patternedSegments(for: line, pattern: [on, off])
+        case .pattern(let values):
+            return patternedSegments(for: line, pattern: values)
+        }
+    }
+
+    private func patternedSegments(for line: VVLinePrimitive, pattern: [CGFloat]) -> [VVLinePrimitive] {
+        let cleanedPattern = pattern.filter { $0 > 0 }
+        guard cleanedPattern.count >= 2 else { return [line] }
+
+        let dx = line.end.x - line.start.x
+        let dy = line.end.y - line.start.y
+        let length = hypot(dx, dy)
+        guard length > 0 else { return [line] }
+
+        let ux = dx / length
+        let uy = dy / length
+        var distance: CGFloat = 0
+        var index = 0
+        var draw = true
+        var segments: [VVLinePrimitive] = []
+
+        while distance < length {
+            let segmentLength = min(cleanedPattern[index % cleanedPattern.count], length - distance)
+            let start = CGPoint(x: line.start.x + ux * distance, y: line.start.y + uy * distance)
+            let end = CGPoint(x: line.start.x + ux * (distance + segmentLength), y: line.start.y + uy * (distance + segmentLength))
+            if draw {
+                segments.append(VVLinePrimitive(start: start, end: end, thickness: line.thickness, color: line.color))
+            }
+            distance += segmentLength
+            index += 1
+            draw.toggle()
+        }
+
+        return segments
+    }
+
+    private func canRenderBorderAsSingleRing(_ border: VVBorder) -> Bool {
+        guard case .solid = border.style else { return false }
+        let widths = border.widths
+        return widths.top > 0 &&
+            abs(widths.top - widths.right) < 0.001 &&
+            abs(widths.top - widths.bottom) < 0.001 &&
+            abs(widths.top - widths.left) < 0.001
+    }
+
+    private func borderSegments(for frame: CGRect, border: VVBorder, cornerRadius: CGFloat) -> [QuadInstance] {
+        let widths = border.widths
+        let color = border.color
+        var segments: [QuadInstance] = []
+
+        func append(_ rect: CGRect) {
+            guard rect.width > 0, rect.height > 0 else { return }
+            segments.append(
+                QuadInstance(
+                    position: SIMD2<Float>(Float(rect.origin.x), Float(rect.origin.y)),
+                    size: SIMD2<Float>(Float(rect.width), Float(rect.height)),
+                    color: color,
+                    cornerRadius: 0
                 )
+            )
+        }
+
+        switch border.style {
+        case .solid:
+            append(CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: widths.top))
+            append(CGRect(x: frame.minX, y: frame.maxY - widths.bottom, width: frame.width, height: widths.bottom))
+            append(CGRect(x: frame.minX, y: frame.minY + widths.top, width: widths.left, height: max(0, frame.height - widths.top - widths.bottom)))
+            append(CGRect(x: frame.maxX - widths.right, y: frame.minY + widths.top, width: widths.right, height: max(0, frame.height - widths.top - widths.bottom)))
+        case .dashed(let dashLength, let gapLength):
+            let lines = [
+                VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.minY), end: CGPoint(x: frame.maxX, y: frame.minY), thickness: max(1, widths.top), color: color, dash: .dashed(on: dashLength, off: gapLength)),
+                VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.maxY), end: CGPoint(x: frame.maxX, y: frame.maxY), thickness: max(1, widths.bottom), color: color, dash: .dashed(on: dashLength, off: gapLength)),
+                VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.minY), end: CGPoint(x: frame.minX, y: frame.maxY), thickness: max(1, widths.left), color: color, dash: .dashed(on: dashLength, off: gapLength)),
+                VVLinePrimitive(start: CGPoint(x: frame.maxX, y: frame.minY), end: CGPoint(x: frame.maxX, y: frame.maxY), thickness: max(1, widths.right), color: color, dash: .dashed(on: dashLength, off: gapLength))
+            ]
+            for line in lines {
+                for segment in dashedSegments(for: line) {
+                    let minX = min(segment.start.x, segment.end.x)
+                    let minY = min(segment.start.y, segment.end.y)
+                    let width = abs(segment.end.x - segment.start.x)
+                    let height = abs(segment.end.y - segment.start.y)
+                    append(CGRect(x: minX, y: minY, width: width > 0 ? width : segment.thickness, height: height > 0 ? height : segment.thickness))
+                }
             }
         }
 
-        guard !instances.isEmpty, let buffer = renderer.makeBuffer(for: instances) else { return }
-        renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: gradient.cornerRadius > 0)
+        return segments
     }
 
     private func lerpColor(_ start: SIMD4<Float>, _ end: SIMD4<Float>, t: Float) -> SIMD4<Float> {

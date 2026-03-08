@@ -46,6 +46,7 @@ public final class VVMetalContext {
     public let colorGlyphPipeline: MTLRenderPipelineState
     public let quadPipeline: MTLRenderPipelineState
     public let roundedQuadPipeline: MTLRenderPipelineState
+    public let gradientQuadPipeline: MTLRenderPipelineState
     public let bulletPipeline: MTLRenderPipelineState
     public let checkboxPipeline: MTLRenderPipelineState
     public let thematicBreakPipeline: MTLRenderPipelineState
@@ -55,6 +56,7 @@ public final class VVMetalContext {
     public let strikethroughPipeline: MTLRenderPipelineState
     public let imagePipeline: MTLRenderPipelineState
     public let pieSlicePipeline: MTLRenderPipelineState
+    public let pathPipeline: MTLRenderPipelineState
 
     // MARK: - Samplers
 
@@ -79,6 +81,7 @@ public final class VVMetalContext {
         colorGlyphPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownColorGlyphFragmentShader", label: "Markdown Color Glyph", premultipliedAlpha: true)
         quadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownQuadVertexShader", fragment: "markdownQuadFragmentShader", label: "Markdown Quad")
         roundedQuadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownQuadVertexShader", fragment: "markdownRoundedQuadFragmentShader", label: "Markdown Rounded Quad")
+        gradientQuadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGradientQuadVertexShader", fragment: "markdownGradientQuadFragmentShader", label: "Markdown Gradient Quad")
         bulletPipeline = try Self.createPipeline(device: device, library: library, vertex: "bulletVertexShader", fragment: "bulletFragmentShader", label: "Bullet")
         checkboxPipeline = try Self.createPipeline(device: device, library: library, vertex: "checkboxVertexShader", fragment: "checkboxFragmentShader", label: "Checkbox")
         thematicBreakPipeline = try Self.createPipeline(device: device, library: library, vertex: "thematicBreakVertexShader", fragment: "thematicBreakFragmentShader", label: "Thematic Break")
@@ -88,6 +91,7 @@ public final class VVMetalContext {
         strikethroughPipeline = try Self.createPipeline(device: device, library: library, vertex: "strikethroughVertexShader", fragment: "strikethroughFragmentShader", label: "Strikethrough")
         imagePipeline = try Self.createPipeline(device: device, library: library, vertex: "imageVertexShader", fragment: "imageFragmentShader", label: "Image")
         pieSlicePipeline = try Self.createPipeline(device: device, library: library, vertex: "pieSliceVertexShader", fragment: "pieSliceFragmentShader", label: "Pie Slice")
+        pathPipeline = try Self.createPipeline(device: device, library: library, vertex: "pathVertexShader", fragment: "pathFragmentShader", label: "Path")
 
         // Create samplers
         let nearestDesc = MTLSamplerDescriptor()

@@ -43,14 +43,26 @@ public struct ImageInstance {
     public var uvOrigin: SIMD2<Float>
     public var uvSize: SIMD2<Float>
     public var cornerRadius: Float
-    public var padding: SIMD3<Float>
+    public var opacity: Float
+    public var grayscale: UInt32
+    public var padding: SIMD2<Float>
 
-    public init(position: SIMD2<Float>, size: SIMD2<Float>, uvOrigin: SIMD2<Float> = SIMD2(0, 0), uvSize: SIMD2<Float> = SIMD2(1, 1), cornerRadius: Float = 0) {
+    public init(
+        position: SIMD2<Float>,
+        size: SIMD2<Float>,
+        uvOrigin: SIMD2<Float> = SIMD2(0, 0),
+        uvSize: SIMD2<Float> = SIMD2(1, 1),
+        cornerRadius: Float = 0,
+        opacity: Float = 1,
+        grayscale: Bool = false
+    ) {
         self.position = position
         self.size = size
         self.uvOrigin = uvOrigin
         self.uvSize = uvSize
         self.cornerRadius = cornerRadius
+        self.opacity = opacity
+        self.grayscale = grayscale ? 1 : 0
         self.padding = .zero
     }
 }

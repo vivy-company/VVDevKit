@@ -238,6 +238,29 @@ public final class VVChatTimelineController {
         updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: true)
     }
 
+    public func replaceEntry(
+        id: String,
+        with entry: VVChatTimelineEntry,
+        scrollToBottom: Bool? = nil,
+        markUnread: Bool = true
+    ) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+
+        entries[index] = entry
+        messages[index] = materializeMessage(for: entry)
+
+        if activeDraftID == id, messages[index].state != .draft {
+            draftThrottler.cancel()
+            activeDraftID = nil
+        }
+
+        updateMessageLayout(
+            at: index,
+            shouldScrollToBottom: scrollToBottom ?? state.shouldAutoFollow,
+            markUnread: markUnread
+        )
+    }
+
     public func markUserInteraction(_ isInteracting: Bool) {
         state.userIsInteracting = isInteracting
     }

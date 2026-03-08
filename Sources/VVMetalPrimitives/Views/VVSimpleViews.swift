@@ -5,14 +5,21 @@ import CoreGraphics
 public struct VSpacer: VVView {
     public var width: CGFloat
     public var height: CGFloat
+    public var minLength: CGFloat
 
-    public init(width: CGFloat = 0, height: CGFloat = 0) {
+    public init(width: CGFloat = 0, height: CGFloat = 0, minLength: CGFloat = 0) {
         self.width = width
         self.height = height
+        self.minLength = minLength
     }
 
     public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
-        VVViewLayout(size: CGSize(width: width, height: height), node: VVNode())
+        let resolvedWidth = max(width, minLength)
+        let resolvedHeight = max(height, minLength)
+        return VVViewLayout(
+            size: constraint.clamped(size: CGSize(width: resolvedWidth, height: resolvedHeight)),
+            node: VVNode()
+        )
     }
 }
 
@@ -111,7 +118,7 @@ public struct VVTextBlockView: VVView {
 
         let primitives = runs.map { VVPrimitiveKind.textRun($0) }
         let node = VVNode(primitives: primitives)
-        let size = CGSize(width: max(constraint.maxWidth, bounds.maxX), height: max(0, bounds.maxY))
+        let size = constraint.clamped(size: CGSize(width: bounds.maxX, height: max(0, bounds.maxY)))
         return VVViewLayout(size: size, node: node)
     }
 }

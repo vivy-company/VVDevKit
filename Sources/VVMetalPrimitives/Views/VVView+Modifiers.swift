@@ -76,4 +76,36 @@ extension VVView {
     public func offset(x: CGFloat = 0, y: CGFloat = 0) -> VVOffsetModifier {
         VVOffsetModifier(child: self, x: x, y: y)
     }
+
+    // MARK: - Transform
+
+    public func transform(_ transform: VVTransform2D) -> VVTransformModifier {
+        VVTransformModifier(child: self, transform: transform)
+    }
+
+    public func rotation(_ angle: CGFloat) -> VVTransformModifier {
+        VVTransformModifier(child: self, transform: .identity.rotated(by: angle))
+    }
+
+    public func scale(x: CGFloat, y: CGFloat) -> VVTransformModifier {
+        VVTransformModifier(child: self, transform: .identity.scaled(x: x, y: y))
+    }
+
+    public func scale(_ factor: CGFloat) -> VVTransformModifier {
+        VVTransformModifier(child: self, transform: .identity.scaled(by: factor))
+    }
+
+    // MARK: - Identity / Animation
+
+    public func id(_ value: String) -> VVIdentityModifier {
+        VVIdentityModifier(child: self, id: value)
+    }
+
+    public func transition(_ transition: VVTransition) -> VVTransitionModifier {
+        VVTransitionModifier(child: self, transition: transition)
+    }
+
+    public func animation(_ animation: VVAnimationDescriptor) -> VVAnimationModifier {
+        VVAnimationModifier(child: self, animation: animation)
+    }
 }

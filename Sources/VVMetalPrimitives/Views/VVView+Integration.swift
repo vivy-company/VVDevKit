@@ -16,4 +16,8 @@ extension VVView {
         let constraint = VVLayoutConstraint(maxWidth: width)
         return layout(in: env, constraint: constraint)
     }
+
+    public func renderAnimationSnapshots(width: CGFloat, env: VVLayoutEnvironment = VVLayoutEnvironment()) -> [String: VVLayoutAnimationSnapshot] {
+        renderLayout(width: width, env: env).animationSnapshots()
+    }
 }

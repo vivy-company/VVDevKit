@@ -1,6 +1,10 @@
 import CoreGraphics
 
 public struct VVNode: Hashable, Sendable {
+    public var layoutSize: CGSize?
+    public var identity: String?
+    public var transition: VVTransition?
+    public var animation: VVAnimationDescriptor?
     public var offset: CGPoint
     public var clipRect: CGRect?
     public var zIndex: Int
@@ -9,6 +13,10 @@ public struct VVNode: Hashable, Sendable {
     public var children: [VVNode]
 
     public init(
+        layoutSize: CGSize? = nil,
+        identity: String? = nil,
+        transition: VVTransition? = nil,
+        animation: VVAnimationDescriptor? = nil,
         offset: CGPoint = .zero,
         clipRect: CGRect? = nil,
         zIndex: Int = 0,
@@ -16,6 +24,10 @@ public struct VVNode: Hashable, Sendable {
         primitives: [VVPrimitiveKind] = [],
         children: [VVNode] = []
     ) {
+        self.layoutSize = layoutSize
+        self.identity = identity
+        self.transition = transition
+        self.animation = animation
         self.offset = offset
         self.clipRect = clipRect
         self.zIndex = zIndex
@@ -35,14 +47,15 @@ public struct VVNode: Hashable, Sendable {
     public func flattenedPrimitives(
         parentClip: CGRect? = nil,
         parentOffset: CGPoint = .zero,
-        parentZ: Int = 0
+        parentZ: Int = 0,
+        parentTransform: VVTransform2D? = nil
     ) -> [VVPrimitive] {
         var primitives: [VVPrimitive] = []
-        flatten(into: &primitives, parentClip: parentClip, parentOffset: parentOffset, parentZ: parentZ)
+        flatten(into: &primitives, parentClip: parentClip, parentOffset: parentOffset, parentZ: parentZ, parentTransform: parentTransform)
         return primitives
     }
 
-    private func flatten(into output: inout [VVPrimitive], parentClip: CGRect?, parentOffset: CGPoint, parentZ: Int) {
+    private func flatten(into output: inout [VVPrimitive], parentClip: CGRect?, parentOffset: CGPoint, parentZ: Int, parentTransform: VVTransform2D?) {
         let combinedOffset = CGPoint(x: parentOffset.x + offset.x, y: parentOffset.y + offset.y)
         let localClip = clipRect?.offsetBy(dx: combinedOffset.x, dy: combinedOffset.y)
         let combinedClip: CGRect?
@@ -53,13 +66,46 @@ public struct VVNode: Hashable, Sendable {
         }
 
         let resolvedZ = parentZ + zIndex
+        let combinedTransform: VVTransform2D?
+        switch (parentTransform, transform) {
+        case let (lhs?, rhs?):
+            combinedTransform = lhs.composed(with: rhs)
+        case let (lhs?, nil):
+            combinedTransform = lhs
+        case let (nil, rhs?):
+            combinedTransform = rhs
+        case (nil, nil):
+            combinedTransform = nil
+        }
         for kind in primitives {
             let offsetKind = Self.offsetPrimitive(kind, by: combinedOffset)
-            output.append(VVPrimitive(kind: offsetKind, clipRect: combinedClip, zIndex: resolvedZ))
+            output.append(VVPrimitive(kind: offsetKind, clipRect: combinedClip, zIndex: resolvedZ, transform: combinedTransform))
         }
 
         for child in children {
-            child.flatten(into: &output, parentClip: combinedClip, parentOffset: combinedOffset, parentZ: resolvedZ)
+            child.flatten(into: &output, parentClip: combinedClip, parentOffset: combinedOffset, parentZ: resolvedZ, parentTransform: combinedTransform)
+        }
+    }
+
+    public func animationSnapshots(parentOrigin: CGPoint = .zero) -> [String: VVLayoutAnimationSnapshot] {
+        var snapshots: [String: VVLayoutAnimationSnapshot] = [:]
+        collectAnimationSnapshots(into: &snapshots, parentOrigin: parentOrigin)
+        return snapshots
+    }
+
+    private func collectAnimationSnapshots(into output: inout [String: VVLayoutAnimationSnapshot], parentOrigin: CGPoint) {
+        let absoluteOrigin = CGPoint(x: parentOrigin.x + offset.x, y: parentOrigin.y + offset.y)
+        if let identity, let layoutSize {
+            output[identity] = VVLayoutAnimationSnapshot(
+                id: identity,
+                frame: CGRect(origin: absoluteOrigin, size: layoutSize),
+                transition: transition,
+                animation: animation
+            )
+        }
+
+        for child in children {
+            child.collectAnimationSnapshots(into: &output, parentOrigin: absoluteOrigin)
         }
     }
 

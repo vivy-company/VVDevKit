@@ -290,7 +290,7 @@ public final class VVChatMessageRenderer {
         }
 
         let (layoutEngine, pipeline) = contentResources(isDraft: isDraft, scale: contentScale)
-        let document = isDraft ? makeStreamingDocument(text: message.content) : parser.parse(message.content)
+        let document = parser.parse(message.content)
         let customContent = message.customContent
 
         layoutEngine.updateImageSizeProvider { [weak self] url in
@@ -673,27 +673,6 @@ public final class VVChatMessageRenderer {
         )
         cache.set(rendered, for: key)
         return rendered
-    }
-
-    private func makeDraftDocument(text: String) -> ParsedMarkdownDocument {
-        let content = MarkdownInlineContent(text: text)
-        let block = MarkdownBlock(.paragraph(content), index: 0)
-        return ParsedMarkdownDocument(blocks: [block], footnotes: [:], isComplete: false, streamingBuffer: text)
-    }
-
-    private func makeStreamingDocument(text: String) -> ParsedMarkdownDocument {
-        let parsed = parser.parseStreaming(text, isComplete: false)
-        guard !parsed.streamingBuffer.isEmpty else { return parsed }
-
-        var blocks = parsed.blocks
-        let bufferContent = MarkdownInlineContent(text: parsed.streamingBuffer)
-        blocks.append(MarkdownBlock(.paragraph(bufferContent), index: blocks.count))
-        return ParsedMarkdownDocument(
-            blocks: blocks,
-            footnotes: parsed.footnotes,
-            isComplete: false,
-            streamingBuffer: parsed.streamingBuffer
-        )
     }
 
     private func renderMeta(

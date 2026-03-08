@@ -18,11 +18,13 @@ public struct VVPrimitive: Hashable, Sendable {
     public var kind: VVPrimitiveKind
     public var clipRect: CGRect?
     public var zIndex: Int
+    public var transform: VVTransform2D?
 
-    public init(kind: VVPrimitiveKind, clipRect: CGRect? = nil, zIndex: Int = 0) {
+    public init(kind: VVPrimitiveKind, clipRect: CGRect? = nil, zIndex: Int = 0, transform: VVTransform2D? = nil) {
         self.kind = kind
         self.clipRect = clipRect
         self.zIndex = zIndex
+        self.transform = transform
     }
 }
 
@@ -37,8 +39,8 @@ public struct VVScene: Sendable {
         primitives.append(primitive)
     }
 
-    public mutating func add(kind: VVPrimitiveKind, clipRect: CGRect? = nil, zIndex: Int = 0) {
-        primitives.append(VVPrimitive(kind: kind, clipRect: clipRect, zIndex: zIndex))
+    public mutating func add(kind: VVPrimitiveKind, clipRect: CGRect? = nil, zIndex: Int = 0, transform: VVTransform2D? = nil) {
+        primitives.append(VVPrimitive(kind: kind, clipRect: clipRect, zIndex: zIndex, transform: transform))
     }
 
     public func orderedPrimitives() -> [VVPrimitive] {

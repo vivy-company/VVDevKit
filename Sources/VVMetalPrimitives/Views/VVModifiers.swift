@@ -18,15 +18,13 @@ public struct VVPaddingModifier: VVView {
     }
 
     public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
-        let innerWidth = max(0, constraint.maxWidth - left - right)
-        let innerHeight = max(0, constraint.maxHeight - top - bottom)
-        let innerConstraint = VVLayoutConstraint(maxWidth: innerWidth, maxHeight: innerHeight)
+        let innerConstraint = constraint.insetBy(dx: left + right, dy: top + bottom)
         let childLayout = child.layout(in: env, constraint: innerConstraint)
 
-        let totalSize = CGSize(
+        let totalSize = constraint.clamped(size: CGSize(
             width: childLayout.size.width + left + right,
             height: childLayout.size.height + top + bottom
-        )
+        ))
         let node = VVNode(offset: CGPoint(x: left, y: top), children: [childLayout.node])
         return VVViewLayout(size: totalSize, node: VVNode(children: [node]))
     }
@@ -149,13 +147,20 @@ public struct VVFrameModifier: VVView {
     public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
         let constrainedWidth = width ?? constraint.maxWidth
         let constrainedHeight = height ?? constraint.maxHeight
-        let innerConstraint = VVLayoutConstraint(maxWidth: constrainedWidth, maxHeight: constrainedHeight)
+        let innerConstraint = VVLayoutConstraint(
+            minWidth: width ?? constraint.minWidth,
+            idealWidth: width ?? constraint.idealWidth,
+            maxWidth: constrainedWidth,
+            minHeight: height ?? constraint.minHeight,
+            idealHeight: height ?? constraint.idealHeight,
+            maxHeight: constrainedHeight
+        )
         let childLayout = child.layout(in: env, constraint: innerConstraint)
 
         let finalWidth = width ?? childLayout.size.width
         let finalHeight = height ?? childLayout.size.height
         return VVViewLayout(
-            size: CGSize(width: finalWidth, height: finalHeight),
+            size: constraint.clamped(size: CGSize(width: finalWidth, height: finalHeight)),
             node: childLayout.node
         )
     }
@@ -316,6 +321,82 @@ public struct VVZIndexModifier: VVView {
         let childLayout = child.layout(in: env, constraint: constraint)
         var node = childLayout.node
         node.zIndex = zIndex
+        return VVViewLayout(size: childLayout.size, node: node)
+    }
+}
+
+// MARK: - Transform Modifier
+
+public struct VVTransformModifier: VVView {
+    public var child: any VVView
+    public var transform: VVTransform2D
+
+    public init(child: any VVView, transform: VVTransform2D) {
+        self.child = child
+        self.transform = transform
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let childLayout = child.layout(in: env, constraint: constraint)
+        var node = childLayout.node
+        node.transform = transform
+        return VVViewLayout(size: childLayout.size, node: node)
+    }
+}
+
+// MARK: - Identity Modifier
+
+public struct VVIdentityModifier: VVView {
+    public var child: any VVView
+    public var id: String
+
+    public init(child: any VVView, id: String) {
+        self.child = child
+        self.id = id
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let childLayout = child.layout(in: env, constraint: constraint)
+        var node = childLayout.node
+        node.identity = id
+        return VVViewLayout(size: childLayout.size, node: node)
+    }
+}
+
+// MARK: - Transition Modifier
+
+public struct VVTransitionModifier: VVView {
+    public var child: any VVView
+    public var transition: VVTransition
+
+    public init(child: any VVView, transition: VVTransition) {
+        self.child = child
+        self.transition = transition
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let childLayout = child.layout(in: env, constraint: constraint)
+        var node = childLayout.node
+        node.transition = transition
+        return VVViewLayout(size: childLayout.size, node: node)
+    }
+}
+
+// MARK: - Animation Modifier
+
+public struct VVAnimationModifier: VVView {
+    public var child: any VVView
+    public var animation: VVAnimationDescriptor
+
+    public init(child: any VVView, animation: VVAnimationDescriptor) {
+        self.child = child
+        self.animation = animation
+    }
+
+    public func layout(in env: VVLayoutEnvironment, constraint: VVLayoutConstraint) -> VVViewLayout {
+        let childLayout = child.layout(in: env, constraint: constraint)
+        var node = childLayout.node
+        node.animation = animation
         return VVViewLayout(size: childLayout.size, node: node)
     }
 }
