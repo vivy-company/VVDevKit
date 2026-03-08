@@ -795,7 +795,7 @@ public final class VVChatMessageRenderer {
         let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
         let rowDeltaFont = style.timestampFont.withSize(max(style.timestampFont.pointSize + 1, 13))
         let rowVerticalPadding: CGFloat = 7
-        let rowHighlightHorizontalInset: CGFloat = 6
+        let rowHighlightHorizontalInset: CGFloat = 0
         let rowHighlightVerticalInset: CGFloat = 3
         let titleSubtitleSpacing: CGFloat = 4
         let dividerSpacingTop: CGFloat = 8
