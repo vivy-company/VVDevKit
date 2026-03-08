@@ -61,6 +61,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var scrollAnimationCompletion: (() -> Void)?
     private var scrollAnimationEaseOut: Bool = true
 
+    // Layout transition animation (no local state — read from controller)
+
     public var controller: VVChatTimelineController? {
         didSet {
             bindController(oldValue: oldValue)
@@ -211,6 +213,37 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             didInitialScroll = true
         }
 
+        // Animated layout transition: smoothly scroll to compensate for height change
+        if let transition = controller.pendingLayoutTransition {
+            controller.pendingLayoutTransition = nil
+            let heightDelta = controller.totalHeight - transition.previousTotalHeight
+            if abs(heightDelta) > 1 {
+                // Find the anchor item's new position
+                if let anchorIndex = controller.layouts.firstIndex(where: { $0.id == transition.anchorID }) {
+                    let newAnchorY = controller.layouts[anchorIndex].frame.origin.y
+                    let anchorDelta = newAnchorY - transition.anchorY
+                    if abs(anchorDelta) > 0.5 {
+                        let currentOrigin = scrollView.contentView.bounds.origin
+                        let compensatedY = currentOrigin.y + anchorDelta
+                        scrollView.contentView.setBoundsOrigin(CGPoint(x: currentOrigin.x, y: compensatedY))
+                        scrollView.reflectScrolledClipView(scrollView.contentView)
+                    }
+                }
+                // Animate from current position to natural position over ~200ms
+                let currentY = scrollView.contentView.bounds.origin.y
+                let naturalY = currentY + heightDelta
+                let contentHeight = max(controller.totalHeight, scrollView.contentView.bounds.height)
+                let maxOffset = max(0, contentHeight - scrollView.contentView.bounds.height)
+                let targetY = min(max(0, naturalY), maxOffset)
+                if abs(targetY - currentY) > 1 {
+                    isAnimatingJump = true
+                    animateScroll(toY: targetY, duration: 0.22, timing: .easeOut, token: nil) { [weak self] in
+                        self?.isAnimatingJump = false
+                    }
+                }
+            }
+        }
+
         requestImagesForVisibleItems()
         metalView.setNeedsDisplay(metalView.bounds)
         onStateChange?(controller.state)
@@ -301,6 +334,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollView.reflectScrolledClipView(scrollView.contentView)
         didInitialScroll = true
     }
+
+    // prepareLayoutTransition is now on the controller — no view-side capture needed
 
     @objc private func handleJumpToLatest() {
         isAnimatingJump = true

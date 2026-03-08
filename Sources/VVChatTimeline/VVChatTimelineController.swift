@@ -96,6 +96,30 @@ public final class VVChatTimelineController {
         )
     }
 
+    /// Pending layout transition state, consumed by the view on next update.
+    public struct PendingLayoutTransition {
+        public let anchorID: String
+        public let anchorY: CGFloat
+        public let previousTotalHeight: CGFloat
+    }
+    public internal(set) var pendingLayoutTransition: PendingLayoutTransition?
+
+    /// Call before `setEntries` to animate the layout transition.
+    /// Pass the ID of the item at or above the insertion/removal point.
+    public func prepareLayoutTransition(anchorItemID: String) {
+        let anchorY: CGFloat
+        if let index = layouts.firstIndex(where: { $0.id == anchorItemID }) {
+            anchorY = layouts[index].frame.origin.y
+        } else {
+            anchorY = 0
+        }
+        pendingLayoutTransition = PendingLayoutTransition(
+            anchorID: anchorItemID,
+            anchorY: anchorY,
+            previousTotalHeight: totalHeight
+        )
+    }
+
     public func setEntries(
         _ newEntries: [VVChatTimelineEntry],
         scrollToBottom: Bool = true,
