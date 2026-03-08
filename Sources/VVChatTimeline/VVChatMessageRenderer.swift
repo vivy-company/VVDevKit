@@ -789,7 +789,6 @@ public final class VVChatMessageRenderer {
         let rowTitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 1, 15))
         let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
         let rowDeltaFont = VVFont.boldSystemFont(ofSize: max(style.baseFont.pointSize + 1, 14))
-        let rowGap: CGFloat = 8
         let rowVerticalPadding: CGFloat = 10
         let dividerSpacingTop: CGFloat = 14
         let dividerSpacingBottom: CGFloat = 14
