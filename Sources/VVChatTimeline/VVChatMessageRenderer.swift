@@ -355,7 +355,10 @@ public final class VVChatMessageRenderer {
             imageURLs.insert(footerSuffixIconURL)
         }
 
-        let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint)
+        let headerTrailingIconURL = shouldShowHeader ? normalizedAssetURL(presentation?.headerTrailingIconURL) : nil
+        let headerTrailingHasIcon = (headerTrailingIconURL?.isEmpty == false)
+        let headerTrailingIconFootprint: CGFloat = headerTrailingHasIcon ? (max(8, style.headerIconSize) + max(0, style.headerIconSpacing)) : 0
+        let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint + headerTrailingIconFootprint)
         let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
         let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
         let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
@@ -364,7 +367,7 @@ public final class VVChatMessageRenderer {
         if headerText.isEmpty {
             headerRender = nil
         } else {
-            headerRender = renderHeader(text: headerText, iconURL: headerIconURL, width: metaWidth)
+            headerRender = renderHeader(text: headerText, iconURL: headerIconURL, trailingIconURL: headerTrailingIconURL, width: metaWidth)
             headerRender?.imageURLs.forEach { imageURLs.insert($0) }
         }
 
@@ -689,11 +692,14 @@ public final class VVChatMessageRenderer {
         return VVScene(primitives: primitives)
     }
 
-    private func renderHeader(text: String, iconURL: String?, width: CGFloat) -> HeaderRender {
+    private func renderHeader(text: String, iconURL: String?, trailingIconURL: String? = nil, width: CGFloat) -> HeaderRender {
         let hasIcon = (iconURL?.isEmpty == false)
         let iconSize = hasIcon ? max(8, style.headerIconSize) : 0
         let iconSpacing = hasIcon ? max(0, style.headerIconSpacing) : 0
-        let textWidth = max(1, width - iconSize - iconSpacing)
+        let hasTrailingIcon = (trailingIconURL?.isEmpty == false)
+        let trailingIconSize = hasTrailingIcon ? max(8, style.headerIconSize) : 0
+        let trailingIconSpacing = hasTrailingIcon ? max(0, style.headerIconSpacing) : 0
+        let textWidth = max(1, width - iconSize - iconSpacing - trailingIconSize - trailingIconSpacing)
         let textRender = renderMeta(
             text: text,
             layoutEngine: headerLayoutEngine,
@@ -704,38 +710,47 @@ public final class VVChatMessageRenderer {
         let textBounds = sceneBounds(for: textRender.scene, layoutEngine: headerLayoutEngine)
         let textMinY = textBounds?.minY ?? 0
         let textVisualHeight = max(1, textBounds?.height ?? textHeight)
-        let height = max(textVisualHeight, iconSize)
+        let effectiveIconSize = max(iconSize, trailingIconSize)
+        let height = max(textVisualHeight, effectiveIconSize)
         let textOffsetY = max(0, (height - textVisualHeight) * 0.5 - textMinY)
 
-        guard hasIcon, let iconURL else {
-            var builder = VVSceneBuilder()
-            builder.withOffset(CGPoint(x: 0, y: textOffsetY)) { builder in
-                builder.add(node: VVNode.fromScene(textRender.scene))
-            }
-            return HeaderRender(
-                scene: builder.scene,
-                height: height,
-                imageURLs: []
+        var allImageURLs: [String] = []
+        var builder = VVSceneBuilder()
+
+        var textX: CGFloat = 0
+
+        if hasIcon, let iconURL {
+            let iconY = max(0, (height - iconSize) * 0.5)
+            let icon = VVImagePrimitive(
+                url: iconURL,
+                frame: CGRect(x: 0, y: iconY, width: iconSize, height: iconSize),
+                cornerRadius: 2
             )
+            builder.add(kind: .image(icon), zIndex: 0)
+            allImageURLs.append(iconURL)
+            textX = iconSize + iconSpacing
         }
 
-        let iconY = max(0, (height - iconSize) * 0.5)
-
-        var builder = VVSceneBuilder()
-        let icon = VVImagePrimitive(
-            url: iconURL,
-            frame: CGRect(x: 0, y: iconY, width: iconSize, height: iconSize),
-            cornerRadius: 2
-        )
-        builder.add(kind: .image(icon), zIndex: 0)
-        builder.withOffset(CGPoint(x: iconSize + iconSpacing, y: textOffsetY)) { builder in
+        builder.withOffset(CGPoint(x: textX, y: textOffsetY)) { builder in
             builder.add(node: VVNode.fromScene(textRender.scene))
+        }
+
+        if hasTrailingIcon, let trailingIconURL {
+            let trailingIconY = max(0, (height - trailingIconSize) * 0.5)
+            let trailingX = width - trailingIconSize
+            let trailingIcon = VVImagePrimitive(
+                url: trailingIconURL,
+                frame: CGRect(x: trailingX, y: trailingIconY, width: trailingIconSize, height: trailingIconSize),
+                cornerRadius: 0
+            )
+            builder.add(kind: .image(trailingIcon), zIndex: 0)
+            allImageURLs.append(trailingIconURL)
         }
 
         return HeaderRender(
             scene: builder.scene,
             height: height,
-            imageURLs: [iconURL]
+            imageURLs: allImageURLs
         )
     }
 
