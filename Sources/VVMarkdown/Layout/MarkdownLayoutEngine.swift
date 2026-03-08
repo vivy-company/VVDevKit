@@ -658,6 +658,8 @@ public final class MarkdownLayoutEngine {
             }
             if let nextBlock {
                 switch nextBlock.type {
+                case .heading:
+                    return CGFloat(theme.headingSpacing)
                 case .image:
                     return 0
                 case .paragraph(let content):
@@ -670,10 +672,19 @@ public final class MarkdownLayoutEngine {
             }
             return baseSpacing
         case .codeBlock, .mermaid:
+            if case .heading = nextBlock?.type {
+                return CGFloat(theme.headingSpacing)
+            }
             return max(CGFloat(theme.paragraphSpacing) * 1.2, lineHeight)
         case .definitionList, .abbreviationList:
+            if case .heading = nextBlock?.type {
+                return CGFloat(theme.headingSpacing)
+            }
             return max(4, CGFloat(theme.paragraphSpacing) * 0.8)
         default:
+            if case .heading = nextBlock?.type {
+                return CGFloat(theme.headingSpacing)
+            }
             return CGFloat(theme.paragraphSpacing)
         }
     }
