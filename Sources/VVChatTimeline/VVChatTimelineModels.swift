@@ -63,6 +63,7 @@ public struct VVChatSummaryCardRow: Hashable, Sendable {
 
 public struct VVChatSummaryCard: Hashable, Sendable {
     public var title: String
+    public var iconURL: String?
     public var subtitle: String?
     public var rows: [VVChatSummaryCardRow]
     public var titleColor: SIMD4<Float>?
@@ -72,6 +73,7 @@ public struct VVChatSummaryCard: Hashable, Sendable {
 
     public init(
         title: String,
+        iconURL: String? = nil,
         subtitle: String? = nil,
         rows: [VVChatSummaryCardRow],
         titleColor: SIMD4<Float>? = nil,
@@ -80,6 +82,7 @@ public struct VVChatSummaryCard: Hashable, Sendable {
         rowDividerColor: SIMD4<Float>? = nil
     ) {
         self.title = title
+        self.iconURL = iconURL
         self.subtitle = subtitle
         self.rows = rows
         self.titleColor = titleColor

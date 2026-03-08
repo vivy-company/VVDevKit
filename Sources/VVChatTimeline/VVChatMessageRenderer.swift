@@ -784,30 +784,48 @@ public final class VVChatMessageRenderer {
         let subtitleColor = card.subtitleColor ?? style.headerTextColor
         let dividerColor = card.dividerColor ?? style.theme.thematicBreakColor.withOpacity(0.7)
         let rowDividerColor = card.rowDividerColor ?? dividerColor.withOpacity(0.78)
-        let titleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 4, 18))
-        let subtitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 1, 14))
+        let hasTitleIcon = (card.iconURL?.isEmpty == false)
+        let titleIconSize: CGFloat = hasTitleIcon ? max(10, style.headerIconSize - 1) : 0
+        let titleIconSpacing: CGFloat = hasTitleIcon ? max(4, style.headerIconSpacing - 1) : 0
+        let titleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 1.5, 15))
+        let subtitleFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12.5))
         let rowTitleFont = style.baseFont.withSize(max(style.baseFont.pointSize, 14))
         let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
         let rowDeltaFont = style.timestampFont.withSize(max(style.timestampFont.pointSize + 1, 13))
         let rowVerticalPadding: CGFloat = 7
         let rowHighlightHorizontalInset: CGFloat = 6
         let rowHighlightVerticalInset: CGFloat = 3
-        let dividerSpacingTop: CGFloat = 10
-        let dividerSpacingBottom: CGFloat = 10
+        let titleSubtitleSpacing: CGFloat = 4
+        let dividerSpacingTop: CGFloat = 8
+        let dividerSpacingBottom: CGFloat = 8
         let rowCornerRadius: CGFloat = 8
 
         var builder = VVSceneBuilder()
         var interactiveRegions: [VVChatInteractiveRegion] = []
         var currentY: CGFloat = 0
 
-        let titleRender = renderStyledText(card.title, font: titleFont, color: titleColor, width: width)
-        builder.withOffset(CGPoint(x: 0, y: currentY - titleRender.minY)) { builder in
+        let titleTextWidth = max(1, width - titleIconSize - titleIconSpacing)
+        let titleRender = renderStyledText(card.title, font: titleFont, color: titleColor, width: titleTextWidth)
+        let titleVisualHeight = max(titleRender.height, titleIconSize)
+        var titleTextX: CGFloat = 0
+        if hasTitleIcon, let iconURL = card.iconURL {
+            let iconY = currentY + max(0, (titleVisualHeight - titleIconSize) * 0.5)
+            let icon = VVImagePrimitive(
+                url: iconURL,
+                frame: CGRect(x: 0, y: iconY, width: titleIconSize, height: titleIconSize),
+                cornerRadius: 2
+            )
+            builder.add(kind: .image(icon), zIndex: 0)
+            titleTextX = titleIconSize + titleIconSpacing
+        }
+        let titleTextY = currentY + max(0, (titleVisualHeight - titleRender.height) * 0.5) - titleRender.minY
+        builder.withOffset(CGPoint(x: titleTextX, y: titleTextY)) { builder in
             builder.add(node: VVNode.fromScene(titleRender.scene))
         }
-        currentY += max(1, titleRender.height)
+        currentY += max(1, titleVisualHeight)
 
         if let subtitle = card.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !subtitle.isEmpty {
-            currentY += 6
+            currentY += titleSubtitleSpacing
             let subtitleRender = renderStyledText(subtitle, font: subtitleFont, color: subtitleColor, width: width)
             builder.withOffset(CGPoint(x: 0, y: currentY - subtitleRender.minY)) { builder in
                 builder.add(node: VVNode.fromScene(subtitleRender.scene))
