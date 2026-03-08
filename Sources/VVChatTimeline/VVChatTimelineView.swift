@@ -62,7 +62,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var scrollAnimationStartY: CGFloat = 0
     private var scrollAnimationTargetY: CGFloat = 0
     private var scrollAnimationCompletion: (() -> Void)?
-    private var scrollAnimationEaseOut: Bool = true
+    private var scrollAnimationCurve: VVEasing = .easeOut
 
     // Layout transition animation (no local state — read from controller)
 
@@ -232,7 +232,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                     let clampedY = min(currentY, maxOffset)
                     if abs(clampedY - currentY) > 1 {
                         isAnimatingJump = true
-                        animateScroll(toY: clampedY, duration: 0.2, timing: .easeOut, token: nil) { [weak self] in
+                        animateScroll(toY: clampedY, duration: 0.2, curve: .smooth, token: nil) { [weak self] in
                             self?.isAnimatingJump = false
                         }
                     }
@@ -240,7 +240,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                     // Expand: content grew. If pinned to bottom, animate to new bottom.
                     if controller.state.isPinnedToBottom {
                         isAnimatingJump = true
-                        animateScroll(toY: maxOffset, duration: 0.22, timing: .easeOut, token: nil) { [weak self] in
+                        animateScroll(toY: maxOffset, duration: 0.22, curve: .snappy, token: nil) { [weak self] in
                             self?.isAnimatingJump = false
                         }
                     }
@@ -326,7 +326,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         let maxOffset = max(0, contentHeight - visibleRect.height)
         let newOrigin = CGPoint(x: visibleRect.origin.x, y: maxOffset)
         if animated {
-            animateScroll(toY: maxOffset, duration: 0.15, timing: .easeOut, token: nil)
+            animateScroll(toY: maxOffset, duration: 0.15, curve: .snappy, token: nil)
         } else {
             scrollView.contentView.setBoundsOrigin(newOrigin)
             scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -369,7 +369,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         // Short hops feel better with a single easing curve.
         if distance < 220 {
-            animateScroll(toY: maxOffset, duration: 0.18, timing: .easeOut, token: nil) { [weak self] in
+            animateScroll(toY: maxOffset, duration: 0.18, curve: .snappy, token: nil) { [weak self] in
                 self?.isAnimatingJump = false
             }
             return
@@ -384,9 +384,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         let stage1Duration = min(0.16, max(0.08, Double(distance) / 7000))
         let stage2Duration = min(0.42, max(0.18, Double(distance) / 2600))
 
-        animateScroll(toY: stage1TargetY, duration: stage1Duration, timing: .linear, token: token) { [weak self] in
+        animateScroll(toY: stage1TargetY, duration: stage1Duration, curve: .linear, token: token) { [weak self] in
             guard let self else { return }
-            self.animateScroll(toY: maxOffset, duration: stage2Duration, timing: .easeOut, token: token) { [weak self] in
+            self.animateScroll(toY: maxOffset, duration: stage2Duration, curve: .bouncy, token: token) { [weak self] in
                 self?.isAnimatingJump = false
             }
         }
@@ -395,7 +395,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func animateScroll(
         toY targetY: CGFloat,
         duration: TimeInterval,
-        timing: CAMediaTimingFunctionName,
+        curve: VVEasing,
         token: UUID?,
         completion: (() -> Void)? = nil
     ) {
@@ -404,7 +404,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollAnimationTargetY = targetY
         scrollAnimationDuration = max(0.05, duration)
         scrollAnimationStartTime = CACurrentMediaTime()
-        scrollAnimationEaseOut = (timing == .easeOut || timing == .easeInEaseOut)
+        scrollAnimationCurve = curve
         scrollAnimationCompletion = { [weak self] in
             guard let self else { return }
             if let token, token != self.jumpAnimationToken { return }
@@ -427,14 +427,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func scrollAnimationTick() {
         let elapsed = CACurrentMediaTime() - scrollAnimationStartTime
         let progress = min(1.0, elapsed / scrollAnimationDuration)
-
-        let t: CGFloat
-        if scrollAnimationEaseOut {
-            let p = CGFloat(progress)
-            t = 1.0 - (1.0 - p) * (1.0 - p)
-        } else {
-            t = CGFloat(progress)
-        }
+        let t = scrollAnimationCurve.value(at: CGFloat(progress))
 
         let currentY = scrollAnimationStartY + (scrollAnimationTargetY - scrollAnimationStartY) * t
         let origin = CGPoint(x: scrollView.contentView.bounds.origin.x, y: currentY)
