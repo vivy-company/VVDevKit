@@ -52,6 +52,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public var onEntryActivate: ((String) -> Void)?
     private var hoveredFooterActionMessageID: String?
     private var jumpAnimationToken = UUID()
+    private var isAnimatingJump = false
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -193,7 +194,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             compensateScrollIfNeeded(layout: layout, delta: update.heightDelta)
         }
 
-        if update.shouldScrollToBottom {
+        if update.shouldScrollToBottom, !isAnimatingJump {
             scrollToBottom(animated: false)
             controller.updatePinnedState(distanceFromBottom: 0)
             didInitialScroll = true
@@ -292,6 +293,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     @objc private func handleJumpToLatest() {
+        isAnimatingJump = true
         controller?.jumpToLatest()
         animateJumpToLatest()
         if let controller {
@@ -300,7 +302,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func animateJumpToLatest() {
-        guard let controller else { return }
+        guard let controller else {
+            isAnimatingJump = false
+            return
+        }
         let visibleRect = scrollView.contentView.bounds
         let contentHeight = max(controller.totalHeight, visibleRect.height)
         let maxOffset = max(0, contentHeight - visibleRect.height)
@@ -309,12 +314,15 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         guard distance > 1 else {
             scrollToBottom(animated: false)
+            isAnimatingJump = false
             return
         }
 
         // Short hops feel better with a single easing curve.
         if distance < 220 {
-            animateScroll(toY: maxOffset, duration: 0.18, timing: .easeOut, token: nil)
+            animateScroll(toY: maxOffset, duration: 0.18, timing: .easeOut, token: nil) { [weak self] in
+                self?.isAnimatingJump = false
+            }
             return
         }
 
@@ -329,7 +337,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         animateScroll(toY: stage1TargetY, duration: stage1Duration, timing: .linear, token: token) { [weak self] in
             guard let self else { return }
-            self.animateScroll(toY: maxOffset, duration: stage2Duration, timing: .easeOut, token: token)
+            self.animateScroll(toY: maxOffset, duration: stage2Duration, timing: .easeOut, token: token) { [weak self] in
+                self?.isAnimatingJump = false
+            }
         }
     }
 
@@ -360,6 +370,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     private func cancelJumpToLatestAnimation() {
         jumpAnimationToken = UUID()
+        isAnimatingJump = false
     }
 
     // MARK: - VVChatTimelineRenderDataSource
