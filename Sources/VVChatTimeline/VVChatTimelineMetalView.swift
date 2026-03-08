@@ -26,10 +26,12 @@ public protocol VVChatTimelineRenderDataSource: AnyObject {
     var backgroundColor: SIMD4<Float> { get }
     func texture(for url: String) -> MTLTexture?
     func selectionQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive]
+    func hoverQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive]
 }
 
 public extension VVChatTimelineRenderDataSource {
     func selectionQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] { [] }
+    func hoverQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] { [] }
 }
 
 public protocol VVChatTimelineSelectionDelegate: AnyObject {
@@ -202,6 +204,23 @@ public final class VVChatTimelineMetalView: MTKView {
                                      y: item.frame.origin.y + item.contentOffset.y)
 
             renderScene(item.scene, encoder: encoder, renderer: renderer, imageProvider: renderDataSource, itemOffset: itemOffset)
+
+            let hoverQuads = renderDataSource.hoverQuads(forItemAt: index, itemOffset: itemOffset)
+            if !hoverQuads.isEmpty {
+                var instances: [QuadInstance] = []
+                instances.reserveCapacity(hoverQuads.count)
+                for quad in hoverQuads {
+                    instances.append(QuadInstance(
+                        position: SIMD2<Float>(Float(quad.frame.origin.x), Float(quad.frame.origin.y)),
+                        size: SIMD2<Float>(Float(quad.frame.width), Float(quad.frame.height)),
+                        color: quad.color,
+                        cornerRadius: Float(quad.cornerRadius)
+                    ))
+                }
+                if let buffer = renderer.makeBuffer(for: instances) {
+                    renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: instances.count, rounded: true)
+                }
+            }
 
             // Draw selection after scene so bubbles do not occlude highlight quads.
             let selQuads = renderDataSource.selectionQuads(forItemAt: index, itemOffset: itemOffset)

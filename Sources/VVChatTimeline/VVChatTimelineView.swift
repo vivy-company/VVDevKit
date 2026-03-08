@@ -53,9 +53,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public var onLinkActivate: ((String) -> Void)?
     private var hoveredFooterActionMessageID: String?
     private var hoveredLinkURL: String?
+    private var hoveredInteractiveRegionKey: String?
     private var jumpAnimationToken = UUID()
     private var isAnimatingJump = false
-    private var displayLink: CVDisplayLink?
+    private var scrollAnimationTimer: Timer?
     private var scrollAnimationStartTime: CFTimeInterval = 0
     private var scrollAnimationDuration: CFTimeInterval = 0
     private var scrollAnimationStartY: CGFloat = 0
@@ -67,6 +68,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     public var controller: VVChatTimelineController? {
         didSet {
+            guard controller !== oldValue else { return }
             bindController(oldValue: oldValue)
         }
     }
@@ -93,7 +95,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     deinit {
-        stopDisplayLink()
+        stopScrollAnimation()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -397,7 +399,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         token: UUID?,
         completion: (() -> Void)? = nil
     ) {
-        stopDisplayLink()
+        stopScrollAnimation()
         scrollAnimationStartY = scrollView.contentView.bounds.origin.y
         scrollAnimationTargetY = targetY
         scrollAnimationDuration = max(0.05, duration)
@@ -409,41 +411,25 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
             completion?()
         }
-        startDisplayLink()
-    }
 
-    private func startDisplayLink() {
-        guard displayLink == nil else { return }
-        var link: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&link)
-        guard let link else { return }
-
-        let raw = Unmanaged.passUnretained(self).toOpaque()
-        CVDisplayLinkSetOutputCallback(link, { (_, _, _, _, _, userInfo) -> CVReturn in
-            guard let userInfo else { return kCVReturnError }
-            let view = Unmanaged<VVChatTimelineView>.fromOpaque(userInfo).takeUnretainedValue()
-            DispatchQueue.main.async { view.displayLinkFired() }
-            return kCVReturnSuccess
-        }, raw)
-
-        CVDisplayLinkStart(link)
-        displayLink = link
-    }
-
-    private func stopDisplayLink() {
-        if let link = displayLink {
-            CVDisplayLinkStop(link)
-            displayLink = nil
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            self?.scrollAnimationTick()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        scrollAnimationTimer = timer
     }
 
-    private func displayLinkFired() {
+    private func stopScrollAnimation() {
+        scrollAnimationTimer?.invalidate()
+        scrollAnimationTimer = nil
+    }
+
+    private func scrollAnimationTick() {
         let elapsed = CACurrentMediaTime() - scrollAnimationStartTime
         let progress = min(1.0, elapsed / scrollAnimationDuration)
 
         let t: CGFloat
         if scrollAnimationEaseOut {
-            // Ease-out: fast start, slow finish
             let p = CGFloat(progress)
             t = 1.0 - (1.0 - p) * (1.0 - p)
         } else {
@@ -458,7 +444,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         metalView.setNeedsDisplay(metalView.bounds)
 
         if progress >= 1.0 {
-            stopDisplayLink()
+            stopScrollAnimation()
             let completion = scrollAnimationCompletion
             scrollAnimationCompletion = nil
             completion?()
@@ -466,7 +452,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func cancelJumpToLatestAnimation() {
-        stopDisplayLink()
+        stopScrollAnimation()
         scrollAnimationCompletion = nil
         jumpAnimationToken = UUID()
         isAnimatingJump = false
@@ -568,6 +554,27 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
                 frame: rect.offsetBy(dx: itemOffset.x + contentOffset.x, dy: itemOffset.y + contentOffset.y),
                 color: selectionColor,
                 cornerRadius: 2
+            )
+        }
+    }
+
+    public func hoverQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] {
+        guard let controller,
+              let hoveredInteractiveRegionKey,
+              let layout = controller.itemLayout(at: index),
+              let rendered = controller.renderedMessage(for: layout.id) else {
+            return []
+        }
+
+        return rendered.interactiveRegions.compactMap { region in
+            guard region.hoverFillColor != nil,
+                  interactiveRegionKey(messageID: layout.id, regionID: region.id) == hoveredInteractiveRegionKey else {
+                return nil
+            }
+            return VVQuadPrimitive(
+                frame: region.frame.offsetBy(dx: itemOffset.x, dy: itemOffset.y),
+                color: region.hoverFillColor ?? .clear,
+                cornerRadius: region.cornerRadius
             )
         }
     }
@@ -686,9 +693,11 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
 extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags) {
-        updateFooterActionHover(at: point)
-        updateLinkHover(at: point)
+        updatePointerHover(at: point)
         if handleFooterActionTap(at: point) {
+            return
+        }
+        if handleInteractiveRegionTap(at: point) {
             return
         }
         if clickCount >= 1, let url = linkURL(at: point) {
@@ -707,7 +716,7 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     }
 
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDraggedTo point: CGPoint, event: NSEvent) {
-        updateFooterActionHover(at: point)
+        updatePointerHover(at: point)
         selectionController.handleMouseDragged(to: point, hitTester: self)
         metalView.setNeedsDisplay(metalView.bounds)
     }
@@ -717,13 +726,11 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
     }
 
     public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseMovedTo point: CGPoint) {
-        updateFooterActionHover(at: point)
-        updateLinkHover(at: point)
+        updatePointerHover(at: point)
     }
 
     public func chatTimelineMetalViewMouseExited(_ view: VVChatTimelineMetalView) {
-        updateFooterActionHover(at: nil)
-        updateLinkHover(at: nil)
+        updatePointerHover(at: nil)
     }
 }
 
@@ -734,22 +741,54 @@ private extension VVChatTimelineView {
         return true
     }
 
-    func updateFooterActionHover(at point: CGPoint?) {
+    func updateFooterActionHover(at point: CGPoint?) -> Bool {
         let hoveredID = point.flatMap { footerActionMessageID(at: $0) }
-        guard hoveredID != hoveredFooterActionMessageID else { return }
+        guard hoveredID != hoveredFooterActionMessageID else { return hoveredID != nil }
         hoveredFooterActionMessageID = hoveredID
         onUserMessageCopyHoverChange?(hoveredID)
+        return hoveredID != nil
     }
 
-    func updateLinkHover(at point: CGPoint?) {
+    func updateLinkHover(at point: CGPoint?) -> Bool {
         let hoveredURL = point.flatMap { linkURL(at: $0) }
-        guard hoveredURL != hoveredLinkURL else { return }
+        guard hoveredURL != hoveredLinkURL else { return hoveredURL != nil }
         hoveredLinkURL = hoveredURL
+        return hoveredURL != nil
+    }
 
-        if hoveredURL != nil {
+    func updateInteractiveRegionHover(at point: CGPoint?) -> Bool {
+        let hoveredKey = point.flatMap { point -> String? in
+            guard let hit = interactiveRegionHit(at: point) else { return nil }
+            return interactiveRegionKey(messageID: hit.messageID, regionID: hit.region.id)
+        }
+        guard hoveredKey != hoveredInteractiveRegionKey else { return hoveredKey != nil }
+        hoveredInteractiveRegionKey = hoveredKey
+        metalView.setNeedsDisplay(metalView.bounds)
+        return hoveredKey != nil
+    }
+
+    func updatePointerHover(at point: CGPoint?) {
+        let hasFooterHover = updateFooterActionHover(at: point)
+        let hasInteractiveHover = updateInteractiveRegionHover(at: point)
+        let hasLinkHover = updateLinkHover(at: point)
+
+        if hasFooterHover || hasInteractiveHover || hasLinkHover {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
+        }
+    }
+
+    func handleInteractiveRegionTap(at point: CGPoint) -> Bool {
+        guard let hit = interactiveRegionHit(at: point) else { return false }
+        switch hit.region.action {
+        case .link(let url):
+            if let onLinkActivate {
+                onLinkActivate(url)
+            } else if let resolvedURL = URL(string: url) {
+                NSWorkspace.shared.open(resolvedURL)
+            }
+            return true
         }
     }
 
@@ -802,6 +841,34 @@ private extension VVChatTimelineView {
             }
         }
         return nil
+    }
+
+    func interactiveRegionHit(at point: CGPoint) -> (messageID: String, region: VVChatInteractiveRegion)? {
+        guard let controller else { return nil }
+        let docPoint = viewPointToDocumentPoint(point)
+
+        for layout in controller.layouts {
+            guard layout.frame.contains(docPoint),
+                  let rendered = controller.renderedMessage(for: layout.id) else {
+                continue
+            }
+
+            for region in rendered.interactiveRegions {
+                let frameInDocument = region.frame.offsetBy(
+                    dx: layout.frame.origin.x + layout.contentOffset.x,
+                    dy: layout.frame.origin.y + layout.contentOffset.y
+                )
+                if frameInDocument.contains(docPoint) {
+                    return (layout.id, region)
+                }
+            }
+        }
+
+        return nil
+    }
+
+    func interactiveRegionKey(messageID: String, regionID: String) -> String {
+        "\(messageID)::\(regionID)"
     }
 
     func timelineEntryID(at point: CGPoint) -> String? {

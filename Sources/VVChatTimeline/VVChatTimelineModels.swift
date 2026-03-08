@@ -21,6 +21,78 @@ public struct VVHeaderBadge: Hashable, Sendable {
     }
 }
 
+public struct VVChatSummaryCardRow: Hashable, Sendable {
+    public var id: String
+    public var title: String
+    public var subtitle: String?
+    public var actionURL: String?
+    public var titleColor: SIMD4<Float>?
+    public var subtitleColor: SIMD4<Float>?
+    public var additionsText: String?
+    public var additionsColor: SIMD4<Float>?
+    public var deletionsText: String?
+    public var deletionsColor: SIMD4<Float>?
+    public var hoverFillColor: SIMD4<Float>?
+
+    public init(
+        id: String,
+        title: String,
+        subtitle: String? = nil,
+        actionURL: String? = nil,
+        titleColor: SIMD4<Float>? = nil,
+        subtitleColor: SIMD4<Float>? = nil,
+        additionsText: String? = nil,
+        additionsColor: SIMD4<Float>? = nil,
+        deletionsText: String? = nil,
+        deletionsColor: SIMD4<Float>? = nil,
+        hoverFillColor: SIMD4<Float>? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.actionURL = actionURL
+        self.titleColor = titleColor
+        self.subtitleColor = subtitleColor
+        self.additionsText = additionsText
+        self.additionsColor = additionsColor
+        self.deletionsText = deletionsText
+        self.deletionsColor = deletionsColor
+        self.hoverFillColor = hoverFillColor
+    }
+}
+
+public struct VVChatSummaryCard: Hashable, Sendable {
+    public var title: String
+    public var subtitle: String?
+    public var rows: [VVChatSummaryCardRow]
+    public var titleColor: SIMD4<Float>?
+    public var subtitleColor: SIMD4<Float>?
+    public var dividerColor: SIMD4<Float>?
+    public var rowDividerColor: SIMD4<Float>?
+
+    public init(
+        title: String,
+        subtitle: String? = nil,
+        rows: [VVChatSummaryCardRow],
+        titleColor: SIMD4<Float>? = nil,
+        subtitleColor: SIMD4<Float>? = nil,
+        dividerColor: SIMD4<Float>? = nil,
+        rowDividerColor: SIMD4<Float>? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.rows = rows
+        self.titleColor = titleColor
+        self.subtitleColor = subtitleColor
+        self.dividerColor = dividerColor
+        self.rowDividerColor = rowDividerColor
+    }
+}
+
+public enum VVChatCustomContent: Hashable, Sendable {
+    case summaryCard(VVChatSummaryCard)
+}
+
 public struct VVChatMessagePresentation: Hashable, Sendable {
     public var bubbleStyle: VVChatBubbleStyle?
     public var showsHeader: Bool?
@@ -102,6 +174,7 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
     public var revision: Int
     public var timestamp: Date?
     public var presentation: VVChatMessagePresentation?
+    public var customContent: VVChatCustomContent?
 
     public init(
         id: String = UUID().uuidString,
@@ -110,7 +183,8 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
         content: String,
         revision: Int = 0,
         timestamp: Date? = nil,
-        presentation: VVChatMessagePresentation? = nil
+        presentation: VVChatMessagePresentation? = nil,
+        customContent: VVChatCustomContent? = nil
     ) {
         self.id = id
         self.role = role
@@ -119,6 +193,7 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
         self.revision = revision
         self.timestamp = timestamp
         self.presentation = presentation
+        self.customContent = customContent
     }
 
     public var isStreaming: Bool {

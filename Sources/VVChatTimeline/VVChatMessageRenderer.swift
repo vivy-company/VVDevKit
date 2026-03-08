@@ -15,6 +15,33 @@ public struct VVChatRenderedMessage {
     public let isDraft: Bool
     public let imageURLs: [String]
     public let footerTrailingActionFrame: CGRect?
+    public let interactiveRegions: [VVChatInteractiveRegion]
+}
+
+public enum VVChatInteractiveAction: Hashable, Sendable {
+    case link(String)
+}
+
+public struct VVChatInteractiveRegion: Hashable, Sendable {
+    public let id: String
+    public let frame: CGRect
+    public let action: VVChatInteractiveAction
+    public let hoverFillColor: SIMD4<Float>?
+    public let cornerRadius: CGFloat
+
+    public init(
+        id: String,
+        frame: CGRect,
+        action: VVChatInteractiveAction,
+        hoverFillColor: SIMD4<Float>? = nil,
+        cornerRadius: CGFloat = 10
+    ) {
+        self.id = id
+        self.frame = frame
+        self.action = action
+        self.hoverFillColor = hoverFillColor
+        self.cornerRadius = cornerRadius
+    }
 }
 
 public final class VVChatMessageRenderer {
@@ -126,6 +153,13 @@ public final class VVChatMessageRenderer {
         let scene: VVScene
         let height: CGFloat
         let imageURLs: [String]
+    }
+
+    private struct CustomContentRender {
+        let scene: VVScene
+        let height: CGFloat
+        let visualWidth: CGFloat
+        let interactiveRegions: [VVChatInteractiveRegion]
     }
 
     private typealias ContentResources = (layoutEngine: MarkdownLayoutEngine, pipeline: VVMarkdownRenderPipeline)
@@ -254,41 +288,69 @@ public final class VVChatMessageRenderer {
             return cached
         }
 
-        let document = isDraft ? makeStreamingDocument(text: message.content) : parser.parse(message.content)
         let (layoutEngine, pipeline) = contentResources(isDraft: isDraft, scale: contentScale)
+        let document = isDraft ? makeStreamingDocument(text: message.content) : parser.parse(message.content)
+        let customContent = message.customContent
 
         layoutEngine.updateImageSizeProvider { [weak self] url in
             self?.imageSizes[url]
         }
         layoutEngine.updateContentWidth(messageContentWidth)
-        var layout = layoutEngine.layout(document)
-        layoutEngine.adjustParagraphImageSpacing(in: &layout)
 
-        var contentScene = pipeline.buildScene(from: layout)
-        if let opacityMultiplier = presentation?.textOpacityMultiplier {
-            contentScene = applyingTextOpacity(
-                to: contentScene,
-                multiplier: opacityMultiplier
-            )
-        }
-        if let prefixColor = presentation?.prefixGlyphColor {
-            let glyphCount = max(0, presentation?.prefixGlyphCount ?? 0)
-            if glyphCount > 0 {
-                contentScene = applyingPrefixGlyphColor(
-                    to: contentScene,
-                    color: prefixColor,
-                    glyphCount: glyphCount
+        let layout: MarkdownLayout
+        var contentScene: VVScene
+        let contentBounds: CGRect?
+        let contentMinX: CGFloat
+        let contentMinY: CGFloat
+        var imageURLs = Set<String>()
+        let measuredWidth: CGFloat?
+        let interactiveRegions: [VVChatInteractiveRegion]
+
+        if let customContent {
+            layout = layoutEngine.layout(parser.parse(""))
+            let customRender = renderCustomContent(customContent, width: messageContentWidth)
+            contentScene = customRender.scene
+            contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
+            contentMinX = max(0, contentBounds?.minX ?? 0)
+            contentMinY = min(0, contentBounds?.minY ?? 0)
+            measuredWidth = customRender.visualWidth
+            interactiveRegions = customRender.interactiveRegions
+        } else {
+            var computedLayout = layoutEngine.layout(document)
+            layoutEngine.adjustParagraphImageSpacing(in: &computedLayout)
+            layout = computedLayout
+
+            var computedScene = pipeline.buildScene(from: layout)
+            if let opacityMultiplier = presentation?.textOpacityMultiplier {
+                computedScene = applyingTextOpacity(
+                    to: computedScene,
+                    multiplier: opacityMultiplier
                 )
             }
+            if let prefixColor = presentation?.prefixGlyphColor {
+                let glyphCount = max(0, presentation?.prefixGlyphCount ?? 0)
+                if glyphCount > 0 {
+                    computedScene = applyingPrefixGlyphColor(
+                        to: computedScene,
+                        color: prefixColor,
+                        glyphCount: glyphCount
+                    )
+                }
+            }
+
+            contentScene = computedScene
+            let computedBounds = sceneBounds(for: computedScene, layoutEngine: layoutEngine)
+            contentBounds = computedBounds
+            // Only compensate positive scene offsets. Negative minX can be produced by
+            // markdown sub-primitives (e.g. list markers/row adorners) and should not
+            // shift the whole message body to the right.
+            contentMinX = max(0, computedBounds?.minX ?? 0)
+            contentMinY = min(0, computedBounds?.minY ?? 0)
+            imageURLs = Set(collectImageURLs(from: layout))
+            measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
+            interactiveRegions = []
         }
-        let contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
-        // Only compensate positive scene offsets. Negative minX can be produced by
-        // markdown sub-primitives (e.g. list markers/row adorners) and should not
-        // shift the whole message body to the right.
-        let contentMinX = max(0, contentBounds?.minX ?? 0)
-        let contentMinY = min(0, contentBounds?.minY ?? 0)
-        var imageURLs = Set(collectImageURLs(from: layout))
-        let measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
+
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
         let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
         let shouldShowHeader = presentation?.showsHeader ?? style.showsHeader(for: message.role)
@@ -532,6 +594,7 @@ public final class VVChatMessageRenderer {
         }
 
         var scene = builder.scene
+        var adjustedInteractiveRegions = interactiveRegions
         if leadingLaneWidth > 0 {
             var laneBuilder = VVSceneBuilder()
             if hasLeadingIcon, let leadingIconURL {
@@ -553,6 +616,15 @@ public final class VVChatMessageRenderer {
             if var actionFrame = footerTrailingActionFrame {
                 actionFrame.origin.x += leadingLaneWidth
                 footerTrailingActionFrame = actionFrame
+            }
+            adjustedInteractiveRegions = adjustedInteractiveRegions.map { region in
+                VVChatInteractiveRegion(
+                    id: region.id,
+                    frame: region.frame.offsetBy(dx: leadingLaneWidth, dy: 0),
+                    action: region.action,
+                    hoverFillColor: region.hoverFillColor,
+                    cornerRadius: region.cornerRadius
+                )
             }
         }
 
@@ -586,7 +658,8 @@ public final class VVChatMessageRenderer {
             selectionContentOffset: selectionContentOffset,
             isDraft: isDraft,
             imageURLs: Array(imageURLs),
-            footerTrailingActionFrame: footerTrailingActionFrame
+            footerTrailingActionFrame: footerTrailingActionFrame,
+            interactiveRegions: adjustedInteractiveRegions
         )
         cache.set(rendered, for: key)
         return rendered
@@ -697,6 +770,172 @@ public final class VVChatMessageRenderer {
         }
 
         return VVScene(primitives: primitives)
+    }
+
+    private func renderCustomContent(_ content: VVChatCustomContent, width: CGFloat) -> CustomContentRender {
+        switch content {
+        case .summaryCard(let card):
+            return renderSummaryCard(card, width: width)
+        }
+    }
+
+    private func renderSummaryCard(_ card: VVChatSummaryCard, width: CGFloat) -> CustomContentRender {
+        let titleColor = card.titleColor ?? style.theme.textColor
+        let subtitleColor = card.subtitleColor ?? style.headerTextColor
+        let dividerColor = card.dividerColor ?? style.theme.thematicBreakColor.withOpacity(0.7)
+        let rowDividerColor = card.rowDividerColor ?? dividerColor.withOpacity(0.78)
+        let titleFont = VVFont.boldSystemFont(ofSize: max(style.baseFont.pointSize + 10, 22))
+        let subtitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 2, 15))
+        let rowTitleFont = style.baseFont.withSize(max(style.baseFont.pointSize + 1, 15))
+        let rowSecondaryFont = style.timestampFont.withSize(max(style.timestampFont.pointSize, 12))
+        let rowDeltaFont = VVFont.boldSystemFont(ofSize: max(style.baseFont.pointSize + 1, 14))
+        let rowGap: CGFloat = 8
+        let rowVerticalPadding: CGFloat = 10
+        let dividerSpacingTop: CGFloat = 14
+        let dividerSpacingBottom: CGFloat = 14
+        let rowCornerRadius: CGFloat = 10
+
+        var builder = VVSceneBuilder()
+        var interactiveRegions: [VVChatInteractiveRegion] = []
+        var currentY: CGFloat = 0
+
+        let titleRender = renderStyledText(card.title, font: titleFont, color: titleColor, width: width)
+        builder.withOffset(CGPoint(x: 0, y: currentY - titleRender.minY)) { builder in
+            builder.add(node: VVNode.fromScene(titleRender.scene))
+        }
+        currentY += max(1, titleRender.height)
+
+        if let subtitle = card.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !subtitle.isEmpty {
+            currentY += 10
+            let subtitleRender = renderStyledText(subtitle, font: subtitleFont, color: subtitleColor, width: width)
+            builder.withOffset(CGPoint(x: 0, y: currentY - subtitleRender.minY)) { builder in
+                builder.add(node: VVNode.fromScene(subtitleRender.scene))
+            }
+            currentY += max(1, subtitleRender.height)
+        }
+
+        currentY += dividerSpacingTop
+        builder.add(
+            kind: .line(
+                VVLinePrimitive(
+                    start: CGPoint(x: 0, y: currentY),
+                    end: CGPoint(x: width, y: currentY),
+                    thickness: 1,
+                    color: dividerColor
+                )
+            ),
+            zIndex: 0
+        )
+        currentY += dividerSpacingBottom
+
+        for (index, row) in card.rows.enumerated() {
+            if index > 0 {
+                builder.add(
+                    kind: .line(
+                        VVLinePrimitive(
+                            start: CGPoint(x: 0, y: currentY),
+                            end: CGPoint(x: width, y: currentY),
+                            thickness: 1,
+                            color: rowDividerColor
+                        )
+                    ),
+                    zIndex: 0
+                )
+            }
+
+            let additionsText = row.additionsText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let deletionsText = row.deletionsText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let additionsRender = additionsText.flatMap { text in
+                text.isEmpty ? nil : renderStyledText(text, font: rowDeltaFont, color: row.additionsColor ?? style.theme.codeColor, width: width)
+            }
+            let deletionsRender = deletionsText.flatMap { text in
+                text.isEmpty ? nil : renderStyledText(text, font: rowDeltaFont, color: row.deletionsColor ?? style.theme.strikethroughColor, width: width)
+            }
+            let trailingSpacing: CGFloat = (additionsRender != nil && deletionsRender != nil) ? 10 : 0
+            let trailingWidth = (additionsRender?.width ?? 0) + (deletionsRender?.width ?? 0) + trailingSpacing
+            let titleWidth = max(80, width - trailingWidth - 16)
+            let titleRender = renderStyledText(row.title, font: rowTitleFont, color: row.titleColor ?? style.theme.linkColor, width: titleWidth)
+            let subtitleRender = row.subtitle.flatMap { subtitle in
+                let trimmed = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : renderStyledText(trimmed, font: rowSecondaryFont, color: row.subtitleColor ?? style.headerTextColor, width: titleWidth)
+            }
+
+            let rowContentHeight = max(
+                titleRender.height + (subtitleRender == nil ? 0 : (4 + subtitleRender!.height)),
+                max(additionsRender?.height ?? 0, deletionsRender?.height ?? 0)
+            )
+            let rowHeight = rowContentHeight + rowVerticalPadding * 2
+            let rowTop = currentY
+            let textBaseY = rowTop + rowVerticalPadding
+
+            builder.withOffset(CGPoint(x: 0, y: textBaseY - titleRender.minY)) { builder in
+                builder.add(node: VVNode.fromScene(titleRender.scene))
+            }
+            if let subtitleRender {
+                builder.withOffset(CGPoint(x: 0, y: textBaseY + titleRender.height + 4 - subtitleRender.minY)) { builder in
+                    builder.add(node: VVNode.fromScene(subtitleRender.scene))
+                }
+            }
+
+            var trailingCursorX = width
+            if let deletionsRender {
+                trailingCursorX -= deletionsRender.width
+                let deletionsY = rowTop + max(0, (rowHeight - deletionsRender.height) * 0.5) - deletionsRender.minY
+                builder.withOffset(CGPoint(x: trailingCursorX, y: deletionsY)) { builder in
+                    builder.add(node: VVNode.fromScene(deletionsRender.scene))
+                }
+            }
+            if additionsRender != nil && deletionsRender != nil {
+                trailingCursorX -= trailingSpacing
+            }
+            if let additionsRender {
+                trailingCursorX -= additionsRender.width
+                let additionsY = rowTop + max(0, (rowHeight - additionsRender.height) * 0.5) - additionsRender.minY
+                builder.withOffset(CGPoint(x: trailingCursorX, y: additionsY)) { builder in
+                    builder.add(node: VVNode.fromScene(additionsRender.scene))
+                }
+            }
+
+            if let actionURL = row.actionURL?.trimmingCharacters(in: .whitespacesAndNewlines), !actionURL.isEmpty {
+                interactiveRegions.append(
+                    VVChatInteractiveRegion(
+                        id: row.id,
+                        frame: CGRect(x: 0, y: rowTop, width: width, height: rowHeight),
+                        action: .link(actionURL),
+                        hoverFillColor: row.hoverFillColor,
+                        cornerRadius: rowCornerRadius
+                    )
+                )
+            }
+
+            currentY += rowHeight
+        }
+
+        return CustomContentRender(
+            scene: builder.scene,
+            height: currentY,
+            visualWidth: width,
+            interactiveRegions: interactiveRegions
+        )
+    }
+
+    private func renderStyledText(
+        _ text: String,
+        font: VVFont,
+        color: SIMD4<Float>,
+        width: CGFloat
+    ) -> (scene: VVScene, width: CGFloat, height: CGFloat, minY: CGFloat) {
+        let theme = Self.makeMetaTheme(base: style.theme, textColor: color)
+        let layoutEngine = MarkdownLayoutEngine(baseFont: font, theme: theme, contentWidth: width)
+        let pipeline = VVMarkdownRenderPipeline(theme: theme, layoutEngine: layoutEngine)
+        let rendered = renderMeta(text: text, layoutEngine: layoutEngine, pipeline: pipeline, width: width)
+        let bounds = sceneBounds(for: rendered.scene, layoutEngine: layoutEngine)
+        return (
+            scene: rendered.scene,
+            width: max(1, bounds?.width ?? Self.singleLineMetaWidth(text, font: font)),
+            height: max(1, bounds?.height ?? rendered.layout.totalHeight),
+            minY: bounds?.minY ?? 0
+        )
     }
 
     private func renderHeader(text: String, iconURL: String?, trailingIconURL: String? = nil, badges: [VVHeaderBadge]? = nil, width: CGFloat) -> HeaderRender {
