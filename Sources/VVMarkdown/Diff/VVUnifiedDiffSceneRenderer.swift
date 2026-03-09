@@ -86,7 +86,7 @@ public enum VVUnifiedDiffSceneRenderer {
         options: VVUnifiedDiffRenderOptions = .full,
         highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]]?
     ) -> VVUnifiedDiffRenderResult {
-        let document = analyze(unifiedDiff: unifiedDiff)
+        let document = analyzedDocument(for: unifiedDiff)
         let renderer = UnifiedDiffRenderer(
             font: baseFont,
             theme: theme,
@@ -95,8 +95,7 @@ public enum VVUnifiedDiffSceneRenderer {
         )
         renderer.updateContentWidth(width)
         let result = renderer.buildScene(
-            sections: document.sections,
-            rows: document.rows,
+            document: document,
             width: width,
             style: style,
             wrapLines: true,
@@ -132,6 +131,37 @@ private enum UnifiedDiffHighlightCache {
         if cache.count > 24, let firstKey = cache.keys.first {
             cache.removeValue(forKey: firstKey)
         }
+    }
+}
+
+private enum UnifiedDiffDocumentCache {
+    private static let lock = NSLock()
+    private static var cache: [Int: VVUnifiedDiffDocument] = [:]
+    private static var order: [Int] = []
+    private static let maxEntries = 12
+
+    static func value(for key: Int) -> VVUnifiedDiffDocument? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let document = cache[key] else { return nil }
+        touch(key)
+        return document
+    }
+
+    static func set(_ value: VVUnifiedDiffDocument, for key: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        cache[key] = value
+        touch(key)
+        while order.count > maxEntries {
+            let evicted = order.removeFirst()
+            cache.removeValue(forKey: evicted)
+        }
+    }
+
+    private static func touch(_ key: Int) {
+        order.removeAll { $0 == key }
+        order.append(key)
     }
 }
 
@@ -174,15 +204,28 @@ public struct VVUnifiedDiffSection: Identifiable, Hashable, Sendable {
     public let filePath: String
     public let headerRow: VVUnifiedDiffRow?
     public let rows: [VVUnifiedDiffRow]
-
-    public var addedCount: Int { rows.filter { $0.kind == .added }.count }
-    public var deletedCount: Int { rows.filter { $0.kind == .deleted }.count }
+    public let addedCount: Int
+    public let deletedCount: Int
 
     public init(id: Int, filePath: String, headerRow: VVUnifiedDiffRow?, rows: [VVUnifiedDiffRow]) {
         self.id = id
         self.filePath = filePath
         self.headerRow = headerRow
         self.rows = rows
+        var added = 0
+        var deleted = 0
+        for row in rows {
+            switch row.kind {
+            case .added:
+                added += 1
+            case .deleted:
+                deleted += 1
+            default:
+                break
+            }
+        }
+        self.addedCount = added
+        self.deletedCount = deleted
     }
 }
 
@@ -230,11 +273,25 @@ public struct VVUnifiedDiffDocument: Hashable, Sendable {
     public let rows: [VVUnifiedDiffRow]
     public let sections: [VVUnifiedDiffSection]
     public let splitRows: [VVUnifiedDiffSplitRow]
+    public let maxOldLineNumber: Int
+    public let maxNewLineNumber: Int
 
     public init(rows: [VVUnifiedDiffRow], sections: [VVUnifiedDiffSection], splitRows: [VVUnifiedDiffSplitRow]) {
         self.rows = rows
         self.sections = sections
         self.splitRows = splitRows
+        var maxOld = 0
+        var maxNew = 0
+        for row in rows {
+            if let old = row.oldLineNumber, old > maxOld {
+                maxOld = old
+            }
+            if let new = row.newLineNumber, new > maxNew {
+                maxNew = new
+            }
+        }
+        self.maxOldLineNumber = maxOld
+        self.maxNewLineNumber = maxNew
     }
 }
 
@@ -242,12 +299,25 @@ private typealias UnifiedDiffRow = VVUnifiedDiffRow
 private typealias UnifiedDiffSection = VVUnifiedDiffSection
 private typealias UnifiedDiffSplitRow = VVUnifiedDiffSplitRow
 
+private func analyzedDocument(for unifiedDiff: String) -> VVUnifiedDiffDocument {
+    var hasher = Hasher()
+    hasher.combine(unifiedDiff)
+    let cacheKey = hasher.finalize()
+    if let cached = UnifiedDiffDocumentCache.value(for: cacheKey) {
+        return cached
+    }
+    let document = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+    UnifiedDiffDocumentCache.set(document, for: cacheKey)
+    return document
+}
+
 private func parseRows(unifiedDiff: String) -> [UnifiedDiffRow] {
     var lines = unifiedDiff.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
     if lines.last?.isEmpty == true {
         _ = lines.popLast()
     }
     var rows: [UnifiedDiffRow] = []
+    rows.reserveCapacity(lines.count)
     var oldLine = 0
     var newLine = 0
     var inHunk = false
@@ -379,6 +449,7 @@ private func parseRows(unifiedDiff: String) -> [UnifiedDiffRow] {
 
 private func makeSections(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSection] {
     var result: [UnifiedDiffSection] = []
+    result.reserveCapacity(max(1, rows.count / 64))
     var currentSectionID: Int?
     var currentPath: String?
     var currentHeaderRow: UnifiedDiffRow?
@@ -423,6 +494,7 @@ private func makeSections(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSection] {
 
 private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow] {
     var result: [UnifiedDiffSplitRow] = []
+    result.reserveCapacity(rows.count)
     var i = 0
 
     while i < rows.count {
@@ -745,19 +817,19 @@ private final class UnifiedDiffRenderer {
     }
 
     func buildScene(
-        sections: [UnifiedDiffSection],
-        rows: [UnifiedDiffRow],
+        document: VVUnifiedDiffDocument,
         width: CGFloat,
         style: VVDiffSceneRenderStyle,
         wrapLines: Bool,
         options: VVUnifiedDiffRenderOptions
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         if style == .split {
-            return buildSplitScene(rows: rows, width: width, options: options)
+            return buildSplitScene(document: document, width: width, options: options)
         }
 
-        let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
+        let sections = document.sections
+        let maxOld = document.maxOldLineNumber
+        let maxNew = document.maxNewLineNumber
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * measureCharWidth() + 16
         let markerWidth = measureCharWidth() + 8
@@ -804,13 +876,13 @@ private final class UnifiedDiffRenderer {
     }
 
     private func buildSplitScene(
-        rows: [UnifiedDiffRow],
+        document: VVUnifiedDiffDocument,
         width: CGFloat,
         options: VVUnifiedDiffRenderOptions
     ) -> (scene: VVScene, contentHeight: CGFloat) {
-        let splitRows = makeSplitRows(from: rows)
-        let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
+        let splitRows = document.splitRows
+        let maxOld = document.maxOldLineNumber
+        let maxNew = document.maxNewLineNumber
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * measureCharWidth() + 16
         let markerWidth = measureCharWidth() + 4
