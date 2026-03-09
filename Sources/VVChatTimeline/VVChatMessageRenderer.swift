@@ -9,6 +9,7 @@ public struct VVChatRenderedMessage {
     public let layout: MarkdownLayout
     public let layoutEngine: MarkdownLayoutEngine
     public let scene: VVScene
+    public let orderedPrimitiveIndices: [Int]
     public let height: CGFloat
     public let contentOffset: CGPoint
     public let selectionContentOffset: CGPoint
@@ -667,6 +668,7 @@ public final class VVChatMessageRenderer {
             layout: layout,
             layoutEngine: layoutEngine,
             scene: scene,
+            orderedPrimitiveIndices: Self.orderedPrimitiveIndices(for: scene),
             height: height,
             contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
             selectionContentOffset: selectionContentOffset,
@@ -677,6 +679,15 @@ public final class VVChatMessageRenderer {
         )
         cache.set(rendered, for: key)
         return rendered
+    }
+
+    private static func orderedPrimitiveIndices(for scene: VVScene) -> [Int] {
+        scene.primitives.enumerated().sorted { lhs, rhs in
+            if lhs.element.zIndex == rhs.element.zIndex {
+                return lhs.offset < rhs.offset
+            }
+            return lhs.element.zIndex < rhs.element.zIndex
+        }.map(\.offset)
     }
 
     private func renderMeta(

@@ -1008,7 +1008,19 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
 
     func renderItem(at index: Int) -> VVChatTimelineRenderItem? {
         guard index == 0 else { return nil }
-        return VVChatTimelineRenderItem(id: "primitives", frame: bounds, contentOffset: .zero, scene: scene)
+        let orderedPrimitiveIndices = scene.primitives.enumerated().sorted { lhs, rhs in
+            if lhs.element.zIndex == rhs.element.zIndex {
+                return lhs.offset < rhs.offset
+            }
+            return lhs.element.zIndex < rhs.element.zIndex
+        }.map(\.offset)
+        return VVChatTimelineRenderItem(
+            id: "primitives",
+            frame: bounds,
+            contentOffset: .zero,
+            scene: scene,
+            orderedPrimitiveIndices: orderedPrimitiveIndices
+        )
     }
 
     var viewportRect: CGRect { bounds }

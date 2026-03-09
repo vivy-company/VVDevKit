@@ -59,6 +59,8 @@ public final class VVChatTimelineController {
     private var activeDraftID: String?
     private var messageImageURLs: [String: Set<String>] = [:]
     private var imageURLToMessageIDs: [String: Set<String>] = [:]
+    private var messageIndexByID: [String: Int] = [:]
+    private var entryIndexByID: [String: Int] = [:]
     private var customEntryMessageMapper: CustomEntryMessageMapper?
 
     public init(style: VVChatTimelineStyle = .init(), renderWidth: CGFloat = 0) {
@@ -108,7 +110,7 @@ public final class VVChatTimelineController {
     /// Pass the ID of the item at or above the insertion/removal point.
     public func prepareLayoutTransition(anchorItemID: String) {
         let anchorY: CGFloat
-        if let index = layouts.firstIndex(where: { $0.id == anchorItemID }) {
+        if let index = messageIndexByID[anchorItemID], layouts.indices.contains(index) {
             anchorY = layouts[index].frame.origin.y
         } else {
             anchorY = 0
@@ -131,6 +133,7 @@ public final class VVChatTimelineController {
         self.customEntryMessageMapper = customEntryMessageMapper
         entries = newEntries
         messages = newEntries.map { materializeMessage(for: $0) }
+        rebuildIDIndexes()
         renderer.invalidateAll()
 
         messageImageURLs.removeAll(keepingCapacity: true)
@@ -148,6 +151,8 @@ public final class VVChatTimelineController {
 
         let index = messages.count
         messages.append(message)
+        messageIndexByID[message.id] = index
+        entryIndexByID[message.id] = entries.count - 1
         let layout = buildLayout(for: message, at: nextYPosition())
         layouts.append(layout)
         totalHeight = layout.frame.maxY + style.timelineInsets.bottom
@@ -172,6 +177,8 @@ public final class VVChatTimelineController {
         let index = messages.count
         let message = materializeMessage(for: .custom(entry))
         messages.append(message)
+        messageIndexByID[message.id] = index
+        entryIndexByID[entry.id] = entries.count - 1
 
         let layout = buildLayout(for: message, at: nextYPosition())
         layouts.append(layout)
@@ -202,7 +209,7 @@ public final class VVChatTimelineController {
     }
 
     public func updateDraftMessage(id: String, content: String, throttle: Bool = true) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = messageIndexByID[id] else { return }
         guard messages[index].state == .draft else { return }
         if throttle {
             activeDraftID = id
@@ -220,14 +227,14 @@ public final class VVChatTimelineController {
 
     public func appendToDraftMessage(id: String, chunk: String, throttle: Bool = false) {
         guard !chunk.isEmpty else { return }
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = messageIndexByID[id] else { return }
         guard messages[index].state == .draft else { return }
         let appended = messages[index].content + chunk
         updateDraftMessage(id: id, content: appended, throttle: throttle)
     }
 
     public func finalizeMessage(id: String, content: String) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = messageIndexByID[id] else { return }
         renderer.invalidate(messageID: id)
         messages[index].state = .final
         messages[index].content = content
@@ -246,11 +253,16 @@ public final class VVChatTimelineController {
         scrollToBottom: Bool? = nil,
         markUnread: Bool = true
     ) {
-        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = entryIndexByID[id] else { return }
 
         renderer.invalidate(messageID: id)
+        let previousMessageID = messages.indices.contains(index) ? messages[index].id : nil
         entries[index] = entry
         messages[index] = materializeMessage(for: entry)
+        rebuildIDIndexes()
+        if let previousMessageID, previousMessageID != messages[index].id {
+            renderer.invalidate(messageID: previousMessageID)
+        }
 
         if activeDraftID == id, messages[index].state != .draft {
             draftThrottler.cancel()
@@ -291,13 +303,9 @@ public final class VVChatTimelineController {
         guard renderer.updateImageSize(url: url, size: size) else { return }
         guard let messageIDs = imageURLToMessageIDs[url] else { return }
         let sorted = messageIDs.compactMap { id -> Int? in
-            messages.firstIndex(where: { $0.id == id })
+            messageIndexByID[id]
         }.sorted()
-        for index in sorted {
-            let messageID = messages[index].id
-            renderer.invalidate(messageID: messageID)
-            updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: false)
-        }
+        relayoutMessages(at: sorted, shouldScrollToBottom: state.shouldAutoFollow, markUnread: false)
     }
 
     public func itemLayout(at index: Int) -> ItemLayout? {
@@ -311,12 +319,17 @@ public final class VVChatTimelineController {
     }
 
     public func renderedMessage(for id: String) -> VVChatRenderedMessage? {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let index = messageIndexByID[id] else { return nil }
+        return renderer.renderedMessage(for: messages[index])
+    }
+
+    public func renderedMessage(at index: Int) -> VVChatRenderedMessage? {
+        guard messages.indices.contains(index) else { return nil }
         return renderer.renderedMessage(for: messages[index])
     }
 
     private func applyDraftUpdate(id: String, content: String) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = messageIndexByID[id] else { return }
         guard messages[index].state == .draft else { return }
         renderer.invalidate(messageID: id)
         messages[index].content = content
@@ -352,6 +365,62 @@ public final class VVChatTimelineController {
             totalHeight: totalHeight,
             heightDelta: delta,
             changedIndex: index,
+            shouldScrollToBottom: shouldFollow,
+            hasUnreadNewContent: state.hasUnreadNewContent
+        )
+        onUpdate?(update)
+    }
+
+    private func relayoutMessages(at indexes: [Int], shouldScrollToBottom: Bool, markUnread: Bool) {
+        guard !indexes.isEmpty else { return }
+
+        let uniqueSorted = Array(Set(indexes)).sorted()
+        let affectedIndexes = Set(uniqueSorted)
+        let shouldFollow = shouldScrollToBottom
+
+        for index in uniqueSorted {
+            guard messages.indices.contains(index) else { continue }
+            renderer.invalidate(messageID: messages[index].id)
+        }
+
+        var cumulativeDelta: CGFloat = 0
+        let startIndex = uniqueSorted[0]
+        var updatedIndexes = IndexSet()
+
+        for index in startIndex..<layouts.count {
+            if cumulativeDelta != 0 {
+                layouts[index].frame.origin.y += cumulativeDelta
+            }
+            guard affectedIndexes.contains(index) else { continue }
+
+            let message = messages[index]
+            let renderedMessage = renderer.renderedMessage(for: message)
+            updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
+
+            let oldHeight = layouts[index].frame.height
+            let newHeight = renderedMessage.height
+            let delta = newHeight - oldHeight
+
+            layouts[index].frame.size.height = newHeight
+            layouts[index].contentOffset = renderedMessage.contentOffset
+            layouts[index].isDraft = message.state == .draft
+            layouts[index].revision = message.revision
+
+            cumulativeDelta += delta
+            updatedIndexes.insert(index)
+        }
+
+        totalHeight = (layouts.last?.frame.maxY ?? style.timelineInsets.top) + style.timelineInsets.bottom
+
+        if markUnread && !shouldFollow {
+            state.hasUnreadNewContent = true
+        }
+
+        let update = Update(
+            updatedIndexes: updatedIndexes,
+            totalHeight: totalHeight,
+            heightDelta: cumulativeDelta,
+            changedIndex: uniqueSorted.first,
             shouldScrollToBottom: shouldFollow,
             hasUnreadNewContent: state.hasUnreadNewContent
         )
@@ -432,8 +501,22 @@ public final class VVChatTimelineController {
     }
 
     private func syncMessageBackToEntries(_ message: VVChatMessage) {
-        guard let entryIndex = entries.firstIndex(where: { $0.id == message.id }) else { return }
+        guard let entryIndex = entryIndexByID[message.id] else { return }
         entries[entryIndex] = .message(message)
+    }
+
+    private func rebuildIDIndexes() {
+        messageIndexByID.removeAll(keepingCapacity: true)
+        messageIndexByID.reserveCapacity(messages.count)
+        for (index, message) in messages.enumerated() {
+            messageIndexByID[message.id] = index
+        }
+
+        entryIndexByID.removeAll(keepingCapacity: true)
+        entryIndexByID.reserveCapacity(entries.count)
+        for (index, entry) in entries.enumerated() {
+            entryIndexByID[entry.id] = index
+        }
     }
 
     private func materializeMessage(for entry: VVChatTimelineEntry) -> VVChatMessage {

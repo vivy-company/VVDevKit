@@ -10,12 +10,14 @@ public struct VVChatTimelineRenderItem {
     public let frame: CGRect
     public let contentOffset: CGPoint
     public let scene: VVScene
+    public let orderedPrimitiveIndices: [Int]
 
-    public init(id: String, frame: CGRect, contentOffset: CGPoint, scene: VVScene) {
+    public init(id: String, frame: CGRect, contentOffset: CGPoint, scene: VVScene, orderedPrimitiveIndices: [Int]) {
         self.id = id
         self.frame = frame
         self.contentOffset = contentOffset
         self.scene = scene
+        self.orderedPrimitiveIndices = orderedPrimitiveIndices
     }
 }
 
@@ -205,7 +207,14 @@ public final class VVChatTimelineMetalView: MTKView {
             let itemOffset = CGPoint(x: item.frame.origin.x + item.contentOffset.x,
                                      y: item.frame.origin.y + item.contentOffset.y)
 
-            renderScene(item.scene, encoder: encoder, renderer: renderer, imageProvider: renderDataSource, itemOffset: itemOffset)
+            renderScene(
+                item.scene,
+                orderedPrimitiveIndices: item.orderedPrimitiveIndices,
+                encoder: encoder,
+                renderer: renderer,
+                imageProvider: renderDataSource,
+                itemOffset: itemOffset
+            )
 
             let hoverQuads = renderDataSource.hoverQuads(forItemAt: index, itemOffset: itemOffset)
             if !hoverQuads.isEmpty {
@@ -251,6 +260,7 @@ public final class VVChatTimelineMetalView: MTKView {
 
     private func renderScene(
         _ scene: VVScene,
+        orderedPrimitiveIndices: [Int],
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
         imageProvider: VVChatTimelineRenderDataSource,
@@ -294,7 +304,9 @@ public final class VVChatTimelineMetalView: MTKView {
             }
         }
 
-        for primitive in scene.orderedPrimitives() {
+        for primitiveIndex in orderedPrimitiveIndices {
+            guard scene.primitives.indices.contains(primitiveIndex) else { continue }
+            let primitive = scene.primitives[primitiveIndex]
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):

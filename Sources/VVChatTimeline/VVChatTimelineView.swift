@@ -54,6 +54,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var hoveredFooterActionMessageID: String?
     private var hoveredLinkURL: String?
     private var hoveredInteractiveRegionKey: String?
+    private var isPointingCursorActive = false
     private var jumpAnimationToken = UUID()
     private var isAnimatingJump = false
     private var scrollAnimationStartTime: CFTimeInterval = 0
@@ -69,6 +70,25 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private struct SelectionHelperCacheKey: Hashable {
         let messageID: String
         let revision: Int
+    }
+    private struct TimelineInteractionContext {
+        let documentPoint: CGPoint
+        let itemIndex: Int
+        let layout: VVChatTimelineController.ItemLayout
+        let message: VVChatMessage
+        let rendered: VVChatRenderedMessage
+        let localPoint: CGPoint
+    }
+    private struct TimelineHoverTargets {
+        let footerActionMessageID: String?
+        let linkURL: String?
+        let interactiveRegionHit: (messageID: String, region: VVChatInteractiveRegion)?
+
+        static let empty = TimelineHoverTargets(
+            footerActionMessageID: nil,
+            linkURL: nil,
+            interactiveRegionHit: nil
+        )
     }
     private var selectionHelperCache: [SelectionHelperCacheKey: VVMarkdownSelectionHelper] = [:]
     private var selectionHelperCacheOrder: [SelectionHelperCacheKey] = []
@@ -208,6 +228,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         animatedLayoutSnapshots.removeAll(keepingCapacity: false)
         clearSelectionHelperCache()
         visibleRenderRange = 0..<0
+        isPointingCursorActive = false
         controller?.onUpdate = { [weak self] update in
             self?.enqueue(update: update)
         }
@@ -854,13 +875,14 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     public func renderItem(at index: Int) -> VVChatTimelineRenderItem? {
         guard let controller,
               let layout = controller.itemLayout(at: index),
-              let rendered = controller.renderedMessage(for: layout.id) else { return nil }
+              let rendered = controller.renderedMessage(at: index) else { return nil }
         let snapshot = animatedLayoutSnapshots[layout.id] ?? stableLayoutSnapshots[layout.id]
         return VVChatTimelineRenderItem(
             id: layout.id,
             frame: snapshot?.frame ?? layout.frame,
             contentOffset: snapshot?.contentOffset ?? layout.contentOffset,
-            scene: rendered.scene
+            scene: rendered.scene,
+            orderedPrimitiveIndices: rendered.orderedPrimitiveIndices
         )
     }
 
@@ -883,14 +905,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     private func requestImagesForVisibleItems() {
         guard let controller, let imageStore else { return }
-        let visibleRect = scrollView.contentView.bounds
-        for layout in controller.layouts {
-            if layout.frame.maxY < visibleRect.minY { continue }
-            if layout.frame.minY > visibleRect.maxY { break }
-            if let rendered = controller.renderedMessage(for: layout.id) {
-                for url in rendered.imageURLs {
-                    imageStore.ensureImage(url: url)
-                }
+        for index in visibleRenderRange {
+            guard let rendered = controller.renderedMessage(at: index) else { continue }
+            for url in rendered.imageURLs {
+                imageStore.ensureImage(url: url)
             }
         }
     }
@@ -914,7 +932,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         guard index < controller.messages.count else { return [] }
 
         guard let layout = controller.itemLayout(at: index) else { return [] }
-        guard let rendered = controller.renderedMessage(for: layout.id) else { return [] }
+        guard let rendered = controller.renderedMessage(at: index) else { return [] }
 
         let (start, end) = selection.ordered
         guard start.itemIndex <= index && end.itemIndex >= index else { return [] }
@@ -956,7 +974,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         guard let controller,
               let hoveredInteractiveRegionKey,
               let layout = controller.itemLayout(at: index),
-              let rendered = controller.renderedMessage(for: layout.id) else {
+              let rendered = controller.renderedMessage(at: index) else {
             return []
         }
 
@@ -1000,7 +1018,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             guard itemIndex < controller.messages.count else { continue }
 
             guard let layout = controller.itemLayout(at: itemIndex),
-                  let rendered = controller.renderedMessage(for: layout.id) else { continue }
+                  let rendered = controller.renderedMessage(at: itemIndex) else { continue }
 
             let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
 
@@ -1057,7 +1075,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         for i in 0..<controller.layouts.count {
             guard i < controller.messages.count else { continue }
             guard let layout = controller.itemLayout(at: i),
-                  let rendered = controller.renderedMessage(for: layout.id) else { continue }
+                  let rendered = controller.renderedMessage(at: i) else { continue }
             let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
             if let pos = helper.findFirstPosition() {
                 firstPos = ChatTextPosition(itemIndex: i, blockIndex: pos.blockIndex, runIndex: pos.runIndex, characterOffset: pos.characterOffset)
@@ -1070,7 +1088,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         for i in stride(from: controller.layouts.count - 1, through: 0, by: -1) {
             guard i < controller.messages.count else { continue }
             guard let layout = controller.itemLayout(at: i),
-                  let rendered = controller.renderedMessage(for: layout.id) else { continue }
+                  let rendered = controller.renderedMessage(at: i) else { continue }
             let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
             if let pos = helper.findLastPosition() {
                 lastPos = ChatTextPosition(itemIndex: i, blockIndex: pos.blockIndex, runIndex: pos.runIndex, characterOffset: pos.characterOffset)
@@ -1091,16 +1109,17 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
         pendingEntryActivationID = nil
         suppressEntryActivationForCurrentClick = false
         didDragDuringCurrentClick = false
-        updatePointerHover(at: point)
-        if handleFooterActionTap(at: point) {
+        let hoverTargets = resolveHoverTargets(at: point)
+        applyHoverTargets(hoverTargets)
+        if handleFooterActionTap(hoverTargets) {
             suppressEntryActivationForCurrentClick = true
             return
         }
-        if handleInteractiveRegionTap(at: point) {
+        if handleInteractiveRegionTap(hoverTargets) {
             suppressEntryActivationForCurrentClick = true
             return
         }
-        if clickCount >= 1, let url = linkURL(at: point) {
+        if clickCount >= 1, let url = hoverTargets.linkURL {
             suppressEntryActivationForCurrentClick = true
             if let onLinkActivate {
                 onLinkActivate(url)
@@ -1149,52 +1168,113 @@ extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
 }
 
 private extension VVChatTimelineView {
-    func handleFooterActionTap(at point: CGPoint) -> Bool {
-        guard let messageID = footerActionMessageID(at: point) else { return false }
+    private func handleFooterActionTap(_ hoverTargets: TimelineHoverTargets) -> Bool {
+        guard let messageID = hoverTargets.footerActionMessageID else { return false }
         onUserMessageCopyAction?(messageID)
         return true
     }
 
-    func updateFooterActionHover(at point: CGPoint?) -> Bool {
-        let hoveredID = point.flatMap { footerActionMessageID(at: $0) }
-        guard hoveredID != hoveredFooterActionMessageID else { return hoveredID != nil }
-        hoveredFooterActionMessageID = hoveredID
-        onUserMessageCopyHoverChange?(hoveredID)
-        return hoveredID != nil
-    }
-
-    func updateLinkHover(at point: CGPoint?) -> Bool {
-        let hoveredURL = point.flatMap { linkURL(at: $0) }
-        guard hoveredURL != hoveredLinkURL else { return hoveredURL != nil }
-        hoveredLinkURL = hoveredURL
-        return hoveredURL != nil
-    }
-
-    func updateInteractiveRegionHover(at point: CGPoint?) -> Bool {
-        let hoveredKey = point.flatMap { point -> String? in
-            guard let hit = interactiveRegionHit(at: point) else { return nil }
-            return interactiveRegionKey(messageID: hit.messageID, regionID: hit.region.id)
+    private func interactionContext(at point: CGPoint) -> TimelineInteractionContext? {
+        guard let controller else { return nil }
+        let documentPoint = viewPointToDocumentPoint(point)
+        guard let itemIndex = itemIndex(containingDocumentPoint: documentPoint),
+              let layout = controller.itemLayout(at: itemIndex),
+              controller.messages.indices.contains(itemIndex),
+              let rendered = controller.renderedMessage(at: itemIndex) else {
+            return nil
         }
-        guard hoveredKey != hoveredInteractiveRegionKey else { return hoveredKey != nil }
-        hoveredInteractiveRegionKey = hoveredKey
-        metalView.setNeedsDisplay(metalView.bounds)
-        return hoveredKey != nil
+
+        let contentOffset = rendered.selectionContentOffset
+        let localPoint = CGPoint(
+            x: documentPoint.x - layout.frame.origin.x - layout.contentOffset.x - contentOffset.x,
+            y: documentPoint.y - layout.frame.origin.y - layout.contentOffset.y - contentOffset.y
+        )
+
+        return TimelineInteractionContext(
+            documentPoint: documentPoint,
+            itemIndex: itemIndex,
+            layout: layout,
+            message: controller.messages[itemIndex],
+            rendered: rendered,
+            localPoint: localPoint
+        )
     }
 
-    func updatePointerHover(at point: CGPoint?) {
-        let hasFooterHover = updateFooterActionHover(at: point)
-        let hasInteractiveHover = updateInteractiveRegionHover(at: point)
-        let hasLinkHover = updateLinkHover(at: point)
+    private func footerActionMessageID(in context: TimelineInteractionContext) -> String? {
+        guard context.message.role == .user || context.message.role == .assistant else { return nil }
+        guard let actionFrame = context.rendered.footerTrailingActionFrame else { return nil }
+        let frameInDocument = actionFrame.offsetBy(
+            dx: context.layout.frame.origin.x + context.layout.contentOffset.x,
+            dy: context.layout.frame.origin.y + context.layout.contentOffset.y
+        )
+        return frameInDocument.contains(context.documentPoint) ? context.message.id : nil
+    }
 
-        if hasFooterHover || hasInteractiveHover || hasLinkHover {
+    private func linkURL(in context: TimelineInteractionContext) -> String? {
+        let helper = cachedSelectionHelper(messageID: context.layout.id, rendered: context.rendered)
+        return helper.linkURL(at: context.localPoint)
+    }
+
+    private func interactiveRegionHit(in context: TimelineInteractionContext) -> (messageID: String, region: VVChatInteractiveRegion)? {
+        for region in context.rendered.interactiveRegions {
+            let frameInDocument = region.frame.offsetBy(
+                dx: context.layout.frame.origin.x + context.layout.contentOffset.x,
+                dy: context.layout.frame.origin.y + context.layout.contentOffset.y
+            )
+            if frameInDocument.contains(context.documentPoint) {
+                return (context.layout.id, region)
+            }
+        }
+        return nil
+    }
+
+    private func resolveHoverTargets(at point: CGPoint?) -> TimelineHoverTargets {
+        guard let point, let context = interactionContext(at: point) else {
+            return .empty
+        }
+        return TimelineHoverTargets(
+            footerActionMessageID: footerActionMessageID(in: context),
+            linkURL: linkURL(in: context),
+            interactiveRegionHit: interactiveRegionHit(in: context)
+        )
+    }
+
+    private func applyHoverTargets(_ hoverTargets: TimelineHoverTargets) {
+        if hoverTargets.footerActionMessageID != hoveredFooterActionMessageID {
+            hoveredFooterActionMessageID = hoverTargets.footerActionMessageID
+            onUserMessageCopyHoverChange?(hoverTargets.footerActionMessageID)
+        }
+
+        hoveredLinkURL = hoverTargets.linkURL
+
+        let hoveredKey = hoverTargets.interactiveRegionHit.map {
+            interactiveRegionKey(messageID: $0.messageID, regionID: $0.region.id)
+        }
+        if hoveredKey != hoveredInteractiveRegionKey {
+            hoveredInteractiveRegionKey = hoveredKey
+            metalView.setNeedsDisplay(metalView.bounds)
+        }
+    }
+
+    private func updatePointerHover(at point: CGPoint?) {
+        let hoverTargets = resolveHoverTargets(at: point)
+        applyHoverTargets(hoverTargets)
+
+        let shouldUsePointingCursor = hoverTargets.footerActionMessageID != nil ||
+            hoverTargets.interactiveRegionHit != nil ||
+            hoverTargets.linkURL != nil
+        guard shouldUsePointingCursor != isPointingCursorActive else { return }
+        isPointingCursorActive = shouldUsePointingCursor
+
+        if shouldUsePointingCursor {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
         }
     }
 
-    func handleInteractiveRegionTap(at point: CGPoint) -> Bool {
-        guard let hit = interactiveRegionHit(at: point) else { return false }
+    private func handleInteractiveRegionTap(_ hoverTargets: TimelineHoverTargets) -> Bool {
+        guard let hit = hoverTargets.interactiveRegionHit else { return false }
         switch hit.region.action {
         case .link(let url):
             if let onLinkActivate {
@@ -1206,69 +1286,26 @@ private extension VVChatTimelineView {
         }
     }
 
-    func linkURL(at point: CGPoint) -> String? {
-        guard let controller else { return nil }
-        let docPoint = viewPointToDocumentPoint(point)
-        guard let index = itemIndex(containingDocumentPoint: docPoint),
-              let itemLayout = controller.itemLayout(at: index),
-              let rendered = controller.renderedMessage(for: itemLayout.id) else {
-            return nil
-        }
-
-        let contentOffset = rendered.selectionContentOffset
-        let localPoint = CGPoint(
-            x: docPoint.x - itemLayout.frame.origin.x - itemLayout.contentOffset.x - contentOffset.x,
-            y: docPoint.y - itemLayout.frame.origin.y - itemLayout.contentOffset.y - contentOffset.y
-        )
-
-        let helper = cachedSelectionHelper(messageID: itemLayout.id, rendered: rendered)
-        return helper.linkURL(at: localPoint)
+    private func linkURL(at point: CGPoint) -> String? {
+        guard let context = interactionContext(at: point) else { return nil }
+        return linkURL(in: context)
     }
 
-    func footerActionMessageID(at point: CGPoint) -> String? {
-        guard let controller else { return nil }
-        let docPoint = viewPointToDocumentPoint(point)
-        guard let index = itemIndex(containingDocumentPoint: docPoint),
-              index < controller.messages.count else { return nil }
-        let layout = controller.layouts[index]
-        let message = controller.messages[index]
-        guard message.role == .user || message.role == .assistant else { return nil }
-        guard let rendered = controller.renderedMessage(for: layout.id),
-              let actionFrame = rendered.footerTrailingActionFrame else { return nil }
-
-        let frameInDocument = actionFrame.offsetBy(
-            dx: layout.frame.origin.x + layout.contentOffset.x,
-            dy: layout.frame.origin.y + layout.contentOffset.y
-        )
-        return frameInDocument.contains(docPoint) ? message.id : nil
+    private func footerActionMessageID(at point: CGPoint) -> String? {
+        guard let context = interactionContext(at: point) else { return nil }
+        return footerActionMessageID(in: context)
     }
 
-    func interactiveRegionHit(at point: CGPoint) -> (messageID: String, region: VVChatInteractiveRegion)? {
-        guard let controller else { return nil }
-        let docPoint = viewPointToDocumentPoint(point)
-        guard let index = itemIndex(containingDocumentPoint: docPoint),
-              let layout = controller.itemLayout(at: index),
-              let rendered = controller.renderedMessage(for: layout.id) else {
-            return nil
-        }
-
-        for region in rendered.interactiveRegions {
-            let frameInDocument = region.frame.offsetBy(
-                dx: layout.frame.origin.x + layout.contentOffset.x,
-                dy: layout.frame.origin.y + layout.contentOffset.y
-            )
-            if frameInDocument.contains(docPoint) {
-                return (layout.id, region)
-            }
-        }
-        return nil
+    private func interactiveRegionHit(at point: CGPoint) -> (messageID: String, region: VVChatInteractiveRegion)? {
+        guard let context = interactionContext(at: point) else { return nil }
+        return interactiveRegionHit(in: context)
     }
 
-    func interactiveRegionKey(messageID: String, regionID: String) -> String {
+    private func interactiveRegionKey(messageID: String, regionID: String) -> String {
         "\(messageID)::\(regionID)"
     }
 
-    func timelineEntryID(at point: CGPoint) -> String? {
+    private func timelineEntryID(at point: CGPoint) -> String? {
         guard let controller else { return nil }
         let docPoint = viewPointToDocumentPoint(point)
         guard let index = itemIndex(containingDocumentPoint: docPoint) else { return nil }
@@ -1298,7 +1335,7 @@ extension VVChatTimelineView: VVTextHitTestable {
         }
         guard let targetItemIndex,
               let layout = controller.itemLayout(at: targetItemIndex),
-              let rendered = controller.renderedMessage(for: layout.id) else { return nil }
+              let rendered = controller.renderedMessage(at: targetItemIndex) else { return nil }
 
         // Convert to item-local coordinates
         let contentOffset = rendered.selectionContentOffset

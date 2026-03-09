@@ -2157,7 +2157,7 @@ let package = Package(
         ),
         .testTarget(
             name: "VVChatTimelineTests",
-            dependencies: ["VVChatTimeline"]
+            dependencies: ["VVChatTimeline", "VVMarkdown", "VVMetalPrimitives"]
         ),
         .testTarget(
             name: "VVMetalPrimitivesTests",
