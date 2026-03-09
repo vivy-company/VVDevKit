@@ -71,12 +71,12 @@ final class VVRenderingPerformanceTests: XCTestCase {
 
         measure(metrics: [XCTClockMetric()]) {
             autoreleasepool {
-                let result = VVUnifiedDiffSceneRenderer.render(
+                let result = VVDiffSceneRenderer.render(
                     unifiedDiff: diff,
                     width: viewportSize.width,
                     theme: .dark,
                     baseFont: font,
-                    style: .split,
+                    style: .sideBySide,
                     options: .full
                 )
                 let scrollOffsets = RenderingStressFixtures.makeScrollOffsets(totalHeight: result.contentHeight, viewportHeight: viewportSize.height, steps: 4)
@@ -145,12 +145,12 @@ final class VVRenderingPerformanceTests: XCTestCase {
             let baseline = residentMemoryBytes()
             var peak = baseline
 
-            let result = VVUnifiedDiffSceneRenderer.render(
+            let result = VVDiffSceneRenderer.render(
                 unifiedDiff: diff,
                 width: viewportSize.width,
                 theme: .dark,
                 baseFont: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                style: .split,
+                style: .sideBySide,
                 options: .full
             )
             let scrollOffsets = RenderingStressFixtures.makeScrollOffsets(totalHeight: result.contentHeight, viewportHeight: viewportSize.height, steps: 6)

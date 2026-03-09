@@ -8,81 +8,47 @@ import VVMetalPrimitives
 
 // MARK: - Data Model
 
-public enum VVDiffRenderStyle: Hashable, Sendable {
-    case unifiedTable
-    case split
-}
+public typealias VVDiffRenderStyle = VVMarkdown.VVDiffRenderStyle
+public typealias VVDiffRow = VVMarkdown.VVDiffRow
+public typealias VVDiffInlineRenderResult = VVMarkdown.VVDiffRenderResult
 
-/// A parsed row in a unified diff table.
-public struct VVDiffRow: Identifiable, Hashable, Sendable {
-    public enum Kind: String, Hashable, Sendable {
-        case fileHeader
-        case hunkHeader
-        case context
-        case added
-        case deleted
-        case metadata
+private typealias VVDiffSection = VVMarkdown.VVDiffSection
+private typealias VVDiffSplitRow = VVMarkdown.VVDiffSplitRow
+
+public enum VVDiffTable {
+    public static func parse(unifiedDiff: String) -> [VVDiffRow] {
+        VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff).rows
     }
-
-    public let id: Int
-    public let kind: Kind
-    public let oldLineNumber: Int?
-    public let newLineNumber: Int?
-    public let text: String
-
-    public init(
-        id: Int,
-        kind: Kind,
-        oldLineNumber: Int? = nil,
-        newLineNumber: Int? = nil,
-        text: String
-    ) {
-        self.id = id
-        self.kind = kind
-        self.oldLineNumber = oldLineNumber
-        self.newLineNumber = newLineNumber
-        self.text = text
-    }
-}
-
-public struct VVDiffInlineRenderResult: Sendable {
-    public let scene: VVScene
-    public let contentHeight: CGFloat
-
-    public init(scene: VVScene, contentHeight: CGFloat) {
-        self.scene = scene
-        self.contentHeight = contentHeight
-    }
-}
-
-private struct VVDiffSection: Identifiable, Hashable {
-    let id: Int
-    let filePath: String
-    let headerRow: VVDiffRow?
-    let rows: [VVDiffRow]
-
-    var addedCount: Int { rows.filter { $0.kind == .added }.count }
-    var deletedCount: Int { rows.filter { $0.kind == .deleted }.count }
-    var hunkCount: Int { rows.filter { $0.kind == .hunkHeader }.count }
 }
 
 public enum VVDiffInlineRenderer {
+    @available(*, deprecated, message: "Use renderInline(unifiedDiff:width:theme:configuration:) instead.")
     public static func renderUnified(
         unifiedDiff: String,
         width: CGFloat,
         theme: VVTheme,
         configuration: VVConfiguration
     ) -> VVDiffInlineRenderResult {
-        let result = VVUnifiedDiffSceneRenderer.render(
+        renderInline(
+            unifiedDiff: unifiedDiff,
+            width: width,
+            theme: theme,
+            configuration: configuration
+        )
+    }
+
+    public static func renderInline(
+        unifiedDiff: String,
+        width: CGFloat,
+        theme: VVTheme,
+        configuration: VVConfiguration
+    ) -> VVDiffInlineRenderResult {
+        VVDiffSceneRenderer.render(
             unifiedDiff: unifiedDiff,
             width: width,
             theme: markdownTheme(from: theme),
             baseFont: configuration.font,
-            style: .unifiedTable
-        )
-        return VVDiffInlineRenderResult(
-            scene: result.scene,
-            contentHeight: result.contentHeight
+            style: .inline
         )
     }
 }
@@ -105,92 +71,6 @@ private func markdownTheme(from theme: VVTheme) -> MarkdownTheme {
 
 private func markdownWithAlpha(_ color: SIMD4<Float>, _ alpha: Float) -> SIMD4<Float> {
     SIMD4<Float>(color.x, color.y, color.z, alpha)
-}
-
-private extension VVDiffRow.Kind {
-    var isCode: Bool {
-        switch self {
-        case .context, .added, .deleted:
-            return true
-        case .fileHeader, .hunkHeader, .metadata:
-            return false
-        }
-    }
-}
-
-private struct VVDiffSplitRow: Identifiable, Hashable {
-    struct Cell: Hashable {
-        let rowID: Int
-        let lineNumber: Int?
-        let text: String
-        let kind: VVDiffRow.Kind
-        let inlineChanges: [InlineRange]
-    }
-
-    struct InlineRange: Hashable {
-        let start: Int
-        let end: Int
-    }
-
-    let id: Int
-    let header: VVDiffRow?
-    let left: Cell?
-    let right: Cell?
-}
-
-private func mapDiffRowKind(_ kind: VVUnifiedDiffRow.Kind) -> VVDiffRow.Kind {
-    switch kind {
-    case .fileHeader: return .fileHeader
-    case .hunkHeader: return .hunkHeader
-    case .context: return .context
-    case .added: return .added
-    case .deleted: return .deleted
-    case .metadata: return .metadata
-    }
-}
-
-private func mapDiffRow(_ row: VVUnifiedDiffRow) -> VVDiffRow {
-    VVDiffRow(
-        id: row.id,
-        kind: mapDiffRowKind(row.kind),
-        oldLineNumber: row.oldLineNumber,
-        newLineNumber: row.newLineNumber,
-        text: row.text
-    )
-}
-
-private func mapDiffSection(_ section: VVUnifiedDiffSection) -> VVDiffSection {
-    VVDiffSection(
-        id: section.id,
-        filePath: section.filePath,
-        headerRow: section.headerRow.map(mapDiffRow),
-        rows: section.rows.map(mapDiffRow)
-    )
-}
-
-private func mapDiffSplitRow(_ row: VVUnifiedDiffSplitRow) -> VVDiffSplitRow {
-    VVDiffSplitRow(
-        id: row.id,
-        header: row.header.map(mapDiffRow),
-        left: row.left.map { cell in
-            VVDiffSplitRow.Cell(
-                rowID: cell.rowID,
-                lineNumber: cell.lineNumber,
-                text: cell.text,
-                kind: mapDiffRowKind(cell.kind),
-                inlineChanges: cell.inlineChanges.map { .init(start: $0.start, end: $0.end) }
-            )
-        },
-        right: row.right.map { cell in
-            VVDiffSplitRow.Cell(
-                rowID: cell.rowID,
-                lineNumber: cell.lineNumber,
-                text: cell.text,
-                kind: mapDiffRowKind(cell.kind),
-                inlineChanges: cell.inlineChanges.map { .init(start: $0.start, end: $0.end) }
-            )
-        }
-    )
 }
 
 // MARK: - Text Selection Types
@@ -250,45 +130,6 @@ private struct ViewportSceneCacheKey: Equatable {
         visibleRange.lowerBound >= startIndex &&
         visibleRange.upperBound <= endIndex
     }
-}
-
-// MARK: - Parsing
-
-/// Backward-compatible parse entry point for tests. Use `VVDiffView(unifiedDiff:)` for rendering.
-public enum VVDiffTable {
-    /// Parse unified git diff text into rows suitable for `VVDiffView`.
-    public static func parse(unifiedDiff: String) -> [VVDiffRow] {
-        parseDiffModel(unifiedDiff: unifiedDiff).rows
-    }
-}
-
-private struct ParsedDiffModel {
-    let rows: [VVDiffRow]
-    let analysis: VVUnifiedDiffDocument
-}
-
-private func parseDiffModel(unifiedDiff: String) -> ParsedDiffModel {
-    let analysis = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
-    let rawHunkHeaders = unifiedDiff
-        .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-        .lazy
-        .filter { $0.hasPrefix("@@") }
-        .map(String.init)
-
-    var rawHeaderIterator = rawHunkHeaders.makeIterator()
-    let rows = analysis.rows.map { row in
-        guard row.kind == .hunkHeader, let rawHeader = rawHeaderIterator.next() else {
-            return mapDiffRow(row)
-        }
-        return VVDiffRow(
-            id: row.id,
-            kind: .hunkHeader,
-            oldLineNumber: row.oldLineNumber,
-            newLineNumber: row.newLineNumber,
-            text: rawHeader
-        )
-    }
-    return ParsedDiffModel(rows: rows, analysis: analysis)
 }
 
 // MARK: - VVDiffRenderer
@@ -407,7 +248,7 @@ private final class VVDiffRenderer {
         return max(count, 1)
     }
 
-    // Shared scene construction lives in VVUnifiedDiffSceneRenderer.
+    // Shared scene construction lives in VVDiffSceneRenderer.
     // This wrapper-local renderer now exists only for diff metrics and colors that
     // are still needed for sizing, geometry, and selection math.
 
@@ -456,8 +297,8 @@ private final class VVDiffMetalView: NSView {
     private var unifiedDiffSource: String = ""
     private var sections: [VVDiffSection] = []
     private var splitRows: [VVDiffSplitRow] = []
-    private var analyzedDocument: VVUnifiedDiffDocument?
-    private var renderStyle: VVDiffRenderStyle = .unifiedTable
+    private var analyzedDocument: VVDiffDocument?
+    private var renderStyle: VVDiffRenderStyle = .inline
     private var theme: VVTheme = .defaultDark
     private var configuration: VVConfiguration = .default
     private var language: VVLanguage?
@@ -491,8 +332,6 @@ private final class VVDiffMetalView: NSView {
     private static let sceneCacheViewportPaddingMultiplier: CGFloat = 1.25
 
     private var baseFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
-    private var baseFontAscent: CGFloat = 0
-    private var baseFontDescent: CGFloat = 0
 
     // Selection support
     private let selectionController = VVTextSelectionController<DiffTextPosition>()
@@ -598,7 +437,7 @@ private final class VVDiffMetalView: NSView {
     }
 
     private var wrapsUnified: Bool {
-        configuration.wrapLines && (renderStyle == .split || !fastPlainModeEnabled)
+        configuration.wrapLines && (renderStyle == .sideBySide || !fastPlainModeEnabled)
     }
 
     private static func computeRowsSignature(_ rows: [VVDiffRow]) -> Int {
@@ -647,8 +486,7 @@ private final class VVDiffMetalView: NSView {
 
     func update(
         unifiedDiff: String,
-        analysis: VVUnifiedDiffDocument,
-        rows: [VVDiffRow],
+        analysis: VVDiffDocument,
         style: VVDiffRenderStyle,
         theme: VVTheme,
         configuration: VVConfiguration,
@@ -656,6 +494,7 @@ private final class VVDiffMetalView: NSView {
         syntaxHighlightingEnabled: Bool,
         onFileHeaderActivate: ((String) -> Void)?
     ) {
+        let rows = analysis.rows
         self.unifiedDiffSource = unifiedDiff
         let nextFastPlainMode = Self.shouldUseFastPlainMode(rows: rows)
         let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled
@@ -696,7 +535,7 @@ private final class VVDiffMetalView: NSView {
             rebuildCodeRowLookup()
         }
 
-        if style == .split {
+        if style == .sideBySide {
             scrollView?.hasHorizontalScroller = !wrapsUnified
         } else {
             scrollView?.hasHorizontalScroller = !wrapsUnified && !fastPlainModeEnabled
@@ -704,8 +543,6 @@ private final class VVDiffMetalView: NSView {
 
         if fontChanged {
             baseFont = configuration.font
-            baseFontAscent = CTFontGetAscent(baseFont)
-            baseFontDescent = CTFontGetDescent(baseFont)
             let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
             if let ctx = metalContext {
                 renderer = MarkdownMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: scale)
@@ -716,9 +553,9 @@ private final class VVDiffMetalView: NSView {
 
         if rowsChanged || styleChanged {
             let document = analysis
-            sections = document.sections.map(mapDiffSection)
+            sections = document.sections
             rebuildFileHeaderPathLookup()
-            splitRows = document.splitRows.map(mapDiffSplitRow)
+            splitRows = document.splitRows
         }
 
         if themeChanged || fontChanged {
@@ -771,7 +608,7 @@ private final class VVDiffMetalView: NSView {
         }
 
         let minWidth: CGFloat
-        if renderStyle == .split {
+        if renderStyle == .sideBySide {
             minWidth = 840 // 420 * 2
         } else if wrapsUnified || fastPlainModeEnabled {
             minWidth = width
@@ -803,13 +640,14 @@ private final class VVDiffMetalView: NSView {
         let dr = ensureDiffRenderer()
 
         switch renderStyle {
-        case .unifiedTable:
+        case .inline:
             buildRowGeometriesUnified(width: width, renderer: dr, wrapLines: wrapsUnified)
-        case .split:
+        case .sideBySide:
             buildRowGeometriesSplit(width: width, renderer: dr, wrapLines: wrapsUnified)
         }
 
         rowGeometriesContentHeight = rowGeometries.last.map { $0.y + $0.height } ?? 0
+        assertRowGeometriesAreSorted()
         rowGeometryCacheKey = cacheKey
     }
 
@@ -847,11 +685,12 @@ private final class VVDiffMetalView: NSView {
             // Section rows (skip metadata)
             for row in section.rows {
                 if row.kind == .metadata { continue }
+                let displayText = VVDiffDisplayText(for: row)
                 let wrappedLines: [String]
                 if wrapLines && (row.kind.isCode || row.kind == .hunkHeader) {
-                    wrappedLines = wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
+                    wrappedLines = wrappedTextSegments(displayText, maxChars: maxCharsPerVisualLine)
                 } else {
-                    wrappedLines = [row.text]
+                    wrappedLines = [displayText]
                 }
 
                 for line in wrappedLines {
@@ -915,11 +754,12 @@ private final class VVDiffMetalView: NSView {
 
         for splitRow in splitRows {
             if let header = splitRow.header {
+                let headerDisplayText = VVDiffDisplayText(for: header)
                 let wrappedLines: [String]
                 if wrapLines && header.kind == .hunkHeader {
-                    wrappedLines = wrappedTextSegments(header.text, maxChars: headerMaxCharsPerVisualLine)
+                    wrappedLines = wrappedTextSegments(headerDisplayText, maxChars: headerMaxCharsPerVisualLine)
                 } else {
-                    wrappedLines = [header.text]
+                    wrappedLines = [headerDisplayText]
                 }
                 let rowH = header.kind == .fileHeader
                     ? renderer.headerHeight
@@ -931,7 +771,7 @@ private final class VVDiffMetalView: NSView {
                         y: y,
                         height: rowH,
                         isCodeRow: false,
-                        text: header.text,
+                            text: headerDisplayText,
                         codeStartX: paneCodeStartX,
                         paneX: 0,
                         paneWidth: columnWidth * 2
@@ -969,9 +809,9 @@ private final class VVDiffMetalView: NSView {
                 } ?? []
                 let visualLineCount = max(1, max(leftWrappedLines.count, rightWrappedLines.count))
                 let rowH = renderer.lineHeight * CGFloat(visualLineCount)
-                // Add left cell if present
-                if let left = splitRow.left {
-                    for (lineIndex, line) in leftWrappedLines.enumerated() {
+                for lineIndex in 0..<visualLineCount {
+                    if let left = splitRow.left, lineIndex < leftWrappedLines.count {
+                        let line = leftWrappedLines[lineIndex]
                         rowGeometries.append(RowGeometry(
                             rowIndex: rowIndex,
                             rowID: left.rowID,
@@ -984,11 +824,22 @@ private final class VVDiffMetalView: NSView {
                             paneWidth: columnWidth
                         ))
                         rowIndex += 1
+                    } else if let left = splitRow.left {
+                        rowGeometries.append(RowGeometry(
+                            rowIndex: rowIndex,
+                            rowID: left.rowID,
+                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
+                            height: renderer.lineHeight,
+                            isCodeRow: false,
+                            text: "",
+                            codeStartX: paneCodeStartX,
+                            paneX: 0,
+                            paneWidth: columnWidth
+                        ))
+                        rowIndex += 1
                     }
-                }
-                // Add right cell if present
-                if let right = splitRow.right {
-                    for (lineIndex, line) in rightWrappedLines.enumerated() {
+                    if let right = splitRow.right, lineIndex < rightWrappedLines.count {
+                        let line = rightWrappedLines[lineIndex]
                         rowGeometries.append(RowGeometry(
                             rowIndex: rowIndex,
                             rowID: right.rowID,
@@ -1001,11 +852,35 @@ private final class VVDiffMetalView: NSView {
                             paneWidth: columnWidth
                         ))
                         rowIndex += 1
+                    } else if let right = splitRow.right {
+                        rowGeometries.append(RowGeometry(
+                            rowIndex: rowIndex,
+                            rowID: right.rowID,
+                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
+                            height: renderer.lineHeight,
+                            isCodeRow: false,
+                            text: "",
+                            codeStartX: paneCodeStartX,
+                            paneX: columnWidth,
+                            paneWidth: columnWidth
+                        ))
+                        rowIndex += 1
                     }
                 }
                 y += rowH
             }
         }
+    }
+
+    private func assertRowGeometriesAreSorted() {
+        #if DEBUG
+        guard !rowGeometries.isEmpty else { return }
+        var previousY = rowGeometries[0].y
+        for geometry in rowGeometries.dropFirst() {
+            assert(geometry.y >= previousY, "Row geometries must remain sorted by y for viewport lookup")
+            previousY = geometry.y
+        }
+        #endif
     }
 
     private func rebuildFileHeaderPathLookup() {
@@ -1337,52 +1212,15 @@ extension VVDiffMetalView: MTKViewDelegate {
         commandBuffer?.commit()
     }
 
-    private func renderScene(
-        _ scene: VVScene,
-        orderedPrimitives: [VVPrimitive],
-        visibleRect: CGRect,
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
-    ) {
-        var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-        var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-
-        func flushTextBatches() {
-            if !glyphInstances.isEmpty || !colorGlyphInstances.isEmpty {
-                renderGlyphBatches(glyphInstances, encoder: encoder, renderer: renderer, isColor: false)
-                renderGlyphBatches(colorGlyphInstances, encoder: encoder, renderer: renderer, isColor: true)
-            }
-            glyphInstances.removeAll(keepingCapacity: true)
-            colorGlyphInstances.removeAll(keepingCapacity: true)
-        }
-
-        let visiblePrimitives = cachedSceneVisibilityIndex?.visiblePrimitives(in: visibleRect, from: orderedPrimitives) ?? orderedPrimitives
-
-        for primitive in visiblePrimitives {
-            switch primitive.kind {
-            case .textRun(let run):
-                for glyph in run.glyphs {
-                    appendGlyphInstance(glyph, renderer: renderer, glyphInstances: &glyphInstances, colorGlyphInstances: &colorGlyphInstances)
-                }
-
-            default:
-                flushTextBatches()
-                renderPrimitive(primitive, encoder: encoder, renderer: renderer)
-            }
-        }
-
-        flushTextBatches()
-    }
-
     private func buildViewportScene(visibleRect: CGRect, renderWidth: CGFloat, cacheKey: ViewportSceneCacheKey) -> VVScene {
         guard let analyzedDocument else { return VVScene() }
         let visibleRowIDs = rowIDs(inGeometryRange: cacheKey.startIndex..<cacheKey.endIndex)
-        let result = VVUnifiedDiffSceneRenderer.render(
+        let result = VVDiffSceneRenderer.render(
             document: analyzedDocument,
             width: renderWidth,
             theme: markdownTheme(from: theme),
             baseFont: configuration.font,
-            style: renderStyle == .split ? .split : .unifiedTable,
+            style: renderStyle == .sideBySide ? .sideBySide : .inline,
             options: .full,
             highlightedRangesOverride: highlightedRanges,
             includedRowIDs: visibleRowIDs
@@ -1430,72 +1268,6 @@ extension VVDiffMetalView: MTKViewDelegate {
         )
     }
 
-    private func renderPrimitive(
-        _ primitive: VVPrimitive,
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
-    ) {
-        let transform = primitive.transform
-        switch primitive.kind {
-        case .quad(let quad):
-            renderQuadPrimitive(quad, transform: transform, encoder: encoder, renderer: renderer)
-
-        case .gradientQuad(let quad):
-            renderGradientQuad(quad, transform: transform, encoder: encoder, renderer: renderer)
-
-        case .line(let line):
-            renderLinePrimitive(line, transform: transform, encoder: encoder, renderer: renderer)
-
-        case .underline(let underline):
-            let origin = transformed(point: underline.origin, by: transform)
-            let size = transformed(size: CGSize(width: underline.width, height: underline.thickness), by: transform)
-            let instance = LineInstance(
-                position: SIMD2<Float>(Float(origin.x), Float(origin.y)),
-                width: Float(max(1, size.width)),
-                height: Float(max(underline.thickness, size.height)),
-                color: underline.color
-            )
-            if let buffer = renderer.makeBuffer(for: [instance]) {
-                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: 1)
-            }
-
-        case .path(let path):
-            renderPathPrimitive(path, inheritedTransform: transform, encoder: encoder, renderer: renderer)
-
-        default:
-            break
-        }
-    }
-
-    private func renderGradientQuad(
-        _ gradient: VVGradientQuadPrimitive,
-        transform: VVTransform2D? = nil,
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
-    ) {
-        let frame = transformed(rect: gradient.frame, by: transform).integral
-        guard frame.width > 0, frame.height > 0 else { return }
-        let axis: SIMD2<Float>
-        if let angle = gradient.angle {
-            axis = SIMD2<Float>(Float(cos(angle)), Float(sin(angle)))
-        } else {
-            switch gradient.direction {
-            case .horizontal: axis = SIMD2<Float>(1, 0)
-            case .vertical: axis = SIMD2<Float>(0, 1)
-            }
-        }
-        let instance = GradientQuadInstance(
-            position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
-            size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
-            startColor: gradient.startColor,
-            endColor: gradient.endColor,
-            axis: axis,
-            cornerRadius: Float(gradient.cornerRadius)
-        )
-        guard let buffer = renderer.makeBuffer(for: [instance]) else { return }
-        renderer.renderGradientQuads(encoder: encoder, instances: buffer, instanceCount: 1)
-    }
-
     private func fullScissorRect() -> MTLScissorRect {
         let width = max(1, Int(currentDrawableSize.width))
         let height = max(1, Int(currentDrawableSize.height))
@@ -1519,300 +1291,6 @@ extension VVDiffMetalView: MTKViewDelegate {
         let width = min(maxWidth, Int(ceil(clipped.width * scaleX)))
         let height = min(maxHeight, Int(ceil(clipped.height * scaleY)))
         return MTLScissorRect(x: x, y: y, width: max(1, width), height: max(1, height))
-    }
-
-    private func renderQuadPrimitive(
-        _ quad: VVQuadPrimitive,
-        transform: VVTransform2D?,
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
-    ) {
-        let frame = transformed(rect: quad.frame, by: transform)
-        guard frame.width > 0, frame.height > 0 else { return }
-
-        let instance = QuadInstance(
-            position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
-            size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
-            color: SIMD4<Float>(quad.color.x, quad.color.y, quad.color.z, quad.color.w * quad.opacity),
-            cornerRadius: Float(quad.cornerRadius)
-        )
-        if let buffer = renderer.makeBuffer(for: [instance]) {
-            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
-        }
-
-        guard let border = quad.border else { return }
-        if canRenderBorderAsSingleRing(border) {
-            let borderInstance = QuadInstance(
-                position: SIMD2<Float>(Float(frame.origin.x), Float(frame.origin.y)),
-                size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
-                color: border.color,
-                cornerRadius: Float(quad.cornerRadius),
-                borderWidth: Float(border.widths.top)
-            )
-            if let buffer = renderer.makeBuffer(for: [borderInstance]) {
-                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: true)
-            }
-            return
-        }
-        let segments = borderSegments(for: frame, border: border, cornerRadius: quad.cornerRadius)
-        if let buffer = renderer.makeBuffer(for: segments) {
-            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: segments.count, rounded: false)
-        }
-    }
-
-    private func renderLinePrimitive(
-        _ line: VVLinePrimitive,
-        transform: VVTransform2D?,
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
-    ) {
-        let transformedLine = VVLinePrimitive(
-            start: transformed(point: line.start, by: transform),
-            end: transformed(point: line.end, by: transform),
-            thickness: line.thickness,
-            color: line.color,
-            dash: line.dash
-        )
-        let segments = dashedSegments(for: transformedLine)
-        let instances = segments.map { segment -> LineInstance in
-            let minX = min(segment.start.x, segment.end.x)
-            let minY = min(segment.start.y, segment.end.y)
-            let width = abs(segment.end.x - segment.start.x)
-            let height = abs(segment.end.y - segment.start.y)
-            return LineInstance(
-                position: SIMD2<Float>(Float(minX), Float(minY)),
-                width: Float(width > 0 ? width : segment.thickness),
-                height: Float(height > 0 ? height : segment.thickness),
-                color: segment.color
-            )
-        }
-        if let buffer = renderer.makeBuffer(for: instances) {
-            renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: instances.count)
-        }
-    }
-
-    private func renderPathPrimitive(
-        _ path: VVPathPrimitive,
-        inheritedTransform: VVTransform2D?,
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
-    ) {
-        let combinedTransform: VVTransform2D
-        switch (inheritedTransform, path.transform.isIdentity ? nil : path.transform) {
-        case let (lhs?, rhs?):
-            combinedTransform = lhs.composed(with: rhs)
-        case let (lhs?, nil):
-            combinedTransform = lhs
-        case let (nil, rhs?):
-            combinedTransform = rhs
-        case (nil, nil):
-            combinedTransform = .identity
-        }
-
-        let transformedVertices = path.vertices.map {
-            VVPathVertex(position: transformed(point: $0.position, by: combinedTransform), stPosition: $0.stPosition)
-        }
-        guard let buffer = renderer.makeBuffer(for: transformedVertices) else { return }
-        if let fill = path.fill, path.fillVertexCount > 0 {
-            renderer.renderPath(encoder: encoder, vertices: buffer, vertexStart: 0, vertexCount: path.fillVertexCount, color: fill)
-        }
-        if let stroke = path.stroke, path.strokeVertexCount > 0 {
-            renderer.renderPath(encoder: encoder, vertices: buffer, vertexStart: path.fillVertexCount, vertexCount: path.strokeVertexCount, color: stroke.color)
-        }
-    }
-
-    private func transformed(rect: CGRect, by transform: VVTransform2D?) -> CGRect {
-        guard let transform, !transform.isIdentity else { return rect }
-        let corners = [
-            rect.origin,
-            CGPoint(x: rect.maxX, y: rect.minY),
-            CGPoint(x: rect.maxX, y: rect.maxY),
-            CGPoint(x: rect.minX, y: rect.maxY)
-        ].map { transform.apply(to: $0) }
-        let xs = corners.map(\.x)
-        let ys = corners.map(\.y)
-        return CGRect(
-            x: xs.min() ?? rect.minX,
-            y: ys.min() ?? rect.minY,
-            width: (xs.max() ?? rect.maxX) - (xs.min() ?? rect.minX),
-            height: (ys.max() ?? rect.maxY) - (ys.min() ?? rect.minY)
-        )
-    }
-
-    private func transformed(point: CGPoint, by transform: VVTransform2D?) -> CGPoint {
-        guard let transform, !transform.isIdentity else { return point }
-        return transform.apply(to: point)
-    }
-
-    private func transformed(size: CGSize, by transform: VVTransform2D?) -> CGSize {
-        guard let transform, !transform.isIdentity else { return size }
-        return transformed(rect: CGRect(origin: .zero, size: size), by: transform).size
-    }
-
-    private func dashedSegments(for line: VVLinePrimitive) -> [VVLinePrimitive] {
-        switch line.dash {
-        case .solid:
-            return [line]
-        case .dashed(let on, let off):
-            return patternedSegments(for: line, pattern: [on, off])
-        case .pattern(let values):
-            return patternedSegments(for: line, pattern: values)
-        }
-    }
-
-    private func patternedSegments(for line: VVLinePrimitive, pattern: [CGFloat]) -> [VVLinePrimitive] {
-        let cleanedPattern = pattern.filter { $0 > 0 }
-        guard cleanedPattern.count >= 2 else { return [line] }
-
-        let dx = line.end.x - line.start.x
-        let dy = line.end.y - line.start.y
-        let length = hypot(dx, dy)
-        guard length > 0 else { return [line] }
-
-        let ux = dx / length
-        let uy = dy / length
-        var distance: CGFloat = 0
-        var index = 0
-        var draw = true
-        var segments: [VVLinePrimitive] = []
-
-        while distance < length {
-            let segmentLength = min(cleanedPattern[index % cleanedPattern.count], length - distance)
-            let start = CGPoint(x: line.start.x + ux * distance, y: line.start.y + uy * distance)
-            let end = CGPoint(x: line.start.x + ux * (distance + segmentLength), y: line.start.y + uy * (distance + segmentLength))
-            if draw {
-                segments.append(VVLinePrimitive(start: start, end: end, thickness: line.thickness, color: line.color))
-            }
-            distance += segmentLength
-            index += 1
-            draw.toggle()
-        }
-
-        return segments
-    }
-
-    private func canRenderBorderAsSingleRing(_ border: VVBorder) -> Bool {
-        guard case .solid = border.style else { return false }
-        let widths = border.widths
-        return widths.top > 0 &&
-            abs(widths.top - widths.right) < 0.001 &&
-            abs(widths.top - widths.bottom) < 0.001 &&
-            abs(widths.top - widths.left) < 0.001
-    }
-
-    private func borderSegments(for frame: CGRect, border: VVBorder, cornerRadius: CGFloat) -> [QuadInstance] {
-        let widths = border.widths
-        let color = border.color
-        var segments: [QuadInstance] = []
-
-        func append(_ rect: CGRect) {
-            guard rect.width > 0, rect.height > 0 else { return }
-            segments.append(
-                QuadInstance(
-                    position: SIMD2<Float>(Float(rect.origin.x), Float(rect.origin.y)),
-                    size: SIMD2<Float>(Float(rect.width), Float(rect.height)),
-                    color: color,
-                    cornerRadius: 0
-                )
-            )
-        }
-
-        switch border.style {
-        case .solid:
-            append(CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: widths.top))
-            append(CGRect(x: frame.minX, y: frame.maxY - widths.bottom, width: frame.width, height: widths.bottom))
-            append(CGRect(x: frame.minX, y: frame.minY + widths.top, width: widths.left, height: max(0, frame.height - widths.top - widths.bottom)))
-            append(CGRect(x: frame.maxX - widths.right, y: frame.minY + widths.top, width: widths.right, height: max(0, frame.height - widths.top - widths.bottom)))
-        case .dashed(let dashLength, let gapLength):
-            let lines = [
-                VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.minY), end: CGPoint(x: frame.maxX, y: frame.minY), thickness: max(1, widths.top), color: color, dash: .dashed(on: dashLength, off: gapLength)),
-                VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.maxY), end: CGPoint(x: frame.maxX, y: frame.maxY), thickness: max(1, widths.bottom), color: color, dash: .dashed(on: dashLength, off: gapLength)),
-                VVLinePrimitive(start: CGPoint(x: frame.minX, y: frame.minY), end: CGPoint(x: frame.minX, y: frame.maxY), thickness: max(1, widths.left), color: color, dash: .dashed(on: dashLength, off: gapLength)),
-                VVLinePrimitive(start: CGPoint(x: frame.maxX, y: frame.minY), end: CGPoint(x: frame.maxX, y: frame.maxY), thickness: max(1, widths.right), color: color, dash: .dashed(on: dashLength, off: gapLength))
-            ]
-            for line in lines {
-                for segment in dashedSegments(for: line) {
-                    let minX = min(segment.start.x, segment.end.x)
-                    let minY = min(segment.start.y, segment.end.y)
-                    let width = abs(segment.end.x - segment.start.x)
-                    let height = abs(segment.end.y - segment.start.y)
-                    append(CGRect(x: minX, y: minY, width: width > 0 ? width : segment.thickness, height: height > 0 ? height : segment.thickness))
-                }
-            }
-        }
-
-        return segments
-    }
-
-    private func lerpColor(_ start: SIMD4<Float>, _ end: SIMD4<Float>, t: Float) -> SIMD4<Float> {
-        let clamped = max(0, min(1, t))
-        return start + (end - start) * clamped
-    }
-
-    private func appendGlyphInstance(
-        _ glyph: VVTextGlyph,
-        renderer: MarkdownMetalRenderer,
-        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
-        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]]
-    ) {
-        let layoutVariant = toLayoutFontVariant(glyph.fontVariant)
-        let cgGlyph = CGGlyph(glyph.glyphID)
-
-        let cached: MarkdownCachedGlyph?
-        if let fontName = glyph.fontName {
-            cached = renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
-        } else {
-            cached = renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
-        }
-
-        guard let cached else { return }
-        let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
-        let instance = MarkdownGlyphInstance(
-            position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x), Float(glyph.position.y + cached.bearing.y)),
-            size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
-            uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
-            uvSize: SIMD2<Float>(Float(cached.uvRect.width), Float(cached.uvRect.height)),
-            color: glyphColor,
-            atlasIndex: UInt32(cached.atlasIndex)
-        )
-        if cached.isColor {
-            colorGlyphInstances[cached.atlasIndex, default: []].append(instance)
-        } else {
-            glyphInstances[cached.atlasIndex, default: []].append(instance)
-        }
-    }
-
-    private func renderGlyphBatches(
-        _ batches: [Int: [MarkdownGlyphInstance]],
-        encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer,
-        isColor: Bool
-    ) {
-        guard !batches.isEmpty else { return }
-        let textures = isColor ? renderer.glyphAtlas.allColorAtlasTextures : renderer.glyphAtlas.allAtlasTextures
-        for atlasIndex in batches.keys.sorted() {
-            guard atlasIndex >= 0 && atlasIndex < textures.count else { continue }
-            guard let instances = batches[atlasIndex], !instances.isEmpty else { continue }
-            guard let buffer = renderer.makeBuffer(for: instances) else { continue }
-            if isColor {
-                renderer.renderColorGlyphs(encoder: encoder, instances: buffer, instanceCount: instances.count, texture: textures[atlasIndex])
-            } else {
-                renderer.renderGlyphs(encoder: encoder, instances: buffer, instanceCount: instances.count, texture: textures[atlasIndex])
-            }
-        }
-    }
-
-    private func toLayoutFontVariant(_ variant: VVFontVariant) -> MDFontVariant {
-        switch variant {
-        case .regular: return .regular
-        case .semibold: return .semibold
-        case .semiboldItalic: return .semiboldItalic
-        case .bold: return .bold
-        case .italic: return .italic
-        case .boldItalic: return .boldItalic
-        case .monospace: return .monospace
-        case .emoji: return .emoji
-        }
     }
 
     // MARK: - Selection Support
@@ -1862,7 +1340,7 @@ extension VVDiffMetalView: MTKViewDelegate {
                         }
                     }
                     // Return the row whose pane contains the X click
-                    return candidates.first(where: { x >= $0.paneX && x < $0.paneX + $0.paneWidth }) ?? geo
+                    return candidates.first(where: { x >= $0.paneX && x < $0.paneX + $0.paneWidth })
                 }
                 return geo
             }
@@ -1910,7 +1388,7 @@ extension VVDiffMetalView: MTKViewDelegate {
     private func fileHeaderPath(at point: CGPoint) -> String? {
         let docPoint = viewPointToDocumentPoint(point)
         let row: RowGeometry?
-        if renderStyle == .split {
+        if renderStyle == .sideBySide {
             row = findRow(at: docPoint.y, x: docPoint.x)
         } else {
             row = findRow(at: docPoint.y)
@@ -1967,7 +1445,7 @@ extension VVDiffMetalView: VVTextHitTestable {
 
         // In split mode, find the row matching both Y and the correct pane (by X)
         let geo: RowGeometry?
-        if renderStyle == .split {
+        if renderStyle == .sideBySide {
             geo = findRow(at: docPoint.y, x: docPoint.x)
         } else {
             geo = findRow(at: docPoint.y)
@@ -2001,14 +1479,14 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
             guard geo.rowIndex >= start.rowIndex && geo.rowIndex <= end.rowIndex else { continue }
 
             // In split mode, only select rows within the same pane
-            if renderStyle == .split && geo.paneX != selectionPane { continue }
+            if renderStyle == .sideBySide && geo.paneX != selectionPane { continue }
 
             // For non-code rows (hunk headers, file headers), draw full-width highlight
             guard geo.isCodeRow else {
                 // Only fill non-code rows that are fully interior to the selection
                 if geo.rowIndex > start.rowIndex && geo.rowIndex < end.rowIndex {
-                    let quadPaneX = renderStyle == .split ? selectionPane : geo.paneX
-                    let quadPaneW = renderStyle == .split ? geo.paneWidth / 2 : geo.paneWidth
+                    let quadPaneX = renderStyle == .sideBySide ? selectionPane : geo.paneX
+                    let quadPaneW = renderStyle == .sideBySide ? geo.paneWidth / 2 : geo.paneWidth
                     quads.append(VVQuadPrimitive(
                         frame: CGRect(x: quadPaneX, y: geo.y, width: quadPaneW, height: geo.height),
                         color: color,
@@ -2072,7 +1550,7 @@ extension VVDiffMetalView: VVTextExtractor {
         for geo in rowGeometries {
             guard geo.rowIndex >= start.rowIndex && geo.rowIndex <= end.rowIndex else { continue }
             // In split mode, only extract text from the same pane
-            if renderStyle == .split && geo.paneX != selectionPane { continue }
+            if renderStyle == .sideBySide && geo.paneX != selectionPane { continue }
             guard geo.isCodeRow else { continue }
 
             let text = geo.text
@@ -2112,26 +1590,25 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
 
     final class Coordinator {
         private var lastUnifiedDiff: String?
-        private var cachedModel: ParsedDiffModel?
+        private var cachedAnalysis: VVDiffDocument?
 
-        func model(for unifiedDiff: String) -> ParsedDiffModel {
-            if let lastUnifiedDiff, lastUnifiedDiff == unifiedDiff, let cachedModel {
-                return cachedModel
+        func analysis(for unifiedDiff: String) -> VVDiffDocument {
+            if let lastUnifiedDiff, lastUnifiedDiff == unifiedDiff, let cachedAnalysis {
+                return cachedAnalysis
             }
-            let parsed = parseDiffModel(unifiedDiff: unifiedDiff)
+            let analysis = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
             lastUnifiedDiff = unifiedDiff
-            cachedModel = parsed
-            return parsed
+            cachedAnalysis = analysis
+            return analysis
         }
     }
 
     func makeNSView(context: Context) -> VVDiffMetalView {
         let view = VVDiffMetalView(frame: .zero)
-        let model = context.coordinator.model(for: unifiedDiff)
+        let analysis = context.coordinator.analysis(for: unifiedDiff)
         view.update(
             unifiedDiff: unifiedDiff,
-            analysis: model.analysis,
-            rows: model.rows,
+            analysis: analysis,
             style: renderStyle,
             theme: theme,
             configuration: configuration,
@@ -2143,11 +1620,10 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: VVDiffMetalView, context: Context) {
-        let model = context.coordinator.model(for: unifiedDiff)
+        let analysis = context.coordinator.analysis(for: unifiedDiff)
         nsView.update(
             unifiedDiff: unifiedDiff,
-            analysis: model.analysis,
-            rows: model.rows,
+            analysis: analysis,
             style: renderStyle,
             theme: theme,
             configuration: configuration,
@@ -2175,7 +1651,7 @@ public struct VVDiffView: View {
         self.language = nil
         self.theme = .defaultDark
         self.configuration = .default
-        self.renderStyle = .unifiedTable
+        self.renderStyle = .inline
         self.syntaxHighlightingEnabled = true
         self.onFileHeaderActivate = nil
     }
@@ -2238,7 +1714,7 @@ extension VVDiffView {
         return view
     }
 
-    /// Select unified table or side-by-side split rendering.
+    /// Select inline or side-by-side rendering.
     public func renderStyle(_ style: VVDiffRenderStyle) -> VVDiffView {
         var view = self
         view.renderStyle = style

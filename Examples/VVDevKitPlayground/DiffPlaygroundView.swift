@@ -5,7 +5,7 @@ import VVCode
 
 struct DiffPlaygroundView: View {
     @State private var selectedSampleID: String = DiffSamples.heavySwiftStress.id
-    @State private var renderStyle: VVDiffRenderStyle = .split
+    @State private var renderStyle: VVDiffRenderStyle = .sideBySide
     @State private var useDarkTheme = true
     @State private var syntaxHighlightingEnabled = true
     @State private var fontSize: Double = 13
@@ -37,8 +37,8 @@ struct DiffPlaygroundView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 Picker("Style", selection: $renderStyle) {
-                    Text("Split").tag(VVDiffRenderStyle.split)
-                    Text("Unified").tag(VVDiffRenderStyle.unifiedTable)
+                    Text("Side By Side").tag(VVDiffRenderStyle.sideBySide)
+                    Text("Inline").tag(VVDiffRenderStyle.inline)
                 }
                 .pickerStyle(.segmented)
 
@@ -107,7 +107,7 @@ struct DiffPlaygroundView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(renderStyle == .split ? "Split diff" : "Unified diff")
+                    Text(renderStyle == .sideBySide ? "Side-by-side diff" : "Inline diff")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(syntaxHighlightingEnabled ? "Highlighting on" : "Highlighting off")

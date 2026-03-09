@@ -1059,7 +1059,7 @@ public final class MarkdownLayoutEngine {
         if isDiffLanguage(language) {
             let contentPadding = CGFloat(theme.contentPadding)
             let frameWidth = max(40, contentWidth - contentPadding * 2)
-            let result = VVUnifiedDiffSceneRenderer.render(
+            let result = VVDiffSceneRenderer.render(
                 unifiedDiff: code,
                 width: frameWidth,
                 theme: theme,

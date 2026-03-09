@@ -100,7 +100,7 @@ struct VVMarkdownSceneBuilder {
             let nodeView = VVNodeView(node: codeNode, size: block.frame.size)
             return VVPositionedFrame(frame: block.frame, child: nodeView, clipRect: clipRect)
         case .diff(let unifiedDiff, _):
-            let result = VVUnifiedDiffSceneRenderer.render(
+            let result = VVDiffSceneRenderer.render(
                 unifiedDiff: unifiedDiff,
                 width: block.frame.width,
                 theme: theme,
@@ -209,7 +209,7 @@ struct VVMarkdownSceneBuilder {
             appendCodeBlockPrimitives(blockId: block.blockId, code: code, language: language, lines: lines, frame: block.frame, to: &builder)
 
         case .diff(let unifiedDiff, _):
-            let result = VVUnifiedDiffSceneRenderer.render(
+            let result = VVDiffSceneRenderer.render(
                 unifiedDiff: unifiedDiff,
                 width: block.frame.width,
                 theme: theme,

@@ -5,13 +5,13 @@ import AppKit
 #endif
 @testable import VVMarkdown
 
-final class VVUnifiedDiffSceneRendererTests: XCTestCase {
+final class VVDiffSceneRendererTests: XCTestCase {
     func testAnalyzeParsesRowsAndLineNumbers() {
-        let document = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: sampleDiff)
+        let document = VVDiffSceneRenderer.analyze(unifiedDiff: sampleDiff)
 
         XCTAssertEqual(document.rows.first?.kind, .fileHeader)
         XCTAssertEqual(document.rows.first?.text, "Sources/App.swift")
-        XCTAssertEqual(document.rows.first(where: { $0.kind == .hunkHeader })?.text, "struct AppView {")
+        XCTAssertEqual(document.rows.first(where: { $0.kind == .hunkHeader })?.text, "@@ -10,3 +10,4 @@ struct AppView {")
 
         let deleted = document.rows.first(where: { $0.kind == .deleted })
         XCTAssertEqual(deleted?.oldLineNumber, 10)
@@ -24,7 +24,7 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
     }
 
     func testAnalyzeBuildsSplitRowsWithInlineChanges() throws {
-        let document = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: sampleDiff)
+        let document = VVDiffSceneRenderer.analyze(unifiedDiff: sampleDiff)
 
         let pairedChange = try XCTUnwrap(document.splitRows.first {
             $0.left?.kind == .deleted && $0.right?.kind == .added
@@ -40,20 +40,20 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         let theme = MarkdownTheme.dark
         let font = try makeFont()
 
-        let full = VVUnifiedDiffSceneRenderer.render(
+        let full = VVDiffSceneRenderer.render(
             unifiedDiff: sampleDiff,
             width: 900,
             theme: theme,
             baseFont: font,
-            style: .unifiedTable,
+            style: .inline,
             options: .full
         )
-        let compact = VVUnifiedDiffSceneRenderer.render(
+        let compact = VVDiffSceneRenderer.render(
             unifiedDiff: sampleDiff,
             width: 900,
             theme: theme,
             baseFont: font,
-            style: .unifiedTable,
+            style: .inline,
             options: .compactInline
         )
 
@@ -61,7 +61,24 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         XCTAssertGreaterThan(compact.contentHeight, 0)
     }
 
-    func testSplitRenderWrapsLongLinesWithinPaneBounds() throws {
+    func testLegacyUnifiedDiffRendererCompatibilityWrapperStillWorks() throws {
+        let theme = MarkdownTheme.dark
+        let font = try makeFont()
+
+        let result = VVUnifiedDiffSceneRenderer.render(
+            unifiedDiff: sampleDiff,
+            width: 900,
+            theme: theme,
+            baseFont: font,
+            style: .unifiedTable,
+            options: .full
+        )
+
+        XCTAssertGreaterThan(result.contentHeight, 0)
+        XCTAssertFalse(result.scene.primitives.isEmpty)
+    }
+
+    func testSideBySideRenderWrapsLongLinesWithinPaneBounds() throws {
         let theme = MarkdownTheme.dark
         let font = try makeFont()
         let longToken = String(repeating: "context_0123456789 ", count: 18)
@@ -75,12 +92,12 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         +let newValue = "\(longToken)"
         """
 
-        let result = VVUnifiedDiffSceneRenderer.render(
+        let result = VVDiffSceneRenderer.render(
             unifiedDiff: diff,
             width: 960,
             theme: theme,
             baseFont: font,
-            style: .split,
+            style: .sideBySide,
             options: .full
         )
 
@@ -98,18 +115,18 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         }
     }
 
-    func testRenderProfileLargeSplitDiff() throws {
+    func testRenderProfileLargeSideBySideDiff() throws {
         let font = try makeFont()
         let theme = MarkdownTheme.dark
         let diff = makeLargeDiff(fileCount: 24, hunksPerFile: 6)
 
         for _ in 0..<5 {
-            _ = VVUnifiedDiffSceneRenderer.render(
+            _ = VVDiffSceneRenderer.render(
                 unifiedDiff: diff,
                 width: 1280,
                 theme: theme,
                 baseFont: font,
-                style: .split,
+                style: .sideBySide,
                 options: .full
             )
         }
@@ -118,12 +135,12 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         samples.reserveCapacity(20)
         for _ in 0..<20 {
             let start = CFAbsoluteTimeGetCurrent()
-            let result = VVUnifiedDiffSceneRenderer.render(
+            let result = VVDiffSceneRenderer.render(
                 unifiedDiff: diff,
                 width: 1280,
                 theme: theme,
                 baseFont: font,
-                style: .split,
+                style: .sideBySide,
                 options: .full
             )
             samples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
@@ -136,7 +153,7 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         let p99 = percentile(sorted, 0.99)
 
         print(String(
-            format: "VVUnifiedDiffSceneRenderer split render profile: median=%.2fms p95=%.2fms p99=%.2fms samples=%d width=%d files=%d hunksPerFile=%d",
+            format: "VVDiffSceneRenderer side-by-side render profile: median=%.2fms p95=%.2fms p99=%.2fms samples=%d width=%d files=%d hunksPerFile=%d",
             median, p95, p99, samples.count, 1280, 24, 6
         ))
 
@@ -144,7 +161,7 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
     }
 }
 
-private extension VVUnifiedDiffSceneRendererTests {
+private extension VVDiffSceneRendererTests {
     var sampleDiff: String {
         """
         diff --git a/Sources/App.swift b/Sources/App.swift

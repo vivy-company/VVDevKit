@@ -2120,6 +2120,7 @@ let package = Package(
                 .product(name: "Markdown", package: "swift-markdown"),
                 "VVMetalPrimitives",
                 "VVHighlighting",
+                "VVGit",
             ],
             exclude: [
                 "Docs"

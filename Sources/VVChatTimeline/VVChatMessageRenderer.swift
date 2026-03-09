@@ -777,7 +777,7 @@ public final class VVChatMessageRenderer {
     }
 
     private func renderInlineDiff(_ diff: VVChatInlineDiffContent, width: CGFloat) -> CustomContentRender {
-        let result = VVUnifiedDiffSceneRenderer.render(
+        let result = VVDiffSceneRenderer.render(
             unifiedDiff: diff.unifiedDiff,
             width: max(1, width),
             theme: style.theme,

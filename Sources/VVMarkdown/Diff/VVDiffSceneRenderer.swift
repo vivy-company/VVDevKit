@@ -1,6 +1,7 @@
 import Foundation
 import CoreText
 import CoreGraphics
+import VVGit
 import VVHighlighting
 import VVMetalPrimitives
 
@@ -10,7 +11,7 @@ import AppKit
 import UIKit
 #endif
 
-public struct VVUnifiedDiffRenderResult: Sendable {
+public struct VVDiffRenderResult: Sendable {
     public let scene: VVScene
     public let contentHeight: CGFloat
 
@@ -20,7 +21,7 @@ public struct VVUnifiedDiffRenderResult: Sendable {
     }
 }
 
-public struct VVUnifiedDiffRenderOptions: Sendable {
+public struct VVDiffRenderOptions: Sendable {
     public var showsFileHeaders: Bool
     public var showsMetadata: Bool
     public var showsHunkHeaders: Bool
@@ -35,23 +36,50 @@ public struct VVUnifiedDiffRenderOptions: Sendable {
         self.showsHunkHeaders = showsHunkHeaders
     }
 
-    public static let full = VVUnifiedDiffRenderOptions()
-    public static let compactInline = VVUnifiedDiffRenderOptions(
+    public static let full = VVDiffRenderOptions()
+    public static let compactInline = VVDiffRenderOptions(
         showsFileHeaders: false,
         showsMetadata: false,
         showsHunkHeaders: false
     )
 }
 
+public enum VVDiffRenderStyle: Hashable, Sendable {
+    case inline
+    case sideBySide
+}
+
+public extension VVDiffRenderStyle {
+    @available(*, deprecated, message: "Use .inline instead.")
+    static var unifiedTable: Self { .inline }
+
+    @available(*, deprecated, message: "Use .sideBySide instead.")
+    static var split: Self { .sideBySide }
+}
+
+public typealias VVUnifiedDiffRenderResult = VVDiffRenderResult
+public typealias VVUnifiedDiffRenderOptions = VVDiffRenderOptions
+public typealias VVUnifiedDiffRow = VVDiffRow
+public typealias VVUnifiedDiffSection = VVDiffSection
+public typealias VVUnifiedDiffSplitRow = VVDiffSplitRow
+public typealias VVUnifiedDiffDocument = VVDiffDocument
+
 public enum VVDiffSceneRenderStyle: Hashable, Sendable {
     case unifiedTable
     case split
+
+    fileprivate var canonicalStyle: VVDiffRenderStyle {
+        switch self {
+        case .unifiedTable: return .inline
+        case .split: return .sideBySide
+        }
+    }
 }
 
-public enum VVUnifiedDiffSceneRenderer {
-    public static func analyze(unifiedDiff: String) -> VVUnifiedDiffDocument {
+public enum VVDiffSceneRenderer {
+    public static func analyze(unifiedDiff: String) -> VVDiffDocument {
         let rows = parseRows(unifiedDiff: unifiedDiff)
-        return VVUnifiedDiffDocument(
+        return VVDiffDocument(
             rows: rows,
             sections: makeSections(from: rows),
             splitRows: makeSplitRows(from: rows)
@@ -63,9 +91,9 @@ public enum VVUnifiedDiffSceneRenderer {
         width: CGFloat,
         theme: MarkdownTheme,
         baseFont: VVFont,
-        style: VVDiffSceneRenderStyle = .unifiedTable,
-        options: VVUnifiedDiffRenderOptions = .full
-    ) -> VVUnifiedDiffRenderResult {
+        style: VVDiffRenderStyle = .inline,
+        options: VVDiffRenderOptions = .full
+    ) -> VVDiffRenderResult {
         render(
             unifiedDiff: unifiedDiff,
             width: width,
@@ -82,10 +110,10 @@ public enum VVUnifiedDiffSceneRenderer {
         width: CGFloat,
         theme: MarkdownTheme,
         baseFont: VVFont,
-        style: VVDiffSceneRenderStyle = .unifiedTable,
-        options: VVUnifiedDiffRenderOptions = .full,
+        style: VVDiffRenderStyle = .inline,
+        options: VVDiffRenderOptions = .full,
         highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]]?
-    ) -> VVUnifiedDiffRenderResult {
+    ) -> VVDiffRenderResult {
         let renderCacheKey = highlightedRangesOverride == nil
             ? makeRenderCacheKey(
                 unifiedDiff: unifiedDiff,
@@ -96,33 +124,90 @@ public enum VVUnifiedDiffSceneRenderer {
                 options: options
             )
             : nil
-        if let renderCacheKey, let cached = UnifiedDiffRenderCache.value(for: renderCacheKey) {
+        if let renderCacheKey, let cached = DiffCaches.renders.value(for: renderCacheKey) {
             return cached
         }
 
         let document = analyzedDocument(for: unifiedDiff)
-        let renderer = UnifiedDiffRenderer(
-            font: baseFont,
-            theme: theme,
-            contentWidth: width,
-            highlightedRanges: highlightedRangesOverride ?? highlightedRanges(for: unifiedDiff, rows: document.rows, theme: theme, font: baseFont)
-        )
-        renderer.updateContentWidth(width)
-        let result = renderer.buildScene(
+        let renderResult = renderDocument(
             document: document,
             width: width,
+            theme: theme,
+            baseFont: baseFont,
             style: style,
-            wrapLines: true,
-            options: options
-        )
-        let renderResult = VVUnifiedDiffRenderResult(
-            scene: result.scene,
-            contentHeight: result.contentHeight
+            options: options,
+            highlightedRanges: highlightedRangesOverride ?? highlightedRanges(for: unifiedDiff, rows: document.rows, theme: theme, font: baseFont)
         )
         if let renderCacheKey {
-            UnifiedDiffRenderCache.set(renderResult, for: renderCacheKey)
+            DiffCaches.renders.set(renderResult, for: renderCacheKey)
         }
         return renderResult
+    }
+
+    public static func render(
+        document: VVDiffDocument,
+        width: CGFloat,
+        theme: MarkdownTheme,
+        baseFont: VVFont,
+        style: VVDiffRenderStyle = .inline,
+        options: VVDiffRenderOptions = .full,
+        highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]] = [:],
+        includedRowIDs: Set<Int>? = nil
+    ) -> VVDiffRenderResult {
+        renderDocument(
+            document: document,
+            width: width,
+            theme: theme,
+            baseFont: baseFont,
+            style: style,
+            options: options,
+            highlightedRanges: highlightedRangesOverride,
+            includedRowIDs: includedRowIDs
+        )
+    }
+}
+
+public enum VVUnifiedDiffSceneRenderer {
+    public static func analyze(unifiedDiff: String) -> VVUnifiedDiffDocument {
+        VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+    }
+
+    public static func render(
+        unifiedDiff: String,
+        width: CGFloat,
+        theme: MarkdownTheme,
+        baseFont: VVFont,
+        style: VVDiffSceneRenderStyle = .unifiedTable,
+        options: VVUnifiedDiffRenderOptions = .full
+    ) -> VVUnifiedDiffRenderResult {
+        VVDiffSceneRenderer.render(
+            unifiedDiff: unifiedDiff,
+            width: width,
+            theme: theme,
+            baseFont: baseFont,
+            style: style.canonicalStyle,
+            options: options
+        )
+    }
+
+    public static func render(
+        unifiedDiff: String,
+        width: CGFloat,
+        theme: MarkdownTheme,
+        baseFont: VVFont,
+        style: VVDiffSceneRenderStyle = .unifiedTable,
+        options: VVUnifiedDiffRenderOptions = .full,
+        highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]]?
+    ) -> VVUnifiedDiffRenderResult {
+        VVDiffSceneRenderer.render(
+            unifiedDiff: unifiedDiff,
+            width: width,
+            theme: theme,
+            baseFont: baseFont,
+            style: style.canonicalStyle,
+            options: options,
+            highlightedRangesOverride: highlightedRangesOverride
+        )
     }
 
     public static func render(
@@ -135,69 +220,38 @@ public enum VVUnifiedDiffSceneRenderer {
         highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]] = [:],
         includedRowIDs: Set<Int>? = nil
     ) -> VVUnifiedDiffRenderResult {
-        let renderer = UnifiedDiffRenderer(
-            font: baseFont,
-            theme: theme,
-            contentWidth: width,
-            highlightedRanges: highlightedRangesOverride
-        )
-        renderer.updateContentWidth(width)
-        let result = renderer.buildScene(
+        VVDiffSceneRenderer.render(
             document: document,
             width: width,
-            style: style,
-            wrapLines: true,
+            theme: theme,
+            baseFont: baseFont,
+            style: style.canonicalStyle,
             options: options,
+            highlightedRangesOverride: highlightedRangesOverride,
             includedRowIDs: includedRowIDs
         )
-        return VVUnifiedDiffRenderResult(
-            scene: result.scene,
-            contentHeight: result.contentHeight
-        )
     }
 }
 
-private enum UnifiedDiffParsingCache {
-    static let hunkHeaderRegex: NSRegularExpression? = try? NSRegularExpression(
-        pattern: #"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@"#
-    )
-}
+private final class DiffLRUCache<Value> {
+    private let lock = NSLock()
+    private let maxEntries: Int
+    private var cache: [Int: Value] = [:]
+    private var order: [Int] = []
 
-private enum UnifiedDiffHighlightCache {
-    private static let lock = NSLock()
-    private static var cache: [Int: [Int: [(NSRange, SIMD4<Float>)]]] = [:]
-
-    static func value(for key: Int) -> [Int: [(NSRange, SIMD4<Float>)]]? {
-        lock.lock()
-        defer { lock.unlock() }
-        return cache[key]
+    init(maxEntries: Int) {
+        self.maxEntries = maxEntries
     }
 
-    static func set(_ value: [Int: [(NSRange, SIMD4<Float>)]], for key: Int) {
+    func value(for key: Int) -> Value? {
         lock.lock()
         defer { lock.unlock() }
-        cache[key] = value
-        if cache.count > 24, let firstKey = cache.keys.first {
-            cache.removeValue(forKey: firstKey)
-        }
-    }
-}
-
-private enum UnifiedDiffDocumentCache {
-    private static let lock = NSLock()
-    private static var cache: [Int: VVUnifiedDiffDocument] = [:]
-    private static var order: [Int] = []
-    private static let maxEntries = 12
-
-    static func value(for key: Int) -> VVUnifiedDiffDocument? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let document = cache[key] else { return nil }
+        guard let value = cache[key] else { return nil }
         touch(key)
-        return document
+        return value
     }
 
-    static func set(_ value: VVUnifiedDiffDocument, for key: Int) {
+    func set(_ value: Value, for key: Int) {
         lock.lock()
         defer { lock.unlock() }
         cache[key] = value
@@ -208,45 +262,20 @@ private enum UnifiedDiffDocumentCache {
         }
     }
 
-    private static func touch(_ key: Int) {
+    private func touch(_ key: Int) {
         order.removeAll { $0 == key }
         order.append(key)
     }
 }
 
-private enum UnifiedDiffRenderCache {
-    private static let lock = NSLock()
-    private static var cache: [Int: VVUnifiedDiffRenderResult] = [:]
-    private static var order: [Int] = []
-    private static let maxEntries = 4
-
-    static func value(for key: Int) -> VVUnifiedDiffRenderResult? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let result = cache[key] else { return nil }
-        touch(key)
-        return result
-    }
-
-    static func set(_ value: VVUnifiedDiffRenderResult, for key: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-        cache[key] = value
-        touch(key)
-        while order.count > maxEntries {
-            let evicted = order.removeFirst()
-            cache.removeValue(forKey: evicted)
-        }
-    }
-
-    private static func touch(_ key: Int) {
-        order.removeAll { $0 == key }
-        order.append(key)
-    }
+private enum DiffCaches {
+    static let highlights = DiffLRUCache<[Int: [(NSRange, SIMD4<Float>)]]>(maxEntries: 24)
+    static let documents = DiffLRUCache<VVDiffDocument>(maxEntries: 12)
+    static let renders = DiffLRUCache<VVDiffRenderResult>(maxEntries: 4)
 }
 
-public struct VVUnifiedDiffRow: Identifiable, Hashable, Sendable {
-    public enum Kind: Hashable, Sendable {
+public struct VVDiffRow: Identifiable, Hashable, Sendable {
+    public enum Kind: String, Hashable, Sendable {
         case fileHeader
         case hunkHeader
         case context
@@ -279,15 +308,15 @@ public struct VVUnifiedDiffRow: Identifiable, Hashable, Sendable {
     }
 }
 
-public struct VVUnifiedDiffSection: Identifiable, Hashable, Sendable {
+public struct VVDiffSection: Identifiable, Hashable, Sendable {
     public let id: Int
     public let filePath: String
-    public let headerRow: VVUnifiedDiffRow?
-    public let rows: [VVUnifiedDiffRow]
+    public let headerRow: VVDiffRow?
+    public let rows: [VVDiffRow]
     public let addedCount: Int
     public let deletedCount: Int
 
-    public init(id: Int, filePath: String, headerRow: VVUnifiedDiffRow?, rows: [VVUnifiedDiffRow]) {
+    public init(id: Int, filePath: String, headerRow: VVDiffRow?, rows: [VVDiffRow]) {
         self.id = id
         self.filePath = filePath
         self.headerRow = headerRow
@@ -309,15 +338,15 @@ public struct VVUnifiedDiffSection: Identifiable, Hashable, Sendable {
     }
 }
 
-public struct VVUnifiedDiffSplitRow: Identifiable, Hashable, Sendable {
+public struct VVDiffSplitRow: Identifiable, Hashable, Sendable {
     public struct Cell: Hashable, Sendable {
         public let rowID: Int
         public let lineNumber: Int?
         public let text: String
-        public let kind: VVUnifiedDiffRow.Kind
+        public let kind: VVDiffRow.Kind
         public let inlineChanges: [InlineRange]
 
-        public init(rowID: Int, lineNumber: Int?, text: String, kind: VVUnifiedDiffRow.Kind, inlineChanges: [InlineRange]) {
+        public init(rowID: Int, lineNumber: Int?, text: String, kind: VVDiffRow.Kind, inlineChanges: [InlineRange]) {
             self.rowID = rowID
             self.lineNumber = lineNumber
             self.text = text
@@ -337,11 +366,11 @@ public struct VVUnifiedDiffSplitRow: Identifiable, Hashable, Sendable {
     }
 
     public let id: Int
-    public let header: VVUnifiedDiffRow?
+    public let header: VVDiffRow?
     public let left: Cell?
     public let right: Cell?
 
-    public init(id: Int, header: VVUnifiedDiffRow?, left: Cell?, right: Cell?) {
+    public init(id: Int, header: VVDiffRow?, left: Cell?, right: Cell?) {
         self.id = id
         self.header = header
         self.left = left
@@ -349,14 +378,14 @@ public struct VVUnifiedDiffSplitRow: Identifiable, Hashable, Sendable {
     }
 }
 
-public struct VVUnifiedDiffDocument: Hashable, Sendable {
-    public let rows: [VVUnifiedDiffRow]
-    public let sections: [VVUnifiedDiffSection]
-    public let splitRows: [VVUnifiedDiffSplitRow]
+public struct VVDiffDocument: Hashable, Sendable {
+    public let rows: [VVDiffRow]
+    public let sections: [VVDiffSection]
+    public let splitRows: [VVDiffSplitRow]
     public let maxOldLineNumber: Int
     public let maxNewLineNumber: Int
 
-    public init(rows: [VVUnifiedDiffRow], sections: [VVUnifiedDiffSection], splitRows: [VVUnifiedDiffSplitRow]) {
+    public init(rows: [VVDiffRow], sections: [VVDiffSection], splitRows: [VVDiffSplitRow]) {
         self.rows = rows
         self.sections = sections
         self.splitRows = splitRows
@@ -375,20 +404,63 @@ public struct VVUnifiedDiffDocument: Hashable, Sendable {
     }
 }
 
-private typealias UnifiedDiffRow = VVUnifiedDiffRow
-private typealias UnifiedDiffSection = VVUnifiedDiffSection
-private typealias UnifiedDiffSplitRow = VVUnifiedDiffSplitRow
+private typealias ParsedDiffRow = VVDiffRow
+private typealias ParsedDiffSection = VVDiffSection
+private typealias ParsedDiffSplitRow = VVDiffSplitRow
 
-private func analyzedDocument(for unifiedDiff: String) -> VVUnifiedDiffDocument {
+private func analyzedDocument(for unifiedDiff: String) -> VVDiffDocument {
     var hasher = Hasher()
     hasher.combine(unifiedDiff)
     let cacheKey = hasher.finalize()
-    if let cached = UnifiedDiffDocumentCache.value(for: cacheKey) {
+    if let cached = DiffCaches.documents.value(for: cacheKey) {
         return cached
     }
-    let document = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
-    UnifiedDiffDocumentCache.set(document, for: cacheKey)
+    let document = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+    DiffCaches.documents.set(document, for: cacheKey)
     return document
+}
+
+private func makeSceneBuilder(
+    width: CGFloat,
+    theme: MarkdownTheme,
+    baseFont: VVFont,
+    highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
+) -> DiffSceneBuilder {
+    let renderer = DiffSceneBuilder(
+        font: baseFont,
+        theme: theme,
+        contentWidth: width,
+        highlightedRanges: highlightedRanges
+    )
+    renderer.updateContentWidth(width)
+    return renderer
+}
+
+private func renderDocument(
+    document: VVDiffDocument,
+    width: CGFloat,
+    theme: MarkdownTheme,
+    baseFont: VVFont,
+    style: VVDiffRenderStyle,
+    options: VVDiffRenderOptions,
+    highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
+    includedRowIDs: Set<Int>? = nil
+) -> VVDiffRenderResult {
+    let renderer = makeSceneBuilder(
+        width: width,
+        theme: theme,
+        baseFont: baseFont,
+        highlightedRanges: highlightedRanges
+    )
+    let result = renderer.buildScene(
+        document: document,
+        width: width,
+        style: style,
+        wrapLines: true,
+        options: options,
+        includedRowIDs: includedRowIDs
+    )
+    return VVDiffRenderResult(scene: result.scene, contentHeight: result.contentHeight)
 }
 
 private func makeRenderCacheKey(
@@ -396,15 +468,15 @@ private func makeRenderCacheKey(
     width: CGFloat,
     theme: MarkdownTheme,
     baseFont: VVFont,
-    style: VVDiffSceneRenderStyle,
-    options: VVUnifiedDiffRenderOptions
+    style: VVDiffRenderStyle,
+    options: VVDiffRenderOptions
 ) -> Int {
     var hasher = Hasher()
     hasher.combine(unifiedDiff)
     hasher.combine(Int(width.rounded(.toNearestOrEven)))
     hasher.combine(baseFont.pointSize)
     hasher.combine(baseFont.fontName)
-    hasher.combine(style == .split ? 1 : 0)
+    hasher.combine(style == .sideBySide ? 1 : 0)
     hasher.combine(options.showsFileHeaders)
     hasher.combine(options.showsMetadata)
     hasher.combine(options.showsHunkHeaders)
@@ -423,155 +495,76 @@ private func makeRenderCacheKey(
     return hasher.finalize()
 }
 
-private func parseRows(unifiedDiff: String) -> [UnifiedDiffRow] {
-    var lines = unifiedDiff.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-    if lines.last?.isEmpty == true {
-        _ = lines.popLast()
-    }
-    var rows: [UnifiedDiffRow] = []
-    rows.reserveCapacity(lines.count)
-    var oldLine = 0
-    var newLine = 0
-    var inHunk = false
+private func parseRows(unifiedDiff: String) -> [ParsedDiffRow] {
+    let document = VVDiffParser.parseDocument(unifiedDiff: unifiedDiff)
+    var rows: [ParsedDiffRow] = []
+    rows.reserveCapacity(document.records.count)
 
-    for rawLine in lines {
-        let line = String(rawLine)
-
-        if line.hasPrefix("diff --git ") {
-            inHunk = false
-            rows.append(
-                UnifiedDiffRow(
-                    id: rows.count,
-                    kind: .fileHeader,
-                    oldLineNumber: nil,
-                    newLineNumber: nil,
-                    text: filePath(from: line)
-                )
-            )
-            continue
-        }
-
-        if line.hasPrefix("@@") {
-            inHunk = true
-            if let header = parseHunkHeader(line) {
-                oldLine = header.oldStart
-                newLine = header.newStart
-            }
-            let compactHeader = compactHunkHeaderText(line)
-            if !compactHeader.isEmpty {
-                rows.append(
-                    UnifiedDiffRow(
-                        id: rows.count,
-                        kind: .hunkHeader,
-                        oldLineNumber: nil,
-                        newLineNumber: nil,
-                        text: compactHeader
-                    )
-                )
-            }
-            continue
-        }
-
-        if !inHunk {
-            if isMetadataLine(line) {
-                rows.append(
-                    UnifiedDiffRow(
-                        id: rows.count,
-                        kind: .metadata,
-                        oldLineNumber: nil,
-                        newLineNumber: nil,
-                        text: line
-                    )
-                )
-            }
-            continue
-        }
-
-        if line.hasPrefix("+") && !line.hasPrefix("+++") {
-            rows.append(
-                UnifiedDiffRow(
-                    id: rows.count,
-                    kind: .added,
-                    oldLineNumber: nil,
-                    newLineNumber: newLine,
-                    text: String(line.dropFirst())
-                )
-            )
-            newLine += 1
-            continue
-        }
-
-        if line.hasPrefix("-") && !line.hasPrefix("---") {
-            rows.append(
-                UnifiedDiffRow(
-                    id: rows.count,
-                    kind: .deleted,
-                    oldLineNumber: oldLine,
-                    newLineNumber: nil,
-                    text: String(line.dropFirst())
-                )
-            )
-            oldLine += 1
-            continue
-        }
-
-        if line.hasPrefix(" ") {
-            rows.append(
-                UnifiedDiffRow(
-                    id: rows.count,
-                    kind: .context,
-                    oldLineNumber: oldLine,
-                    newLineNumber: newLine,
-                    text: String(line.dropFirst())
-                )
-            )
-            oldLine += 1
-            newLine += 1
-            continue
-        }
-
-        if line.hasPrefix("\\") {
-            rows.append(
-                UnifiedDiffRow(
-                    id: rows.count,
-                    kind: .metadata,
-                    oldLineNumber: nil,
-                    newLineNumber: nil,
-                    text: line
-                )
-            )
-            continue
-        }
-
-        rows.append(
-            UnifiedDiffRow(
+    for record in document.records {
+        let row: ParsedDiffRow
+        switch record {
+        case let .fileHeader(path, _):
+            row = ParsedDiffRow(
                 id: rows.count,
-                kind: .context,
-                oldLineNumber: oldLine,
-                newLineNumber: newLine,
-                text: line
+                kind: .fileHeader,
+                oldLineNumber: nil,
+                newLineNumber: nil,
+                text: path
             )
-        )
-        oldLine += 1
-        newLine += 1
+        case let .metadata(text):
+            row = ParsedDiffRow(
+                id: rows.count,
+                kind: .metadata,
+                oldLineNumber: nil,
+                newLineNumber: nil,
+                text: text
+            )
+        case let .hunkHeader(header):
+            row = ParsedDiffRow(
+                id: rows.count,
+                kind: .hunkHeader,
+                oldLineNumber: nil,
+                newLineNumber: nil,
+                text: header.rawLine
+            )
+        case let .line(line):
+            let kind: ParsedDiffRow.Kind
+            switch line.kind {
+            case .context:
+                kind = .context
+            case .added:
+                kind = .added
+            case .deleted:
+                kind = .deleted
+            }
+            row = ParsedDiffRow(
+                id: rows.count,
+                kind: kind,
+                oldLineNumber: line.oldLineNumber,
+                newLineNumber: line.newLineNumber,
+                text: line.text
+            )
+        }
+
+        rows.append(row)
     }
 
     return rows
 }
 
-private func makeSections(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSection] {
-    var result: [UnifiedDiffSection] = []
+private func makeSections(from rows: [ParsedDiffRow]) -> [ParsedDiffSection] {
+    var result: [ParsedDiffSection] = []
     result.reserveCapacity(max(1, rows.count / 64))
     var currentSectionID: Int?
     var currentPath: String?
-    var currentHeaderRow: UnifiedDiffRow?
-    var currentRows: [UnifiedDiffRow] = []
+    var currentHeaderRow: ParsedDiffRow?
+    var currentRows: [ParsedDiffRow] = []
     var syntheticID = -1
 
     func flushSection() {
         guard let sectionID = currentSectionID, let path = currentPath else { return }
         result.append(
-            UnifiedDiffSection(
+            ParsedDiffSection(
                 id: sectionID,
                 filePath: path,
                 headerRow: currentHeaderRow,
@@ -604,8 +597,8 @@ private func makeSections(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSection] {
     return result
 }
 
-private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow] {
-    var result: [UnifiedDiffSplitRow] = []
+private func makeSplitRows(from rows: [ParsedDiffRow]) -> [ParsedDiffSplitRow] {
+    var result: [ParsedDiffSplitRow] = []
     result.reserveCapacity(rows.count)
     var i = 0
 
@@ -614,7 +607,7 @@ private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow]
 
         switch row.kind {
         case .fileHeader, .hunkHeader:
-            result.append(UnifiedDiffSplitRow(id: result.count, header: row, left: nil, right: nil))
+            result.append(ParsedDiffSplitRow(id: result.count, header: row, left: nil, right: nil))
             i += 1
 
         case .metadata:
@@ -622,7 +615,7 @@ private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow]
 
         case .context:
             result.append(
-                UnifiedDiffSplitRow(
+                ParsedDiffSplitRow(
                     id: result.count,
                     header: nil,
                     left: .init(rowID: row.id, lineNumber: row.oldLineNumber, text: row.text, kind: .context, inlineChanges: []),
@@ -632,8 +625,8 @@ private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow]
             i += 1
 
         case .deleted:
-            var deletedRows: [UnifiedDiffRow] = []
-            var addedRows: [UnifiedDiffRow] = []
+            var deletedRows: [ParsedDiffRow] = []
+            var addedRows: [ParsedDiffRow] = []
 
             while i < rows.count, rows[i].kind == .deleted {
                 deletedRows.append(rows[i])
@@ -650,8 +643,8 @@ private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow]
                 let deleted = index < deletedRows.count ? deletedRows[index] : nil
                 let added = index < addedRows.count ? addedRows[index] : nil
 
-                var leftCell: UnifiedDiffSplitRow.Cell?
-                var rightCell: UnifiedDiffSplitRow.Cell?
+                var leftCell: ParsedDiffSplitRow.Cell?
+                var rightCell: ParsedDiffSplitRow.Cell?
                 if let deleted {
                     let inline = added.map { computeInlineChanges(oldText: deleted.text, newText: $0.text).old } ?? []
                     leftCell = .init(rowID: deleted.id, lineNumber: deleted.oldLineNumber, text: deleted.text, kind: .deleted, inlineChanges: inline)
@@ -661,14 +654,14 @@ private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow]
                     rightCell = .init(rowID: added.id, lineNumber: added.newLineNumber, text: added.text, kind: .added, inlineChanges: inline)
                 }
 
-                result.append(UnifiedDiffSplitRow(id: result.count, header: nil, left: leftCell, right: rightCell))
+                result.append(ParsedDiffSplitRow(id: result.count, header: nil, left: leftCell, right: rightCell))
             }
 
             i = j
 
         case .added:
             result.append(
-                UnifiedDiffSplitRow(
+                ParsedDiffSplitRow(
                     id: result.count,
                     header: nil,
                     left: nil,
@@ -682,7 +675,7 @@ private func makeSplitRows(from rows: [UnifiedDiffRow]) -> [UnifiedDiffSplitRow]
     return result
 }
 
-private func computeInlineChanges(oldText: String, newText: String) -> (old: [UnifiedDiffSplitRow.InlineRange], new: [UnifiedDiffSplitRow.InlineRange]) {
+private func computeInlineChanges(oldText: String, newText: String) -> (old: [ParsedDiffSplitRow.InlineRange], new: [ParsedDiffSplitRow.InlineRange]) {
     let oldChars = Array(oldText)
     let newChars = Array(newText)
 
@@ -710,7 +703,7 @@ private func computeInlineChanges(oldText: String, newText: String) -> (old: [Un
     let newTokens = tokenize(Array(newChars[newMiddleStart..<newMiddleEnd]), baseOffset: newMiddleStart)
     let lcs = longestCommonSubsequence(oldTokens.map(\.text), newTokens.map(\.text))
 
-    var oldChanged: [UnifiedDiffSplitRow.InlineRange] = []
+    var oldChanged: [ParsedDiffSplitRow.InlineRange] = []
     var lcsIdx = 0
     for token in oldTokens {
         if lcsIdx < lcs.oldIndices.count && token.index == lcs.oldIndices[lcsIdx] {
@@ -720,7 +713,7 @@ private func computeInlineChanges(oldText: String, newText: String) -> (old: [Un
         }
     }
 
-    var newChanged: [UnifiedDiffSplitRow.InlineRange] = []
+    var newChanged: [ParsedDiffSplitRow.InlineRange] = []
     lcsIdx = 0
     for token in newTokens {
         if lcsIdx < lcs.newIndices.count && token.index == lcs.newIndices[lcsIdx] {
@@ -806,9 +799,9 @@ private func longestCommonSubsequence(_ a: [String], _ b: [String]) -> LCSResult
     return .init(oldIndices: oldIndices.reversed(), newIndices: newIndices.reversed())
 }
 
-private func mergeRanges(_ ranges: [UnifiedDiffSplitRow.InlineRange]) -> [UnifiedDiffSplitRow.InlineRange] {
+private func mergeRanges(_ ranges: [ParsedDiffSplitRow.InlineRange]) -> [ParsedDiffSplitRow.InlineRange] {
     guard !ranges.isEmpty else { return [] }
-    var merged: [UnifiedDiffSplitRow.InlineRange] = [ranges[0]]
+    var merged: [ParsedDiffSplitRow.InlineRange] = [ranges[0]]
     for range in ranges.dropFirst() {
         let last = merged[merged.count - 1]
         if range.start <= last.end {
@@ -820,39 +813,7 @@ private func mergeRanges(_ ranges: [UnifiedDiffSplitRow.InlineRange]) -> [Unifie
     return merged
 }
 
-private func filePath(from line: String) -> String {
-    let parts = line.split(separator: " ")
-    guard parts.count >= 4 else { return line }
-    let rawPath = String(parts[3])
-    return rawPath.hasPrefix("b/") ? String(rawPath.dropFirst(2)) : rawPath
-}
-
-private func isMetadataLine(_ line: String) -> Bool {
-    line.hasPrefix("index ") ||
-    line.hasPrefix("--- ") ||
-    line.hasPrefix("+++ ") ||
-    line.hasPrefix("new file mode ") ||
-    line.hasPrefix("deleted file mode ") ||
-    line.hasPrefix("rename from ") ||
-    line.hasPrefix("rename to ") ||
-    line.hasPrefix("similarity index ") ||
-    line.hasPrefix("dissimilarity index ") ||
-    line.hasPrefix("Binary files ")
-}
-
-private func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int)? {
-    guard let regex = UnifiedDiffParsingCache.hunkHeaderRegex,
-          let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-          let oldRange = Range(match.range(at: 1), in: line),
-          let newRange = Range(match.range(at: 2), in: line),
-          let oldStart = Int(line[oldRange]),
-          let newStart = Int(line[newRange]) else {
-        return nil
-    }
-    return (oldStart: oldStart, newStart: newStart)
-}
-
-private func compactHunkHeaderText(_ line: String) -> String {
+package func VVDiffCompactHunkHeaderText(_ line: String) -> String {
     guard line.hasPrefix("@@") else { return line }
     let searchStart = line.index(line.startIndex, offsetBy: 2)
     guard let trailingRange = line.range(of: "@@", range: searchStart..<line.endIndex) else {
@@ -861,10 +822,17 @@ private func compactHunkHeaderText(_ line: String) -> String {
     return line[trailingRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+package func VVDiffDisplayText(for row: VVDiffRow) -> String {
+    if row.kind == .hunkHeader {
+        return VVDiffCompactHunkHeaderText(row.text)
+    }
+    return row.text
+}
+
 private typealias MDLayoutGlyph = LayoutGlyph
 private typealias MDFontVariant = FontVariant
 
-private final class UnifiedDiffRenderer {
+private final class DiffSceneBuilder {
     private struct WrappedTextSegment {
         let text: String
         let start: Int
@@ -938,14 +906,14 @@ private final class UnifiedDiffRenderer {
     }
 
     func buildScene(
-        document: VVUnifiedDiffDocument,
+        document: VVDiffDocument,
         width: CGFloat,
-        style: VVDiffSceneRenderStyle,
+        style: VVDiffRenderStyle,
         wrapLines: Bool,
-        options: VVUnifiedDiffRenderOptions,
+        options: VVDiffRenderOptions,
         includedRowIDs: Set<Int>? = nil
     ) -> (scene: VVScene, contentHeight: CGFloat) {
-        if style == .split {
+        if style == .sideBySide {
             return buildSplitScene(
                 document: document,
                 width: width,
@@ -983,9 +951,10 @@ private final class UnifiedDiffRenderer {
                 if row.kind == .hunkHeader && !options.showsHunkHeaders {
                     continue
                 }
+                let visibleText = VVDiffDisplayText(for: row)
                 let wrappedLines = shouldWrap(row: row, wrapLines: wrapLines)
-                    ? wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
-                    : singleWrappedSegment(row.text)
+                    ? wrappedTextSegments(visibleText, maxChars: maxCharsPerVisualLine)
+                    : singleWrappedSegment(visibleText)
                 let rowHeight = lineHeight * CGFloat(max(1, wrappedLines.count))
                 if includedRowIDs == nil || includedRowIDs?.contains(row.id) == true {
                     buildUnifiedRow(
@@ -1008,10 +977,10 @@ private final class UnifiedDiffRenderer {
     }
 
     private func buildSplitScene(
-        document: VVUnifiedDiffDocument,
+        document: VVDiffDocument,
         width: CGFloat,
         wrapLines: Bool,
-        options: VVUnifiedDiffRenderOptions,
+        options: VVDiffRenderOptions,
         includedRowIDs: Set<Int>? = nil
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         let splitRows = document.splitRows
@@ -1037,15 +1006,16 @@ private final class UnifiedDiffRenderer {
                 if header.kind == .hunkHeader && !options.showsHunkHeaders {
                     continue
                 }
+                let headerText = VVDiffDisplayText(for: header)
                 let wrappedHeaderLines = header.kind == .hunkHeader && wrapLines
-                    ? wrappedTextSegments(header.text, maxChars: headerMaxCharsPerVisualLine)
-                    : singleWrappedSegment(header.text)
+                    ? wrappedTextSegments(headerText, maxChars: headerMaxCharsPerVisualLine)
+                    : singleWrappedSegment(headerText)
                 let rowHeight = header.kind == .fileHeader
                     ? max(20, lineHeight * 1.5)
                     : lineHeight * CGFloat(max(1, wrappedHeaderLines.count))
                 if includedRowIDs == nil || includedRowIDs?.contains(header.id) == true {
                     if header.kind == .fileHeader {
-                        let section = UnifiedDiffSection(id: header.id, filePath: header.text, headerRow: header, rows: [])
+                        let section = ParsedDiffSection(id: header.id, filePath: header.text, headerRow: header, rows: [])
                         buildFileHeader(section: section, y: y, width: totalWidth, height: rowHeight, builder: &builder)
                     } else {
                         buildHunkHeaderRow(lines: wrappedHeaderLines, y: y, width: totalWidth, height: rowHeight, builder: &builder)
@@ -1104,12 +1074,12 @@ private final class UnifiedDiffRenderer {
         return (builder.scene, y)
     }
 
-    private func shouldWrap(row: UnifiedDiffRow, wrapLines: Bool) -> Bool {
+    private func shouldWrap(row: ParsedDiffRow, wrapLines: Bool) -> Bool {
         wrapLines && (row.kind.isCode || row.kind == .hunkHeader)
     }
 
     private func buildUnifiedRow(
-        row: UnifiedDiffRow,
+        row: ParsedDiffRow,
         y: CGFloat,
         width: CGFloat,
         height: CGFloat,
@@ -1187,7 +1157,7 @@ private final class UnifiedDiffRenderer {
     }
 
     private func buildFileHeader(
-        section: UnifiedDiffSection,
+        section: ParsedDiffSection,
         y: CGFloat,
         width: CGFloat,
         height: CGFloat,
@@ -1304,7 +1274,7 @@ private final class UnifiedDiffRenderer {
     }
 
     private func buildMarkerIndicator(
-        kind: UnifiedDiffRow.Kind,
+        kind: ParsedDiffRow.Kind,
         x: CGFloat,
         y: CGFloat,
         width: CGFloat,
@@ -1335,7 +1305,7 @@ private final class UnifiedDiffRenderer {
     }
 
     private func buildSplitCell(
-        cell: UnifiedDiffSplitRow.Cell?,
+        cell: ParsedDiffSplitRow.Cell?,
         wrappedLines: [WrappedTextSegment],
         y: CGFloat,
         paneX: CGFloat,
@@ -1535,11 +1505,11 @@ private final class UnifiedDiffRenderer {
     }
 
     private func clippedInlineChanges(
-        _ inlineChanges: [UnifiedDiffSplitRow.InlineRange],
+        _ inlineChanges: [ParsedDiffSplitRow.InlineRange],
         segment: WrappedTextSegment
-    ) -> [UnifiedDiffSplitRow.InlineRange] {
+    ) -> [ParsedDiffSplitRow.InlineRange] {
         guard !inlineChanges.isEmpty else { return [] }
-        var clipped: [UnifiedDiffSplitRow.InlineRange] = []
+        var clipped: [ParsedDiffSplitRow.InlineRange] = []
         clipped.reserveCapacity(inlineChanges.count)
         for range in inlineChanges {
             let start = max(segment.start, range.start)
@@ -1589,7 +1559,7 @@ private final class UnifiedDiffRenderer {
         layoutEngine.measureTextWidth("8", variant: .monospace)
     }
 
-    private func rowBackgroundColor(for kind: UnifiedDiffRow.Kind) -> SIMD4<Float> {
+    private func rowBackgroundColor(for kind: ParsedDiffRow.Kind) -> SIMD4<Float> {
         switch kind {
         case .added: return addedBgColor
         case .deleted: return deletedBgColor
@@ -1600,7 +1570,7 @@ private final class UnifiedDiffRenderer {
         }
     }
 
-    private func lineNumberColor(for kind: UnifiedDiffRow.Kind) -> SIMD4<Float> {
+    private func lineNumberColor(for kind: ParsedDiffRow.Kind) -> SIMD4<Float> {
         switch kind {
         case .added: return addedMarkerColor
         case .deleted: return deletedMarkerColor
@@ -1636,7 +1606,7 @@ private func toVVFontVariant(_ variant: MDFontVariant) -> VVFontVariant {
 
 private func highlightedRanges(
     for unifiedDiff: String,
-    rows: [UnifiedDiffRow],
+    rows: [ParsedDiffRow],
     theme: MarkdownTheme,
     font: VVFont
 ) -> [Int: [(NSRange, SIMD4<Float>)]] {
@@ -1650,7 +1620,7 @@ private func highlightedRanges(
     hasher.combine(font.pointSize)
     hasher.combine(brightness(of: theme.codeBackgroundColor) > 0.58)
     let cacheKey = hasher.finalize()
-    if let cached = UnifiedDiffHighlightCache.value(for: cacheKey) {
+    if let cached = DiffCaches.highlights.value(for: cacheKey) {
         return cached
     }
 
@@ -1662,7 +1632,7 @@ private func highlightedRanges(
         semaphore.signal()
     }
     semaphore.wait()
-    UnifiedDiffHighlightCache.set(output, for: cacheKey)
+    DiffCaches.highlights.set(output, for: cacheKey)
     return output
 }
 
@@ -1682,7 +1652,7 @@ private func detectedLanguageConfiguration(for unifiedDiff: String) -> LanguageC
 }
 
 private func computeHighlightedRanges(
-    rows: [UnifiedDiffRow],
+    rows: [ParsedDiffRow],
     language: LanguageConfiguration,
     theme: MarkdownTheme,
     font: VVFont

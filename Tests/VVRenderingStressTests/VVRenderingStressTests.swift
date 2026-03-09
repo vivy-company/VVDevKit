@@ -45,7 +45,7 @@ final class VVRenderingStressTests: XCTestCase {
 
     func testCodeDiffSceneBuildsAndRendersHeadlessly() throws {
         let diff = RenderingStressFixtures.makeLargeUnifiedDiff(fileCount: 120, linesPerHunk: 36)
-        let result = VVDiffInlineRenderer.renderUnified(
+        let result = VVDiffInlineRenderer.renderInline(
             unifiedDiff: diff,
             width: viewportSize.width,
             theme: .defaultDark,
