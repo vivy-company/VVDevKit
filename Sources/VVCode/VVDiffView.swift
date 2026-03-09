@@ -17,28 +17,7 @@ public typealias VVDiffInlineRenderResult = VVMarkdown.VVDiffRenderResult
 private typealias VVDiffSection = VVMarkdown.VVDiffSection
 private typealias VVDiffSplitRow = VVMarkdown.VVDiffSplitRow
 
-public enum VVDiffTable {
-    public static func parse(unifiedDiff: String) -> [VVDiffRow] {
-        VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff).rows
-    }
-}
-
 public enum VVDiffInlineRenderer {
-    @available(*, deprecated, message: "Use renderInline(unifiedDiff:width:theme:configuration:) instead.")
-    public static func renderUnified(
-        unifiedDiff: String,
-        width: CGFloat,
-        theme: VVTheme,
-        configuration: VVConfiguration
-    ) -> VVDiffInlineRenderResult {
-        renderInline(
-            unifiedDiff: unifiedDiff,
-            width: width,
-            theme: theme,
-            configuration: configuration
-        )
-    }
-
     public static func renderInline(
         unifiedDiff: String,
         width: CGFloat,
@@ -337,14 +316,16 @@ private final class VVDiffMetalView: NSView {
     private var highlightTask: Task<Void, Never>?
     private var codeRows: [VVDiffRow] = []
     private var codeRowIndexByID: [Int: Int] = [:]
-    private var highlightedCodeRowCount: Int = 0
-    private var pendingHighlightCodeRowCount: Int = 0
+    private var pendingHighlightCodeRowRange: Range<Int>?
 
     private static let minimumVisibleHighlightCodeRows: Int = 96
     private static let initialHighlightCodeRows: Int = 128
     private static let incrementalHighlightCodeRows: Int = 192
+    private static let highlightLeadingPrefetchCodeRows: Int = 72
     private static let highlightPrefetchCodeRows: Int = 160
     private static let scrollHighlightPrefetchCodeRows: Int = 48
+    private static let retainedHighlightLeadingCodeRows: Int = 192
+    private static let retainedHighlightTrailingCodeRows: Int = 320
     private static let highlightViewportMargin: CGFloat = 220
     private static let highlightWarmupContextRows: Int = 32
     private static let renderCullPadding: CGFloat = 256
@@ -1116,14 +1097,13 @@ private final class VVDiffMetalView: NSView {
         staleHighlightedRowIDs.removeAll(keepingCapacity: true)
         deferredHighlightSceneRefresh = false
         highlightSceneVersion &+= 1
-        highlightedCodeRowCount = 0
-        pendingHighlightCodeRowCount = 0
+        pendingHighlightCodeRowRange = nil
 
         guard syntaxHighlightingEnabled else { return }
         guard !codeRows.isEmpty else { return }
         guard effectiveHighlightLanguageConfiguration() != nil else { return }
 
-        scheduleHighlightingIfNeeded(targetCodeRowCount: desiredHighlightedCodeRowCountForVisibleViewport())
+        scheduleHighlightingIfNeeded(targetCodeRowRange: desiredHighlightedCodeRowRangeForVisibleViewport())
         startDisplayLink()
     }
 
@@ -1131,27 +1111,40 @@ private final class VVDiffMetalView: NSView {
         guard syntaxHighlightingEnabled else { return }
         guard !codeRows.isEmpty else { return }
         guard effectiveHighlightLanguageConfiguration() != nil else { return }
-        let targetCount = desiredHighlightedCodeRowCountForVisibleViewport()
-        scheduleHighlightingIfNeeded(targetCodeRowCount: targetCount)
+        let targetRange = desiredHighlightedCodeRowRangeForVisibleViewport()
+        trimHighlightedRanges(keeping: highlightRetentionRange(for: targetRange))
+        scheduleHighlightingIfNeeded(targetCodeRowRange: targetRange)
     }
 
-    private func desiredHighlightedCodeRowCountForVisibleViewport() -> Int {
+    private func desiredHighlightedCodeRowRangeForVisibleViewport() -> Range<Int> {
         let viewportPrefetch = isActivelyScrolling
             ? Self.scrollHighlightPrefetchCodeRows
             : Self.highlightPrefetchCodeRows
+        let leadingPrefetch = isActivelyScrolling
+            ? max(16, Self.highlightLeadingPrefetchCodeRows / 2)
+            : Self.highlightLeadingPrefetchCodeRows
         let minimumTarget = min(codeRows.count, Self.minimumVisibleHighlightCodeRows)
-        guard let scrollView else { return minimumTarget }
+        guard let scrollView else { return 0..<minimumTarget }
 
         let visibleRect = scrollView.contentView.bounds
-        guard let maxVisibleCodeIndex = maxVisibleCodeRowIndex(in: visibleRect) else {
-            return minimumTarget
+        guard let visibleCodeRange = visibleCodeRowIndexRange(in: visibleRect) else {
+            return 0..<minimumTarget
         }
 
-        let desiredByViewport = min(
-            codeRows.count,
-            maxVisibleCodeIndex + 1 + viewportPrefetch
-        )
-        return max(minimumTarget, desiredByViewport)
+        var lowerBound = max(0, visibleCodeRange.lowerBound - leadingPrefetch)
+        var upperBound = min(codeRows.count, visibleCodeRange.upperBound + viewportPrefetch)
+        if upperBound - lowerBound < minimumTarget {
+            let missing = minimumTarget - (upperBound - lowerBound)
+            let extendBefore = missing / 2
+            let extendAfter = missing - extendBefore
+            lowerBound = max(0, lowerBound - extendBefore)
+            upperBound = min(codeRows.count, upperBound + extendAfter)
+            if upperBound - lowerBound < minimumTarget, upperBound == codeRows.count {
+                lowerBound = max(0, upperBound - minimumTarget)
+            }
+        }
+
+        return lowerBound..<upperBound
     }
 
     private func firstVisibleGeometryIndex(minY: CGFloat) -> Int {
@@ -1171,13 +1164,14 @@ private final class VVDiffMetalView: NSView {
         return min(low, rowGeometries.count)
     }
 
-    private func maxVisibleCodeRowIndex(in visibleRect: CGRect) -> Int? {
+    private func visibleCodeRowIndexRange(in visibleRect: CGRect) -> Range<Int>? {
         guard !rowGeometries.isEmpty else { return nil }
 
         let minY = visibleRect.minY - Self.highlightViewportMargin
         let maxY = visibleRect.maxY + Self.highlightViewportMargin
         let startIndex = firstVisibleGeometryIndex(minY: minY)
 
+        var minCodeIndex: Int?
         var maxCodeIndex: Int?
         var index = startIndex
         while index < rowGeometries.count {
@@ -1186,6 +1180,9 @@ private final class VVDiffMetalView: NSView {
                 break
             }
             if let codeIndex = codeRowIndexByID[geometry.rowID] {
+                if minCodeIndex == nil {
+                    minCodeIndex = codeIndex
+                }
                 if let current = maxCodeIndex {
                     maxCodeIndex = max(current, codeIndex)
                 } else {
@@ -1195,25 +1192,38 @@ private final class VVDiffMetalView: NSView {
             index += 1
         }
 
-        return maxCodeIndex
+        guard let minCodeIndex, let maxCodeIndex else { return nil }
+        return minCodeIndex..<(maxCodeIndex + 1)
     }
 
-    private func scheduleHighlightingIfNeeded(targetCodeRowCount: Int) {
-        let boundedTarget = min(codeRows.count, max(0, targetCodeRowCount))
-        guard boundedTarget > highlightedCodeRowCount else { return }
-
-        pendingHighlightCodeRowCount = max(pendingHighlightCodeRowCount, boundedTarget)
+    private func scheduleHighlightingIfNeeded(targetCodeRowRange: Range<Int>) {
+        let lowerBound = min(max(0, targetCodeRowRange.lowerBound), codeRows.count)
+        let upperBound = min(max(lowerBound, targetCodeRowRange.upperBound), codeRows.count)
+        guard lowerBound < upperBound else { return }
+        pendingHighlightCodeRowRange = lowerBound..<upperBound
         startNextHighlightBatchIfNeeded()
     }
 
     private func startNextHighlightBatchIfNeeded() {
         guard highlightTask == nil else { return }
-        guard pendingHighlightCodeRowCount > highlightedCodeRowCount else { return }
+        let targetRange = pendingHighlightCodeRowRange ?? desiredHighlightedCodeRowRangeForVisibleViewport()
+        guard targetRange.lowerBound < targetRange.upperBound else { return }
+
+        var startIndex: Int?
+        for index in targetRange where highlightedRanges[codeRows[index].id] == nil {
+            startIndex = index
+            break
+        }
+
+        guard let startIndex else {
+            pendingHighlightCodeRowRange = nil
+            trimHighlightedRanges(keeping: highlightRetentionRange(for: targetRange))
+            return
+        }
 
         let generation = highlightGeneration
-        let startIndex = highlightedCodeRowCount
-        let batchLimit = startIndex == 0 ? Self.initialHighlightCodeRows : Self.incrementalHighlightCodeRows
-        let endIndex = min(codeRows.count, min(pendingHighlightCodeRowCount, startIndex + batchLimit))
+        let batchLimit = startIndex == targetRange.lowerBound ? Self.initialHighlightCodeRows : Self.incrementalHighlightCodeRows
+        let endIndex = min(targetRange.upperBound, startIndex + batchLimit)
 
         guard endIndex > startIndex else { return }
 
@@ -1244,7 +1254,7 @@ private final class VVDiffMetalView: NSView {
                 if !targetRowIDs.isEmpty {
                     self.staleHighlightedRowIDs.formUnion(targetRowIDs)
                 }
-                self.highlightedCodeRowCount = max(self.highlightedCodeRowCount, endIndex)
+                self.trimHighlightedRanges(keeping: self.highlightRetentionRange(for: targetRange))
                 self.highlightTask = nil
                 if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
                     if self.isActivelyScrolling {
@@ -1261,6 +1271,25 @@ private final class VVDiffMetalView: NSView {
                 self.startNextHighlightBatchIfNeeded()
             }
         }
+    }
+
+    private func highlightRetentionRange(for targetRange: Range<Int>) -> Range<Int> {
+        let lowerBound = max(0, targetRange.lowerBound - Self.retainedHighlightLeadingCodeRows)
+        let upperBound = min(codeRows.count, targetRange.upperBound + Self.retainedHighlightTrailingCodeRows)
+        return lowerBound..<upperBound
+    }
+
+    private func trimHighlightedRanges(keeping keepRange: Range<Int>) {
+        guard !highlightedRanges.isEmpty else { return }
+
+        var keepRowIDs: Set<Int> = []
+        keepRowIDs.reserveCapacity(keepRange.count)
+        for index in keepRange {
+            keepRowIDs.insert(codeRows[index].id)
+        }
+
+        highlightedRanges = highlightedRanges.filter { keepRowIDs.contains($0.key) }
+        staleHighlightedRowIDs = Set(staleHighlightedRowIDs.filter { keepRowIDs.contains($0) })
     }
 
     private func applyDeferredHighlightSceneRefresh(redraw: Bool) {

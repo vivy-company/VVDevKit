@@ -1,5 +1,6 @@
 import XCTest
 @testable import VVCode
+import VVMarkdown
 
 final class DiffTableViewTests: XCTestCase {
 
@@ -17,7 +18,7 @@ final class DiffTableViewTests: XCTestCase {
          return;
         """
 
-        let rows = VVDiffTable.parse(unifiedDiff: diff)
+        let rows = VVDiffSceneRenderer.analyze(unifiedDiff: diff).rows
 
         XCTAssertFalse(rows.isEmpty)
         XCTAssertEqual(rows.first?.kind, .fileHeader)
@@ -39,7 +40,7 @@ final class DiffTableViewTests: XCTestCase {
          return a
         """
 
-        let rows = VVDiffTable.parse(unifiedDiff: diff)
+        let rows = VVDiffSceneRenderer.analyze(unifiedDiff: diff).rows
 
         let contextBefore = rows.first(where: { $0.kind == .context && $0.text == "let a = 1" })
         XCTAssertEqual(contextBefore?.oldLineNumber, 5)
@@ -73,7 +74,7 @@ final class DiffTableViewTests: XCTestCase {
         +new
         """
 
-        let rows = VVDiffTable.parse(unifiedDiff: diff)
+        let rows = VVDiffSceneRenderer.analyze(unifiedDiff: diff).rows
 
         XCTAssertTrue(rows.contains(where: { $0.kind == .metadata && $0.text == "\\ No newline at end of file" }))
     }

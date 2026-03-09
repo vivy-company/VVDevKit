@@ -61,16 +61,16 @@ final class VVDiffSceneRendererTests: XCTestCase {
         XCTAssertGreaterThan(compact.contentHeight, 0)
     }
 
-    func testLegacyUnifiedDiffRendererCompatibilityWrapperStillWorks() throws {
+    func testRenderInlineProducesScene() throws {
         let theme = MarkdownTheme.dark
         let font = try makeFont()
 
-        let result = VVUnifiedDiffSceneRenderer.render(
+        let result = VVDiffSceneRenderer.render(
             unifiedDiff: sampleDiff,
             width: 900,
             theme: theme,
             baseFont: font,
-            style: .unifiedTable,
+            style: .inline,
             options: .full
         )
 

@@ -49,33 +49,6 @@ public enum VVDiffRenderStyle: Hashable, Sendable {
     case sideBySide
 }
 
-public extension VVDiffRenderStyle {
-    @available(*, deprecated, message: "Use .inline instead.")
-    static var unifiedTable: Self { .inline }
-
-    @available(*, deprecated, message: "Use .sideBySide instead.")
-    static var split: Self { .sideBySide }
-}
-
-public typealias VVUnifiedDiffRenderResult = VVDiffRenderResult
-public typealias VVUnifiedDiffRenderOptions = VVDiffRenderOptions
-public typealias VVUnifiedDiffRow = VVDiffRow
-public typealias VVUnifiedDiffSection = VVDiffSection
-public typealias VVUnifiedDiffSplitRow = VVDiffSplitRow
-public typealias VVUnifiedDiffDocument = VVDiffDocument
-
-public enum VVDiffSceneRenderStyle: Hashable, Sendable {
-    case unifiedTable
-    case split
-
-    fileprivate var canonicalStyle: VVDiffRenderStyle {
-        switch self {
-        case .unifiedTable: return .inline
-        case .split: return .sideBySide
-        }
-    }
-}
-
 public enum VVDiffSceneRenderer {
     public static func analyze(unifiedDiff: String) -> VVDiffDocument {
         let rows = parseRows(unifiedDiff: unifiedDiff)
@@ -114,7 +87,8 @@ public enum VVDiffSceneRenderer {
         options: VVDiffRenderOptions = .full,
         highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]]?
     ) -> VVDiffRenderResult {
-        let renderCacheKey = highlightedRangesOverride == nil
+        let allowsRenderCaching = highlightedRangesOverride == nil && shouldCacheRenderResult(for: unifiedDiff)
+        let renderCacheKey = allowsRenderCaching
             ? makeRenderCacheKey(
                 unifiedDiff: unifiedDiff,
                 width: width,
@@ -167,72 +141,6 @@ public enum VVDiffSceneRenderer {
     }
 }
 
-public enum VVUnifiedDiffSceneRenderer {
-    public static func analyze(unifiedDiff: String) -> VVUnifiedDiffDocument {
-        VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
-    }
-
-    public static func render(
-        unifiedDiff: String,
-        width: CGFloat,
-        theme: MarkdownTheme,
-        baseFont: VVFont,
-        style: VVDiffSceneRenderStyle = .unifiedTable,
-        options: VVUnifiedDiffRenderOptions = .full
-    ) -> VVUnifiedDiffRenderResult {
-        VVDiffSceneRenderer.render(
-            unifiedDiff: unifiedDiff,
-            width: width,
-            theme: theme,
-            baseFont: baseFont,
-            style: style.canonicalStyle,
-            options: options
-        )
-    }
-
-    public static func render(
-        unifiedDiff: String,
-        width: CGFloat,
-        theme: MarkdownTheme,
-        baseFont: VVFont,
-        style: VVDiffSceneRenderStyle = .unifiedTable,
-        options: VVUnifiedDiffRenderOptions = .full,
-        highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]]?
-    ) -> VVUnifiedDiffRenderResult {
-        VVDiffSceneRenderer.render(
-            unifiedDiff: unifiedDiff,
-            width: width,
-            theme: theme,
-            baseFont: baseFont,
-            style: style.canonicalStyle,
-            options: options,
-            highlightedRangesOverride: highlightedRangesOverride
-        )
-    }
-
-    public static func render(
-        document: VVUnifiedDiffDocument,
-        width: CGFloat,
-        theme: MarkdownTheme,
-        baseFont: VVFont,
-        style: VVDiffSceneRenderStyle = .unifiedTable,
-        options: VVUnifiedDiffRenderOptions = .full,
-        highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]] = [:],
-        includedRowIDs: Set<Int>? = nil
-    ) -> VVUnifiedDiffRenderResult {
-        VVDiffSceneRenderer.render(
-            document: document,
-            width: width,
-            theme: theme,
-            baseFont: baseFont,
-            style: style.canonicalStyle,
-            options: options,
-            highlightedRangesOverride: highlightedRangesOverride,
-            includedRowIDs: includedRowIDs
-        )
-    }
-}
-
 private final class DiffLRUCache<Value> {
     private let lock = NSLock()
     private let maxEntries: Int
@@ -272,6 +180,25 @@ private enum DiffCaches {
     static let highlights = DiffLRUCache<[Int: [(NSRange, SIMD4<Float>)]]>(maxEntries: 24)
     static let documents = DiffLRUCache<VVDiffDocument>(maxEntries: 12)
     static let renders = DiffLRUCache<VVDiffRenderResult>(maxEntries: 4)
+}
+
+private enum DiffCacheSizing {
+    static let maxCachedUnifiedDiffUTF16 = 120_000
+    static let maxCachedHighlightRows = 2_000
+    static let maxCachedRenderUTF16 = 80_000
+}
+
+private func shouldCacheAnalyzedDocument(for unifiedDiff: String) -> Bool {
+    unifiedDiff.utf16.count <= DiffCacheSizing.maxCachedUnifiedDiffUTF16
+}
+
+private func shouldCacheHighlightedRanges(for unifiedDiff: String, rows: [ParsedDiffRow]) -> Bool {
+    unifiedDiff.utf16.count <= DiffCacheSizing.maxCachedUnifiedDiffUTF16 &&
+    rows.count <= DiffCacheSizing.maxCachedHighlightRows
+}
+
+private func shouldCacheRenderResult(for unifiedDiff: String) -> Bool {
+    unifiedDiff.utf16.count <= DiffCacheSizing.maxCachedRenderUTF16
 }
 
 public struct VVDiffRow: Identifiable, Hashable, Sendable {
@@ -409,15 +336,19 @@ private typealias ParsedDiffSection = VVDiffSection
 private typealias ParsedDiffSplitRow = VVDiffSplitRow
 
 private func analyzedDocument(for unifiedDiff: String) -> VVDiffDocument {
-    var hasher = Hasher()
-    hasher.combine(unifiedDiff)
-    let cacheKey = hasher.finalize()
-    if let cached = DiffCaches.documents.value(for: cacheKey) {
-        return cached
+    if shouldCacheAnalyzedDocument(for: unifiedDiff) {
+        var hasher = Hasher()
+        hasher.combine(unifiedDiff)
+        let cacheKey = hasher.finalize()
+        if let cached = DiffCaches.documents.value(for: cacheKey) {
+            return cached
+        }
+        let document = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+        DiffCaches.documents.set(document, for: cacheKey)
+        return document
     }
-    let document = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
-    DiffCaches.documents.set(document, for: cacheKey)
-    return document
+
+    return VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
 }
 
 private func makeSceneBuilder(
@@ -1646,14 +1577,21 @@ private func highlightedRanges(
         return [:]
     }
 
-    var hasher = Hasher()
-    hasher.combine(unifiedDiff)
-    hasher.combine(languageConfig.identifier)
-    hasher.combine(font.pointSize)
-    hasher.combine(brightness(of: theme.codeBackgroundColor) > 0.58)
-    let cacheKey = hasher.finalize()
-    if let cached = DiffCaches.highlights.value(for: cacheKey) {
-        return cached
+    let allowsCaching = shouldCacheHighlightedRanges(for: unifiedDiff, rows: rows)
+    let cacheKey: Int?
+    if allowsCaching {
+        var hasher = Hasher()
+        hasher.combine(unifiedDiff)
+        hasher.combine(languageConfig.identifier)
+        hasher.combine(font.pointSize)
+        hasher.combine(brightness(of: theme.codeBackgroundColor) > 0.58)
+        let key = hasher.finalize()
+        if let cached = DiffCaches.highlights.value(for: key) {
+            return cached
+        }
+        cacheKey = key
+    } else {
+        cacheKey = nil
     }
 
     let semaphore = DispatchSemaphore(value: 0)
@@ -1664,7 +1602,9 @@ private func highlightedRanges(
         semaphore.signal()
     }
     semaphore.wait()
-    DiffCaches.highlights.set(output, for: cacheKey)
+    if let cacheKey {
+        DiffCaches.highlights.set(output, for: cacheKey)
+    }
     return output
 }
 
