@@ -865,6 +865,15 @@ private typealias MDLayoutGlyph = LayoutGlyph
 private typealias MDFontVariant = FontVariant
 
 private final class UnifiedDiffRenderer {
+    private struct WrappedTextSegment {
+        let text: String
+        let start: Int
+
+        var end: Int {
+            start + text.count
+        }
+    }
+
     let font: VVFont
     let lineHeight: CGFloat
     let layoutEngine: MarkdownLayoutEngine
@@ -937,7 +946,13 @@ private final class UnifiedDiffRenderer {
         includedRowIDs: Set<Int>? = nil
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         if style == .split {
-            return buildSplitScene(document: document, width: width, options: options, includedRowIDs: includedRowIDs)
+            return buildSplitScene(
+                document: document,
+                width: width,
+                wrapLines: wrapLines,
+                options: options,
+                includedRowIDs: includedRowIDs
+            )
         }
 
         let sections = document.sections
@@ -970,7 +985,7 @@ private final class UnifiedDiffRenderer {
                 }
                 let wrappedLines = shouldWrap(row: row, wrapLines: wrapLines)
                     ? wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
-                    : [row.text]
+                    : singleWrappedSegment(row.text)
                 let rowHeight = lineHeight * CGFloat(max(1, wrappedLines.count))
                 if includedRowIDs == nil || includedRowIDs?.contains(row.id) == true {
                     buildUnifiedRow(
@@ -995,6 +1010,7 @@ private final class UnifiedDiffRenderer {
     private func buildSplitScene(
         document: VVUnifiedDiffDocument,
         width: CGFloat,
+        wrapLines: Bool,
         options: VVUnifiedDiffRenderOptions,
         includedRowIDs: Set<Int>? = nil
     ) -> (scene: VVScene, contentHeight: CGFloat) {
@@ -1007,6 +1023,8 @@ private final class UnifiedDiffRenderer {
         let columnWidth = max(420, floor(width / 2))
         let totalWidth = columnWidth * 2
         let paneCodeStartX = markerWidth + gutterColWidth
+        let paneMaxCharsPerVisualLine = wrapCapacity(totalWidth: columnWidth, codeStartX: paneCodeStartX)
+        let headerMaxCharsPerVisualLine = wrapCapacity(totalWidth: totalWidth, codeStartX: 12)
 
         var builder = VVSceneBuilder()
         var y: CGFloat = 0
@@ -1019,18 +1037,33 @@ private final class UnifiedDiffRenderer {
                 if header.kind == .hunkHeader && !options.showsHunkHeaders {
                     continue
                 }
-                let rowHeight = header.kind == .fileHeader ? max(20, lineHeight * 1.5) : lineHeight
+                let wrappedHeaderLines = header.kind == .hunkHeader && wrapLines
+                    ? wrappedTextSegments(header.text, maxChars: headerMaxCharsPerVisualLine)
+                    : singleWrappedSegment(header.text)
+                let rowHeight = header.kind == .fileHeader
+                    ? max(20, lineHeight * 1.5)
+                    : lineHeight * CGFloat(max(1, wrappedHeaderLines.count))
                 if includedRowIDs == nil || includedRowIDs?.contains(header.id) == true {
                     if header.kind == .fileHeader {
                         let section = UnifiedDiffSection(id: header.id, filePath: header.text, headerRow: header, rows: [])
                         buildFileHeader(section: section, y: y, width: totalWidth, height: rowHeight, builder: &builder)
                     } else {
-                        buildHunkHeaderRow(lines: [header.text], y: y, width: totalWidth, height: rowHeight, builder: &builder)
+                        buildHunkHeaderRow(lines: wrappedHeaderLines, y: y, width: totalWidth, height: rowHeight, builder: &builder)
                     }
                 }
                 y += rowHeight
             } else {
-                let rowHeight = lineHeight
+                let leftWrappedLines = splitRow.left.map { cell in
+                    wrapLines && cell.kind.isCode
+                        ? wrappedTextSegments(cell.text, maxChars: paneMaxCharsPerVisualLine)
+                        : singleWrappedSegment(cell.text)
+                } ?? []
+                let rightWrappedLines = splitRow.right.map { cell in
+                    wrapLines && cell.kind.isCode
+                        ? wrappedTextSegments(cell.text, maxChars: paneMaxCharsPerVisualLine)
+                        : singleWrappedSegment(cell.text)
+                } ?? []
+                let rowHeight = lineHeight * CGFloat(max(1, max(leftWrappedLines.count, rightWrappedLines.count)))
                 let includesLeft = splitRow.left.map { cell in
                     includedRowIDs == nil || includedRowIDs?.contains(cell.rowID) == true
                 } ?? false
@@ -1041,6 +1074,7 @@ private final class UnifiedDiffRenderer {
                 if includesLeft || includesRight {
                     buildSplitCell(
                         cell: includesLeft ? splitRow.left : nil,
+                        wrappedLines: includesLeft ? leftWrappedLines : [],
                         y: y,
                         paneX: 0,
                         paneWidth: columnWidth,
@@ -1052,6 +1086,7 @@ private final class UnifiedDiffRenderer {
                     )
                     buildSplitCell(
                         cell: includesRight ? splitRow.right : nil,
+                        wrappedLines: includesRight ? rightWrappedLines : [],
                         y: y,
                         paneX: columnWidth,
                         paneWidth: columnWidth,
@@ -1081,7 +1116,7 @@ private final class UnifiedDiffRenderer {
         gutterColWidth: CGFloat,
         markerWidth: CGFloat,
         codeStartX: CGFloat,
-        wrappedLines: [String],
+        wrappedLines: [WrappedTextSegment],
         builder: inout VVSceneBuilder
     ) {
         if row.kind == .hunkHeader {
@@ -1120,20 +1155,15 @@ private final class UnifiedDiffRenderer {
             let codeColor = row.kind == .metadata ? gutterTextColor : textColor
             for (lineIndex, lineText) in wrappedLines.enumerated() {
                 let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-                let glyphs = layoutEngine.layoutTextGlyphs(lineText, variant: .monospace, at: .zero, color: codeColor)
-                let coloredGlyphs: [MDLayoutGlyph]
-                if wrappedLines.count == 1, let ranges = highlightedRanges[row.id], !ranges.isEmpty {
-                    coloredGlyphs = applyHighlightColors(glyphs, ranges: ranges)
-                } else {
-                    coloredGlyphs = glyphs
-                }
+                let glyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: codeColor)
+                let coloredGlyphs = applyHighlightColors(glyphs, ranges: clippedHighlightRanges(for: row.id, segment: lineText))
                 addTextGlyphs(coloredGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, builder: &builder)
             }
         }
     }
 
     private func buildHunkHeaderRow(
-        lines: [String],
+        lines: [WrappedTextSegment],
         y: CGFloat,
         width: CGFloat,
         height: CGFloat,
@@ -1151,7 +1181,7 @@ private final class UnifiedDiffRenderer {
 
         for (lineIndex, lineText) in lines.enumerated() {
             let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-            let glyphs = layoutEngine.layoutTextGlyphs(lineText, variant: .monospace, at: .zero, color: modifiedColor)
+            let glyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: modifiedColor)
             addTextGlyphs(glyphs, offsetX: 12, baselineY: baselineY, builder: &builder)
         }
     }
@@ -1306,6 +1336,7 @@ private final class UnifiedDiffRenderer {
 
     private func buildSplitCell(
         cell: UnifiedDiffSplitRow.Cell?,
+        wrappedLines: [WrappedTextSegment],
         y: CGFloat,
         paneX: CGFloat,
         paneWidth: CGFloat,
@@ -1337,36 +1368,45 @@ private final class UnifiedDiffRenderer {
 
         guard let cell else { return }
 
-        let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
+        let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
         buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
 
         if let lineNumber = cell.lineNumber {
             let glyphs = layoutEngine.layoutTextGlyphs(String(lineNumber), variant: .monospace, at: .zero, color: lineNumberColor(for: cell.kind))
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let numX = paneX + markerWidth + gutterColWidth - width - 8
-            addTextGlyphs(glyphs, offsetX: numX, baselineY: baselineY, builder: &builder)
+            addTextGlyphs(glyphs, offsetX: numX, baselineY: firstBaselineY, builder: &builder)
         }
 
-        let baseGlyphs = layoutEngine.layoutTextGlyphs(cell.text, variant: .monospace, at: .zero, color: textColor)
-        let glyphs = highlightedRanges[cell.rowID].map { applyHighlightColors(baseGlyphs, ranges: $0) } ?? baseGlyphs
-        addTextGlyphs(glyphs, offsetX: paneX + codeStartX + codeInsetX, baselineY: baselineY, builder: &builder)
-
         let inlineHighlightColor = cell.kind == .deleted ? withAlpha(deletedMarkerColor, 0.22) : withAlpha(addedMarkerColor, 0.22)
-        for range in cell.inlineChanges {
-            let startX = glyphXForCharIndex(range.start, in: glyphs)
-            let endX = glyphXForCharIndex(range.end, in: glyphs)
-            let highlightWidth = endX - startX
-            if highlightWidth > 0 {
-                builder.add(
-                    kind: .quad(
-                        VVQuadPrimitive(
-                            frame: CGRect(x: paneX + codeStartX + codeInsetX + startX, y: y, width: highlightWidth, height: height),
-                            color: inlineHighlightColor
-                        )
-                    ),
-                    zIndex: 0
-                )
+        for (lineIndex, lineText) in wrappedLines.enumerated() {
+            let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+            let baseGlyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: textColor)
+            let glyphs = applyHighlightColors(baseGlyphs, ranges: clippedHighlightRanges(for: cell.rowID, segment: lineText))
+
+            for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
+                let startX = glyphXForCharIndex(range.start, in: glyphs)
+                let endX = glyphXForCharIndex(range.end, in: glyphs)
+                let highlightWidth = endX - startX
+                if highlightWidth > 0 {
+                    builder.add(
+                        kind: .quad(
+                            VVQuadPrimitive(
+                                frame: CGRect(
+                                    x: paneX + codeStartX + codeInsetX + startX,
+                                    y: y + CGFloat(lineIndex) * lineHeight,
+                                    width: highlightWidth,
+                                    height: lineHeight
+                                ),
+                                color: inlineHighlightColor
+                            )
+                        ),
+                        zIndex: 0
+                    )
+                }
             }
+
+            addTextGlyphs(glyphs, offsetX: paneX + codeStartX + codeInsetX, baselineY: baselineY, builder: &builder)
         }
     }
 
@@ -1480,23 +1520,69 @@ private final class UnifiedDiffRenderer {
         return max(1, Int(floor(available / max(measureCharWidth(), 1))))
     }
 
-    private func wrappedTextSegments(_ text: String, maxChars: Int) -> [String] {
-        guard maxChars > 0 else { return [text] }
+    private func clippedHighlightRanges(for rowID: Int, segment: WrappedTextSegment) -> [(NSRange, SIMD4<Float>)] {
+        guard let ranges = highlightedRanges[rowID], !ranges.isEmpty else { return [] }
+        var clipped: [(NSRange, SIMD4<Float>)] = []
+        clipped.reserveCapacity(ranges.count)
+        for (range, color) in ranges {
+            let start = max(segment.start, range.location)
+            let end = min(segment.end, NSMaxRange(range))
+            if end > start {
+                clipped.append((NSRange(location: start - segment.start, length: end - start), color))
+            }
+        }
+        return clipped
+    }
+
+    private func clippedInlineChanges(
+        _ inlineChanges: [UnifiedDiffSplitRow.InlineRange],
+        segment: WrappedTextSegment
+    ) -> [UnifiedDiffSplitRow.InlineRange] {
+        guard !inlineChanges.isEmpty else { return [] }
+        var clipped: [UnifiedDiffSplitRow.InlineRange] = []
+        clipped.reserveCapacity(inlineChanges.count)
+        for range in inlineChanges {
+            let start = max(segment.start, range.start)
+            let end = min(segment.end, range.end)
+            if end > start {
+                clipped.append(.init(start: start - segment.start, end: end - segment.start))
+            }
+        }
+        return clipped
+    }
+
+    private func singleWrappedSegment(_ text: String) -> [WrappedTextSegment] {
+        [WrappedTextSegment(text: text, start: 0)]
+    }
+
+    private func wrappedTextSegments(_ text: String, maxChars: Int) -> [WrappedTextSegment] {
+        guard maxChars > 0 else { return singleWrappedSegment(text) }
         let logicalLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var result: [String] = []
-        for line in logicalLines {
+        var result: [WrappedTextSegment] = []
+        var absoluteOffset = 0
+        for (lineIndex, line) in logicalLines.enumerated() {
             if line.isEmpty {
-                result.append("")
+                result.append(WrappedTextSegment(text: "", start: absoluteOffset))
+                if lineIndex < logicalLines.count - 1 {
+                    absoluteOffset += 1
+                }
                 continue
             }
             var start = line.startIndex
+            var localOffset = 0
             while start < line.endIndex {
                 let end = line.index(start, offsetBy: maxChars, limitedBy: line.endIndex) ?? line.endIndex
-                result.append(String(line[start..<end]))
+                let segmentText = String(line[start..<end])
+                result.append(WrappedTextSegment(text: segmentText, start: absoluteOffset + localOffset))
+                localOffset += segmentText.count
                 start = end
             }
+            absoluteOffset += line.count
+            if lineIndex < logicalLines.count - 1 {
+                absoluteOffset += 1
+            }
         }
-        return result.isEmpty ? [""] : result
+        return result.isEmpty ? [WrappedTextSegment(text: "", start: 0)] : result
     }
 
     private func measureCharWidth() -> CGFloat {

@@ -61,6 +61,43 @@ final class VVUnifiedDiffSceneRendererTests: XCTestCase {
         XCTAssertGreaterThan(compact.contentHeight, 0)
     }
 
+    func testSplitRenderWrapsLongLinesWithinPaneBounds() throws {
+        let theme = MarkdownTheme.dark
+        let font = try makeFont()
+        let longToken = String(repeating: "context_0123456789 ", count: 18)
+        let diff = """
+        diff --git a/Sources/Feature.swift b/Sources/Feature.swift
+        index 1111111..2222222 100644
+        --- a/Sources/Feature.swift
+        +++ b/Sources/Feature.swift
+        @@ -10,2 +10,2 @@
+        -let oldValue = "\(longToken)"
+        +let newValue = "\(longToken)"
+        """
+
+        let result = VVUnifiedDiffSceneRenderer.render(
+            unifiedDiff: diff,
+            width: 960,
+            theme: theme,
+            baseFont: font,
+            style: .split,
+            options: .full
+        )
+
+        XCTAssertGreaterThan(result.contentHeight, 40)
+
+        let paneWidth = max(CGFloat(420), floor(CGFloat(960) / 2))
+        for primitive in result.scene.primitives {
+            guard case let .textRun(run) = primitive.kind else { continue }
+            guard let runBounds = run.runBounds else { continue }
+            if runBounds.minX < paneWidth {
+                XCTAssertLessThanOrEqual(runBounds.maxX, paneWidth + 1)
+            } else {
+                XCTAssertLessThanOrEqual(runBounds.maxX, paneWidth * 2 + 1)
+            }
+        }
+    }
+
     func testRenderProfileLargeSplitDiff() throws {
         let font = try makeFont()
         let theme = MarkdownTheme.dark

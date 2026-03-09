@@ -598,7 +598,7 @@ private final class VVDiffMetalView: NSView {
     }
 
     private var wrapsUnified: Bool {
-        configuration.wrapLines && renderStyle == .unifiedTable && !fastPlainModeEnabled
+        configuration.wrapLines && (renderStyle == .split || !fastPlainModeEnabled)
     }
 
     private static func computeRowsSignature(_ rows: [VVDiffRow]) -> Int {
@@ -697,7 +697,7 @@ private final class VVDiffMetalView: NSView {
         }
 
         if style == .split {
-            scrollView?.hasHorizontalScroller = true
+            scrollView?.hasHorizontalScroller = !wrapsUnified
         } else {
             scrollView?.hasHorizontalScroller = !wrapsUnified && !fastPlainModeEnabled
         }
@@ -760,9 +760,14 @@ private final class VVDiffMetalView: NSView {
         if wrapsUnified || fastPlainModeEnabled {
             maxLineWidth = width
         } else {
-            maxLineWidth = rowGeometries.map { geo in
-                geo.codeStartX + codeInsetX + CGFloat(geo.text.count) * dr.charWidth + 20
-            }.max() ?? width
+            var widestLine = width
+            for geo in rowGeometries {
+                let candidate = geo.codeStartX + codeInsetX + CGFloat(geo.text.count) * dr.charWidth + 20
+                if candidate > widestLine {
+                    widestLine = candidate
+                }
+            }
+            maxLineWidth = widestLine
         }
 
         let minWidth: CGFloat
@@ -801,7 +806,7 @@ private final class VVDiffMetalView: NSView {
         case .unifiedTable:
             buildRowGeometriesUnified(width: width, renderer: dr, wrapLines: wrapsUnified)
         case .split:
-            buildRowGeometriesSplit(width: width, renderer: dr)
+            buildRowGeometriesSplit(width: width, renderer: dr, wrapLines: wrapsUnified)
         }
 
         rowGeometriesContentHeight = rowGeometries.last.map { $0.y + $0.height } ?? 0
@@ -809,8 +814,8 @@ private final class VVDiffMetalView: NSView {
     }
 
     private func buildRowGeometriesUnified(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
-        let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
+        let maxOld = analyzedDocument?.maxOldLineNumber ?? rows.compactMap(\.oldLineNumber).max() ?? 0
+        let maxNew = analyzedDocument?.maxNewLineNumber ?? rows.compactMap(\.newLineNumber).max() ?? 0
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
         let markerWidth = renderer.charWidth + 8
@@ -894,65 +899,109 @@ private final class VVDiffMetalView: NSView {
         return result.isEmpty ? [""] : result
     }
 
-    private func buildRowGeometriesSplit(width: CGFloat, renderer: VVDiffRenderer) {
-        let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
+    private func buildRowGeometriesSplit(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
+        let maxOld = analyzedDocument?.maxOldLineNumber ?? rows.compactMap(\.oldLineNumber).max() ?? 0
+        let maxNew = analyzedDocument?.maxNewLineNumber ?? rows.compactMap(\.newLineNumber).max() ?? 0
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
         let markerWidth = renderer.charWidth + 4
         let columnWidth = max(420, floor(width / 2))
         let paneCodeStartX = markerWidth + gutterColWidth
+        let paneMaxCharsPerVisualLine = wrapCapacity(totalWidth: columnWidth, codeStartX: paneCodeStartX, charWidth: renderer.charWidth)
+        let headerMaxCharsPerVisualLine = wrapCapacity(totalWidth: columnWidth * 2, codeStartX: 12, charWidth: renderer.charWidth)
 
         var y: CGFloat = 0
         var rowIndex = 0
 
         for splitRow in splitRows {
             if let header = splitRow.header {
-                let rowH = header.kind == .fileHeader ? renderer.headerHeight : renderer.lineHeight
-                rowGeometries.append(RowGeometry(
-                    rowIndex: rowIndex,
-                    rowID: header.id,
-                    y: y,
-                    height: rowH,
-                    isCodeRow: false,
-                    text: header.text,
-                    codeStartX: paneCodeStartX,
-                    paneX: 0,
-                    paneWidth: columnWidth * 2
-                ))
-                y += rowH
-                rowIndex += 1
-            } else {
-                let rowH = renderer.lineHeight
-                // Add left cell if present
-                if let left = splitRow.left {
+                let wrappedLines: [String]
+                if wrapLines && header.kind == .hunkHeader {
+                    wrappedLines = wrappedTextSegments(header.text, maxChars: headerMaxCharsPerVisualLine)
+                } else {
+                    wrappedLines = [header.text]
+                }
+                let rowH = header.kind == .fileHeader
+                    ? renderer.headerHeight
+                    : renderer.lineHeight * CGFloat(max(1, wrappedLines.count))
+                if header.kind == .fileHeader {
                     rowGeometries.append(RowGeometry(
                         rowIndex: rowIndex,
-                        rowID: left.rowID,
+                        rowID: header.id,
                         y: y,
                         height: rowH,
-                        isCodeRow: left.kind.isCode,
-                        text: left.text,
+                        isCodeRow: false,
+                        text: header.text,
                         codeStartX: paneCodeStartX,
                         paneX: 0,
-                        paneWidth: columnWidth
+                        paneWidth: columnWidth * 2
                     ))
                     rowIndex += 1
+                } else {
+                    for line in wrappedLines {
+                        rowGeometries.append(RowGeometry(
+                            rowIndex: rowIndex,
+                            rowID: header.id,
+                            y: y,
+                            height: renderer.lineHeight,
+                            isCodeRow: false,
+                            text: line,
+                            codeStartX: paneCodeStartX,
+                            paneX: 0,
+                            paneWidth: columnWidth * 2
+                        ))
+                        y += renderer.lineHeight
+                        rowIndex += 1
+                    }
+                    continue
+                }
+                y += rowH
+            } else {
+                let leftWrappedLines = splitRow.left.map { cell in
+                    wrapLines && cell.kind.isCode
+                        ? wrappedTextSegments(cell.text, maxChars: paneMaxCharsPerVisualLine)
+                        : [cell.text]
+                } ?? []
+                let rightWrappedLines = splitRow.right.map { cell in
+                    wrapLines && cell.kind.isCode
+                        ? wrappedTextSegments(cell.text, maxChars: paneMaxCharsPerVisualLine)
+                        : [cell.text]
+                } ?? []
+                let visualLineCount = max(1, max(leftWrappedLines.count, rightWrappedLines.count))
+                let rowH = renderer.lineHeight * CGFloat(visualLineCount)
+                // Add left cell if present
+                if let left = splitRow.left {
+                    for (lineIndex, line) in leftWrappedLines.enumerated() {
+                        rowGeometries.append(RowGeometry(
+                            rowIndex: rowIndex,
+                            rowID: left.rowID,
+                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
+                            height: renderer.lineHeight,
+                            isCodeRow: left.kind.isCode,
+                            text: line,
+                            codeStartX: paneCodeStartX,
+                            paneX: 0,
+                            paneWidth: columnWidth
+                        ))
+                        rowIndex += 1
+                    }
                 }
                 // Add right cell if present
                 if let right = splitRow.right {
-                    rowGeometries.append(RowGeometry(
-                        rowIndex: rowIndex,
-                        rowID: right.rowID,
-                        y: y,
-                        height: rowH,
-                        isCodeRow: right.kind.isCode,
-                        text: right.text,
-                        codeStartX: paneCodeStartX,
-                        paneX: columnWidth,
-                        paneWidth: columnWidth
-                    ))
-                    rowIndex += 1
+                    for (lineIndex, line) in rightWrappedLines.enumerated() {
+                        rowGeometries.append(RowGeometry(
+                            rowIndex: rowIndex,
+                            rowID: right.rowID,
+                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
+                            height: renderer.lineHeight,
+                            isCodeRow: right.kind.isCode,
+                            text: line,
+                            codeStartX: paneCodeStartX,
+                            paneX: columnWidth,
+                            paneWidth: columnWidth
+                        ))
+                        rowIndex += 1
+                    }
                 }
                 y += rowH
             }
@@ -1257,7 +1306,9 @@ extension VVDiffMetalView: MTKViewDelegate {
             visibleRect: visibleRect,
             visibilityIndex: cachedSceneVisibilityIndex,
             encoder: encoder,
-            renderer: renderer
+            renderer: renderer,
+            scissorRectForClip: { [weak self] in self?.scissorRect(for: $0) ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) },
+            fullScissorRect: { [weak self] in self?.fullScissorRect() ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) }
         )
 
         // Render selection quads on top of scene (so they're visible over opaque row backgrounds)
@@ -1443,6 +1494,31 @@ extension VVDiffMetalView: MTKViewDelegate {
         )
         guard let buffer = renderer.makeBuffer(for: [instance]) else { return }
         renderer.renderGradientQuads(encoder: encoder, instances: buffer, instanceCount: 1)
+    }
+
+    private func fullScissorRect() -> MTLScissorRect {
+        let width = max(1, Int(currentDrawableSize.width))
+        let height = max(1, Int(currentDrawableSize.height))
+        return MTLScissorRect(x: 0, y: 0, width: width, height: height)
+    }
+
+    private func scissorRect(for frame: CGRect) -> MTLScissorRect {
+        let visibleFrame = frame.offsetBy(dx: -currentScrollOffset.x, dy: -currentScrollOffset.y)
+        let viewBounds = CGRect(origin: .zero, size: metalView.bounds.size)
+        let clipped = visibleFrame.intersection(viewBounds)
+        if clipped.isNull || clipped.width <= 0 || clipped.height <= 0 {
+            return fullScissorRect()
+        }
+
+        let scaleX = currentDrawableSize.width / max(1, metalView.bounds.width)
+        let scaleY = currentDrawableSize.height / max(1, metalView.bounds.height)
+        let x = max(0, Int(floor(clipped.minX * scaleX)))
+        let y = max(0, Int(floor(clipped.minY * scaleY)))
+        let maxWidth = max(1, Int(currentDrawableSize.width) - x)
+        let maxHeight = max(1, Int(currentDrawableSize.height) - y)
+        let width = min(maxWidth, Int(ceil(clipped.width * scaleX)))
+        let height = min(maxHeight, Int(ceil(clipped.height * scaleY)))
+        return MTLScissorRect(x: x, y: y, width: max(1, width), height: max(1, height))
     }
 
     private func renderQuadPrimitive(
