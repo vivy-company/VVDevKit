@@ -442,6 +442,7 @@ private final class VVDiffMetalView: NSView {
         updateMetalViewport()
         noteScrollActivity()
         requestViewportHighlightingIfNeeded()
+        prewarmSceneBuildIfNeeded()
         if !staleHighlightedRowIDs.isEmpty, shouldRedrawForHighlightedRowIDs(staleHighlightedRowIDs) {
             deferredHighlightSceneRefresh = true
             startDisplayLink()
@@ -1323,10 +1324,8 @@ private final class VVDiffMetalView: NSView {
         let baseFont = configuration.font
         let style: VVMarkdown.VVDiffRenderStyle = renderStyle == .sideBySide ? .sideBySide : .inline
         let highlightedRanges = highlightedRanges
-        let rowIDs = sceneKey.startBlockIndex == 0 && sceneKey.endBlockIndex == displayBlocks.count
-            ? Set(rows.map(\.id))
-            : rowIDs(inDisplayBlockRange: sceneKey.startBlockIndex..<sceneKey.endBlockIndex)
-        let includesAllRows = rowIDs.count == rows.count
+        let rowIDs = Set(rows.map(\.id))
+        let includesAllRows = true
 
         sceneBuildInFlightKey = sceneKey
         Self.sceneBuildQueue.async { [weak self] in
@@ -1482,17 +1481,8 @@ extension VVDiffMetalView: MTKViewDelegate {
             scene = cached
             orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
             visibilityIndex = cachedSceneVisibilityIndex
-        } else {
-            scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
-            scene = cachedScene
-            orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
-            visibilityIndex = cachedSceneVisibilityIndex
-        }
-
-        if scene == nil, let analyzedDocument {
-            let rowIDs = sceneKey.startBlockIndex == 0 && sceneKey.endBlockIndex == displayBlocks.count
-                ? Set(rows.map(\.id))
-                : rowIDs(inDisplayBlockRange: sceneKey.startBlockIndex..<sceneKey.endBlockIndex)
+        } else if let analyzedDocument {
+            let rowIDs = Set(rows.map(\.id))
             let artifacts = Self.buildSceneArtifacts(
                 analyzedDocument: analyzedDocument,
                 renderWidth: renderWidth,
@@ -1501,7 +1491,7 @@ extension VVDiffMetalView: MTKViewDelegate {
                 style: renderStyle == .sideBySide ? .sideBySide : .inline,
                 highlightedRanges: highlightedRanges,
                 rowIDs: rowIDs,
-                includesAllRows: rowIDs.count == rows.count
+                includesAllRows: true
             )
             scene = artifacts.scene
             orderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
@@ -1515,6 +1505,10 @@ extension VVDiffMetalView: MTKViewDelegate {
             cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
             staleHighlightedRowIDs.removeAll(keepingCapacity: true)
             sceneBuildInFlightKey = nil
+        } else {
+            scene = cachedScene
+            orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
+            visibilityIndex = cachedSceneVisibilityIndex
         }
 
         let visiblePrimitiveIndicesForDraw: [Int]
@@ -1607,24 +1601,36 @@ extension VVDiffMetalView: MTKViewDelegate {
         return startIndex..<endIndex
     }
 
-    private func visibleDisplayBlockRange(in visibleGeometryRange: Range<Int>) -> Range<Int> {
-        guard !displayBlocks.isEmpty,
-              visibleGeometryRange.lowerBound < visibleGeometryRange.upperBound else { return 0..<0 }
+    private func visibleDisplayBlockRange(in visibleRect: CGRect) -> Range<Int> {
+        guard !displayBlocks.isEmpty, !visibleRect.isNull, !visibleRect.isEmpty else { return 0..<0 }
 
-        let startGeometryIndex = visibleGeometryRange.lowerBound
-        let endGeometryIndex = max(visibleGeometryRange.lowerBound, visibleGeometryRange.upperBound - 1)
+        let startBlock = firstVisibleDisplayBlockIndex(minY: visibleRect.minY)
+        var endBlock = startBlock
+        while endBlock < displayBlocks.count {
+            let block = displayBlocks[endBlock]
+            if block.y > visibleRect.maxY {
+                break
+            }
+            endBlock += 1
+        }
+        return startBlock..<endBlock
+    }
 
-        guard let startBlock = displayBlocks.first(where: {
-            startGeometryIndex >= $0.geometryStartIndex && startGeometryIndex < $0.geometryEndIndex
-        })?.blockIndex else {
-            return 0..<0
+    private func firstVisibleDisplayBlockIndex(minY: CGFloat) -> Int {
+        var low = 0
+        var high = displayBlocks.count
+
+        while low < high {
+            let mid = (low + high) / 2
+            let block = displayBlocks[mid]
+            if block.y + block.height < minY {
+                low = mid + 1
+            } else {
+                high = mid
+            }
         }
-        guard let endBlock = displayBlocks.first(where: {
-            endGeometryIndex >= $0.geometryStartIndex && endGeometryIndex < $0.geometryEndIndex
-        })?.blockIndex else {
-            return startBlock..<(startBlock + 1)
-        }
-        return startBlock..<(endBlock + 1)
+
+        return min(low, displayBlocks.count)
     }
 
     private func makeViewportSceneCacheKey(renderWidth: CGFloat) -> ViewportSceneCacheKey {
