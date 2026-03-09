@@ -45,6 +45,16 @@ public struct VVDiffRow: Identifiable, Hashable, Sendable {
     }
 }
 
+public struct VVDiffInlineRenderResult: Sendable {
+    public let scene: VVScene
+    public let contentHeight: CGFloat
+
+    public init(scene: VVScene, contentHeight: CGFloat) {
+        self.scene = scene
+        self.contentHeight = contentHeight
+    }
+}
+
 private struct VVDiffSection: Identifiable, Hashable {
     let id: Int
     let filePath: String
@@ -54,6 +64,47 @@ private struct VVDiffSection: Identifiable, Hashable {
     var addedCount: Int { rows.filter { $0.kind == .added }.count }
     var deletedCount: Int { rows.filter { $0.kind == .deleted }.count }
     var hunkCount: Int { rows.filter { $0.kind == .hunkHeader }.count }
+}
+
+public enum VVDiffInlineRenderer {
+    public static func renderUnified(
+        unifiedDiff: String,
+        width: CGFloat,
+        theme: VVTheme,
+        configuration: VVConfiguration
+    ) -> VVDiffInlineRenderResult {
+        let result = VVUnifiedDiffSceneRenderer.render(
+            unifiedDiff: unifiedDiff,
+            width: width,
+            theme: markdownTheme(from: theme),
+            baseFont: configuration.font,
+            style: .unifiedTable
+        )
+        return VVDiffInlineRenderResult(
+            scene: result.scene,
+            contentHeight: result.contentHeight
+        )
+    }
+}
+
+private func markdownTheme(from theme: VVTheme) -> MarkdownTheme {
+    var mdTheme: MarkdownTheme = theme.backgroundColor.brightnessComponent < 0.5 ? .dark : .light
+    mdTheme.textColor = theme.textColor.simdColor
+    mdTheme.codeColor = theme.textColor.simdColor
+    mdTheme.codeBackgroundColor = theme.backgroundColor.simdColor
+    mdTheme.codeHeaderBackgroundColor = theme.gutterBackgroundColor.simdColor
+    mdTheme.codeHeaderTextColor = theme.textColor.simdColor
+    mdTheme.codeHeaderDividerColor = markdownWithAlpha(theme.gutterTextColor.simdColor, 0.3)
+    mdTheme.codeBorderColor = markdownWithAlpha(theme.gutterBackgroundColor.simdColor, 0.9)
+    mdTheme.codeGutterBackgroundColor = theme.gutterBackgroundColor.simdColor
+    mdTheme.codeGutterTextColor = theme.gutterTextColor.simdColor
+    mdTheme.contentPadding = 0
+    mdTheme.paragraphSpacing = 0
+    return mdTheme
+}
+
+private func markdownWithAlpha(_ color: SIMD4<Float>, _ alpha: Float) -> SIMD4<Float> {
+    SIMD4<Float>(color.x, color.y, color.z, alpha)
 }
 
 private extension VVDiffRow.Kind {
@@ -85,6 +136,61 @@ private struct VVDiffSplitRow: Identifiable, Hashable {
     let header: VVDiffRow?
     let left: Cell?
     let right: Cell?
+}
+
+private func mapDiffRowKind(_ kind: VVUnifiedDiffRow.Kind) -> VVDiffRow.Kind {
+    switch kind {
+    case .fileHeader: return .fileHeader
+    case .hunkHeader: return .hunkHeader
+    case .context: return .context
+    case .added: return .added
+    case .deleted: return .deleted
+    case .metadata: return .metadata
+    }
+}
+
+private func mapDiffRow(_ row: VVUnifiedDiffRow) -> VVDiffRow {
+    VVDiffRow(
+        id: row.id,
+        kind: mapDiffRowKind(row.kind),
+        oldLineNumber: row.oldLineNumber,
+        newLineNumber: row.newLineNumber,
+        text: row.text
+    )
+}
+
+private func mapDiffSection(_ section: VVUnifiedDiffSection) -> VVDiffSection {
+    VVDiffSection(
+        id: section.id,
+        filePath: section.filePath,
+        headerRow: section.headerRow.map(mapDiffRow),
+        rows: section.rows.map(mapDiffRow)
+    )
+}
+
+private func mapDiffSplitRow(_ row: VVUnifiedDiffSplitRow) -> VVDiffSplitRow {
+    VVDiffSplitRow(
+        id: row.id,
+        header: row.header.map(mapDiffRow),
+        left: row.left.map { cell in
+            VVDiffSplitRow.Cell(
+                rowID: cell.rowID,
+                lineNumber: cell.lineNumber,
+                text: cell.text,
+                kind: mapDiffRowKind(cell.kind),
+                inlineChanges: cell.inlineChanges.map { .init(start: $0.start, end: $0.end) }
+            )
+        },
+        right: row.right.map { cell in
+            VVDiffSplitRow.Cell(
+                rowID: cell.rowID,
+                lineNumber: cell.lineNumber,
+                text: cell.text,
+                kind: mapDiffRowKind(cell.kind),
+                inlineChanges: cell.inlineChanges.map { .init(start: $0.start, end: $0.end) }
+            )
+        }
+    )
 }
 
 // MARK: - Text Selection Types
@@ -132,161 +238,6 @@ private struct RowGeometryCacheKey: Equatable {
     let fontSignature: Int
 }
 
-// MARK: - Diff Computation Helpers
-
-/// Computes word-level inline change ranges between two lines.
-/// Returns arrays of `VVDiffSplitRow.InlineRange` (UTF-16 offsets) for the old and new text.
-private func computeInlineChanges(oldText: String, newText: String) -> (old: [VVDiffSplitRow.InlineRange], new: [VVDiffSplitRow.InlineRange]) {
-    let oldChars = Array(oldText)
-    let newChars = Array(newText)
-
-    // Find common prefix
-    var prefixLen = 0
-    while prefixLen < oldChars.count && prefixLen < newChars.count && oldChars[prefixLen] == newChars[prefixLen] {
-        prefixLen += 1
-    }
-
-    // Find common suffix (not overlapping with prefix)
-    var suffixLen = 0
-    while suffixLen < oldChars.count - prefixLen && suffixLen < newChars.count - prefixLen
-        && oldChars[oldChars.count - 1 - suffixLen] == newChars[newChars.count - 1 - suffixLen] {
-        suffixLen += 1
-    }
-
-    let oldMiddleStart = prefixLen
-    let oldMiddleEnd = oldChars.count - suffixLen
-    let newMiddleStart = prefixLen
-    let newMiddleEnd = newChars.count - suffixLen
-
-    // If nothing changed or everything changed, skip word-level
-    if oldMiddleStart >= oldMiddleEnd && newMiddleStart >= newMiddleEnd {
-        return (old: [], new: [])
-    }
-
-    // Tokenize middle portions by word boundaries
-    let oldTokens = tokenize(Array(oldChars[oldMiddleStart..<oldMiddleEnd]), baseOffset: oldMiddleStart)
-    let newTokens = tokenize(Array(newChars[newMiddleStart..<newMiddleEnd]), baseOffset: newMiddleStart)
-
-    // LCS on tokens to find matching segments
-    let lcs = longestCommonSubsequence(oldTokens.map(\.text), newTokens.map(\.text))
-
-    // Mark old tokens not in LCS as changed
-    var oldChanged: [VVDiffSplitRow.InlineRange] = []
-    var lcsIdx = 0
-    for token in oldTokens {
-        if lcsIdx < lcs.oldIndices.count && token.index == lcs.oldIndices[lcsIdx] {
-            lcsIdx += 1
-        } else {
-            oldChanged.append(VVDiffSplitRow.InlineRange(start: token.offset, end: token.offset + token.text.count))
-        }
-    }
-
-    // Mark new tokens not in LCS as changed
-    var newChanged: [VVDiffSplitRow.InlineRange] = []
-    lcsIdx = 0
-    for token in newTokens {
-        if lcsIdx < lcs.newIndices.count && token.index == lcs.newIndices[lcsIdx] {
-            lcsIdx += 1
-        } else {
-            newChanged.append(VVDiffSplitRow.InlineRange(start: token.offset, end: token.offset + token.text.count))
-        }
-    }
-
-    // Merge adjacent ranges
-    oldChanged = mergeRanges(oldChanged)
-    newChanged = mergeRanges(newChanged)
-
-    return (old: oldChanged, new: newChanged)
-}
-
-private struct Token {
-    let text: String
-    let offset: Int
-    let index: Int
-}
-
-private func tokenize(_ chars: [Character], baseOffset: Int) -> [Token] {
-    var tokens: [Token] = []
-    var i = 0
-    var tokenIndex = 0
-
-    while i < chars.count {
-        let ch = chars[i]
-        if ch.isWhitespace {
-            var j = i
-            while j < chars.count && chars[j].isWhitespace { j += 1 }
-            tokens.append(Token(text: String(chars[i..<j]), offset: baseOffset + i, index: tokenIndex))
-            tokenIndex += 1
-            i = j
-        } else if ch.isLetter || ch.isNumber || ch == "_" {
-            var j = i
-            while j < chars.count && (chars[j].isLetter || chars[j].isNumber || chars[j] == "_") { j += 1 }
-            tokens.append(Token(text: String(chars[i..<j]), offset: baseOffset + i, index: tokenIndex))
-            tokenIndex += 1
-            i = j
-        } else {
-            tokens.append(Token(text: String(ch), offset: baseOffset + i, index: tokenIndex))
-            tokenIndex += 1
-            i += 1
-        }
-    }
-    return tokens
-}
-
-private struct LCSResult {
-    let oldIndices: [Int]
-    let newIndices: [Int]
-}
-
-private func longestCommonSubsequence(_ a: [String], _ b: [String]) -> LCSResult {
-    let m = a.count, n = b.count
-    if m == 0 || n == 0 { return LCSResult(oldIndices: [], newIndices: []) }
-
-    var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
-    for i in 1...m {
-        for j in 1...n {
-            if a[i - 1] == b[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1] + 1
-            } else {
-                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
-            }
-        }
-    }
-
-    var oldIndices: [Int] = []
-    var newIndices: [Int] = []
-    var i = m, j = n
-    while i > 0 && j > 0 {
-        if a[i - 1] == b[j - 1] {
-            oldIndices.append(i - 1)
-            newIndices.append(j - 1)
-            i -= 1
-            j -= 1
-        } else if dp[i - 1][j] > dp[i][j - 1] {
-            i -= 1
-        } else {
-            j -= 1
-        }
-    }
-
-    return LCSResult(oldIndices: oldIndices.reversed(), newIndices: newIndices.reversed())
-}
-
-private func mergeRanges(_ ranges: [VVDiffSplitRow.InlineRange]) -> [VVDiffSplitRow.InlineRange] {
-    guard !ranges.isEmpty else { return [] }
-    var merged: [VVDiffSplitRow.InlineRange] = [ranges[0]]
-    for i in 1..<ranges.count {
-        let last = merged[merged.count - 1]
-        let cur = ranges[i]
-        if cur.start <= last.end {
-            merged[merged.count - 1] = VVDiffSplitRow.InlineRange(start: last.start, end: max(last.end, cur.end))
-        } else {
-            merged.append(cur)
-        }
-    }
-    return merged
-}
-
 // MARK: - Parsing
 
 /// Backward-compatible parse entry point for tests. Use `VVDiffView(unifiedDiff:)` for rendering.
@@ -298,338 +249,7 @@ public enum VVDiffTable {
 }
 
 private func parseDiffRows(unifiedDiff: String) -> [VVDiffRow] {
-    var lines = unifiedDiff.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-    if lines.last?.isEmpty == true {
-        _ = lines.popLast()
-    }
-    var rows: [VVDiffRow] = []
-
-    var oldLine = 0
-    var newLine = 0
-    var inHunk = false
-
-    for rawLine in lines {
-        let line = String(rawLine)
-
-        if line.hasPrefix("diff --git ") {
-            inHunk = false
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .fileHeader,
-                    text: filePath(from: line)
-                )
-            )
-            continue
-        }
-
-        if line.hasPrefix("@@") {
-            inHunk = true
-            if let header = parseHunkHeader(line) {
-                oldLine = header.oldStart
-                newLine = header.newStart
-            }
-            let compactHeader = compactHunkHeaderText(line)
-            if !compactHeader.isEmpty {
-                rows.append(
-                    VVDiffRow(
-                        id: rows.count,
-                        kind: .hunkHeader,
-                        text: compactHeader
-                    )
-                )
-            }
-            continue
-        }
-
-        if !inHunk {
-            if isMetadataLine(line) {
-                rows.append(
-                    VVDiffRow(
-                        id: rows.count,
-                        kind: .metadata,
-                        text: line
-                    )
-                )
-            }
-            continue
-        }
-
-        if line.hasPrefix("+") && !line.hasPrefix("+++") {
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .added,
-                    oldLineNumber: nil,
-                    newLineNumber: newLine,
-                    text: String(line.dropFirst())
-                )
-            )
-            newLine += 1
-            continue
-        }
-
-        if line.hasPrefix("-") && !line.hasPrefix("---") {
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .deleted,
-                    oldLineNumber: oldLine,
-                    newLineNumber: nil,
-                    text: String(line.dropFirst())
-                )
-            )
-            oldLine += 1
-            continue
-        }
-
-        if line.hasPrefix(" ") {
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .context,
-                    oldLineNumber: oldLine,
-                    newLineNumber: newLine,
-                    text: String(line.dropFirst())
-                )
-            )
-            oldLine += 1
-            newLine += 1
-            continue
-        }
-
-        if line.hasPrefix("\\") {
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .metadata,
-                    text: line
-                )
-            )
-            continue
-        }
-
-        // Empty line without prefix in hunk: treat as plain context line.
-        if line.isEmpty {
-            rows.append(
-                VVDiffRow(
-                    id: rows.count,
-                    kind: .context,
-                    oldLineNumber: oldLine,
-                    newLineNumber: newLine,
-                    text: ""
-                )
-            )
-            oldLine += 1
-            newLine += 1
-            continue
-        }
-
-        rows.append(
-            VVDiffRow(
-                id: rows.count,
-                kind: .context,
-                oldLineNumber: oldLine,
-                newLineNumber: newLine,
-                text: line
-            )
-        )
-        oldLine += 1
-        newLine += 1
-    }
-
-    return rows
-}
-
-private func makeSections(from rows: [VVDiffRow]) -> [VVDiffSection] {
-    var result: [VVDiffSection] = []
-
-    var currentSectionID: Int?
-    var currentPath: String?
-    var currentHeaderRow: VVDiffRow?
-    var currentRows: [VVDiffRow] = []
-    var syntheticID = -1
-
-    func flushSection() {
-        guard let sectionID = currentSectionID, let path = currentPath else {
-            return
-        }
-
-        result.append(
-            VVDiffSection(
-                id: sectionID,
-                filePath: path,
-                headerRow: currentHeaderRow,
-                rows: currentRows
-            )
-        )
-
-        currentRows.removeAll(keepingCapacity: true)
-    }
-
-    for row in rows {
-        if row.kind == .fileHeader {
-            flushSection()
-            currentSectionID = row.id
-            currentPath = row.text
-            currentHeaderRow = row
-            continue
-        }
-
-        if currentSectionID == nil {
-            currentSectionID = syntheticID
-            syntheticID -= 1
-            currentPath = "workspace.diff"
-            currentHeaderRow = nil
-        }
-
-        currentRows.append(row)
-    }
-
-    flushSection()
-    return result
-}
-
-private func makeSplitRows(from rows: [VVDiffRow]) -> [VVDiffSplitRow] {
-    var result: [VVDiffSplitRow] = []
-    result.reserveCapacity(rows.count)
-    var index = 0
-    var splitID = 0
-
-    while index < rows.count {
-        let row = rows[index]
-
-        if row.kind == .fileHeader {
-            result.append(VVDiffSplitRow(id: splitID, header: row, left: nil, right: nil))
-            splitID += 1
-            index += 1
-            continue
-        }
-
-        if row.kind == .metadata {
-            index += 1
-            continue
-        }
-
-        if row.kind == .hunkHeader {
-            result.append(VVDiffSplitRow(id: splitID, header: row, left: nil, right: nil))
-            splitID += 1
-            index += 1
-            continue
-        }
-
-        if row.kind == .context {
-            result.append(
-                VVDiffSplitRow(
-                    id: splitID,
-                    header: nil,
-                    left: VVDiffSplitRow.Cell(rowID: row.id, lineNumber: row.oldLineNumber, text: row.text, kind: row.kind, inlineChanges: []),
-                    right: VVDiffSplitRow.Cell(rowID: row.id, lineNumber: row.newLineNumber, text: row.text, kind: row.kind, inlineChanges: [])
-                )
-            )
-            splitID += 1
-            index += 1
-            continue
-        }
-
-        if row.kind == .deleted || row.kind == .added {
-            var deletedRows: [VVDiffRow] = []
-            var addedRows: [VVDiffRow] = []
-
-            while index < rows.count, rows[index].kind == .deleted {
-                deletedRows.append(rows[index])
-                index += 1
-            }
-
-            while index < rows.count, rows[index].kind == .added {
-                addedRows.append(rows[index])
-                index += 1
-            }
-
-            if deletedRows.isEmpty, addedRows.isEmpty {
-                continue
-            }
-
-            let pairCount = max(deletedRows.count, addedRows.count)
-            for pairIndex in 0..<pairCount {
-                let leftRow = pairIndex < deletedRows.count ? deletedRows[pairIndex] : nil
-                let rightRow = pairIndex < addedRows.count ? addedRows[pairIndex] : nil
-
-                var leftInline: [VVDiffSplitRow.InlineRange] = []
-                var rightInline: [VVDiffSplitRow.InlineRange] = []
-                if let l = leftRow, let r = rightRow {
-                    let changes = computeInlineChanges(oldText: l.text, newText: r.text)
-                    leftInline = changes.old
-                    rightInline = changes.new
-                }
-
-                result.append(
-                    VVDiffSplitRow(
-                        id: splitID,
-                        header: nil,
-                        left: leftRow.map { VVDiffSplitRow.Cell(rowID: $0.id, lineNumber: $0.oldLineNumber, text: $0.text, kind: $0.kind, inlineChanges: leftInline) },
-                        right: rightRow.map { VVDiffSplitRow.Cell(rowID: $0.id, lineNumber: $0.newLineNumber, text: $0.text, kind: $0.kind, inlineChanges: rightInline) }
-                    )
-                )
-                splitID += 1
-            }
-            continue
-        }
-
-        index += 1
-    }
-
-    return result
-}
-
-private func pathParts(for path: String) -> (fileName: String, directory: String) {
-    let fileName = (path as NSString).lastPathComponent
-    let directory = (path as NSString).deletingLastPathComponent
-    return (fileName: fileName, directory: directory)
-}
-
-private func filePath(from line: String) -> String {
-    let parts = line.split(separator: " ")
-    guard parts.count >= 4 else { return line }
-
-    let rawPath = String(parts[3])
-    return rawPath.hasPrefix("b/") ? String(rawPath.dropFirst(2)) : rawPath
-}
-
-private func isMetadataLine(_ line: String) -> Bool {
-    line.hasPrefix("index ") ||
-    line.hasPrefix("--- ") ||
-    line.hasPrefix("+++ ") ||
-    line.hasPrefix("new file mode ") ||
-    line.hasPrefix("deleted file mode ") ||
-    line.hasPrefix("rename from ") ||
-    line.hasPrefix("rename to ") ||
-    line.hasPrefix("similarity index ") ||
-    line.hasPrefix("dissimilarity index ") ||
-    line.hasPrefix("Binary files ")
-}
-
-private func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int)? {
-    let pattern = #"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@"#
-    guard let regex = try? NSRegularExpression(pattern: pattern),
-          let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-          let oldRange = Range(match.range(at: 1), in: line),
-          let newRange = Range(match.range(at: 2), in: line),
-          let oldStart = Int(line[oldRange]),
-          let newStart = Int(line[newRange]) else {
-        return nil
-    }
-
-    return (oldStart: oldStart, newStart: newStart)
-}
-
-private func compactHunkHeaderText(_ line: String) -> String {
-    guard line.hasPrefix("@@") else { return line }
-    let searchStart = line.index(line.startIndex, offsetBy: 2)
-    guard let trailingRange = line.range(of: "@@", range: searchStart..<line.endIndex) else {
-        return ""
-    }
-    return line[trailingRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+    VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff).rows.map(mapDiffRow)
 }
 
 private func makeJoinedCodeBuffer(from rows: [VVDiffRow]) -> (text: String, rowRanges: [Int: NSRange]) {
@@ -773,659 +393,12 @@ private final class VVDiffRenderer {
         return max(count, 1)
     }
 
-    // MARK: - Unified Scene
-
-    func buildUnifiedScene(
-        sections: [VVDiffSection],
-        rows: [VVDiffRow],
-        width: CGFloat,
-        viewport: CGRect,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
-        wrapLines: Bool = false,
-        measureFullHeight: Bool = true
-    ) -> (scene: VVScene, contentHeight: CGFloat) {
-        let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
-        let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
-        let gutterColWidth = CGFloat(gutterDigits) * charWidth + 16
-        let markerWidth = charWidth + 8
-        let codeStartX = gutterColWidth * 2 + markerWidth
-        let maxCharsPerVisualLine = wrapCapacity(totalWidth: width, codeStartX: codeStartX)
-
-        var builder = VVSceneBuilder()
-        var y: CGFloat = 0
-
-        for section in sections {
-            // File header
-            if section.headerRow != nil {
-                let rowH = headerHeight
-                if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
-                    buildFileHeader(
-                        section: section,
-                        y: y, width: width, height: rowH,
-                        builder: &builder
-                    )
-                }
-                y += rowH
-            }
-
-            // Section rows (skip metadata — already shown in file header)
-            for row in section.rows {
-                if row.kind == .metadata { continue }
-                let shouldWrap = wrapLines && (row.kind.isCode || row.kind == .hunkHeader)
-                let visualLines = shouldWrap
-                    ? wrappedTextSegmentCount(row.text, maxChars: maxCharsPerVisualLine)
-                    : 1
-                let rowH = lineHeight * CGFloat(max(1, visualLines))
-                if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
-                    let wrappedLines = shouldWrap
-                        ? wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
-                        : nil
-                    buildUnifiedRow(
-                        row: row,
-                        y: y, width: width, height: rowH,
-                        gutterColWidth: gutterColWidth,
-                        markerWidth: markerWidth,
-                        codeStartX: codeStartX,
-                        highlightedRanges: highlightedRanges,
-                        wrappedLines: wrappedLines,
-                        builder: &builder
-                    )
-                }
-                y += rowH
-            }
-
-            if !measureFullHeight, y > viewport.maxY + 200 {
-                break
-            }
-        }
-
-        return (scene: builder.scene, contentHeight: y)
-    }
-
-    // MARK: - Split Scene
-
-    func buildSplitScene(
-        splitRows: [VVDiffSplitRow],
-        rows: [VVDiffRow],
-        width: CGFloat,
-        viewport: CGRect,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
-        measureFullHeight: Bool = true
-    ) -> (scene: VVScene, contentHeight: CGFloat) {
-        let maxOld = rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = rows.compactMap(\.newLineNumber).max() ?? 0
-        let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
-        let gutterColWidth = CGFloat(gutterDigits) * charWidth + 16
-        let markerWidth = charWidth + 4
-        let columnWidth = max(420, floor(width / 2))
-        let totalWidth = columnWidth * 2
-        let paneCodeStartX = markerWidth + gutterColWidth
-
-        var builder = VVSceneBuilder()
-        var y: CGFloat = 0
-
-        for splitRow in splitRows {
-            if let header = splitRow.header {
-                let rowH = header.kind == .fileHeader ? headerHeight : lineHeight
-
-                if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
-                    if header.kind == .fileHeader {
-                        let section = VVDiffSection(
-                            id: header.id,
-                            filePath: header.text,
-                            headerRow: header,
-                            rows: rowsForFileHeader(header, allRows: rows)
-                        )
-                        buildFileHeader(section: section, y: y, width: totalWidth, height: rowH, builder: &builder)
-                    } else {
-                        buildHunkHeaderRow(text: header.text, y: y, width: totalWidth, height: rowH, builder: &builder)
-                    }
-                }
-                y += rowH
-            } else {
-                let rowH = lineHeight
-                if y + rowH >= viewport.minY - 200 && y <= viewport.maxY + 200 {
-                    // Left pane
-                    buildSplitCell(
-                        cell: splitRow.left,
-                        y: y, paneX: 0, paneWidth: columnWidth, height: rowH,
-                        gutterColWidth: gutterColWidth,
-                        markerWidth: markerWidth,
-                        codeStartX: paneCodeStartX,
-                        isLeft: true,
-                        highlightedRanges: highlightedRanges,
-                        builder: &builder
-                    )
-
-                    // Right pane
-                    buildSplitCell(
-                        cell: splitRow.right,
-                        y: y, paneX: columnWidth, paneWidth: columnWidth, height: rowH,
-                        gutterColWidth: gutterColWidth,
-                        markerWidth: markerWidth,
-                        codeStartX: paneCodeStartX,
-                        isLeft: false,
-                        highlightedRanges: highlightedRanges,
-                        builder: &builder
-                    )
-                }
-                y += rowH
-            }
-
-            if !measureFullHeight, y > viewport.maxY + 200 {
-                break
-            }
-        }
-
-        return (scene: builder.scene, contentHeight: y)
-    }
-
-    // MARK: - Row Builders
-
-    private func buildUnifiedRow(
-        row: VVDiffRow,
-        y: CGFloat, width: CGFloat, height: CGFloat,
-        gutterColWidth: CGFloat,
-        markerWidth: CGFloat,
-        codeStartX: CGFloat,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
-        wrappedLines: [String]?,
-        builder: inout VVSceneBuilder
-    ) {
-        // Hunk headers handle their own background
-        if row.kind == .hunkHeader {
-            let lines = wrappedLines ?? [row.text]
-            buildHunkHeaderRow(lines: lines, y: y, width: width, height: height, builder: &builder)
-            return
-        }
-
-        // Background quad
-        let bgColor = rowBackgroundColor(for: row.kind)
-        let bgQuad = VVQuadPrimitive(
-            frame: CGRect(x: 0, y: y, width: width, height: height),
-            color: bgColor
-        )
-        builder.add(kind: .quad(bgQuad), zIndex: -1)
-
-        // Line numbers — use marker color for added/deleted rows
-        let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-        let numFontSize = font.pointSize - 1
-        let numColor = lineNumberColor(for: row.kind)
-
-        if let oldNum = row.oldLineNumber {
-            let numText = String(oldNum)
-            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
-            let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-            let offsetX = gutterColWidth - numWidth - 4
-            addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: firstBaselineY, fontSize: numFontSize, builder: &builder)
-        }
-
-        if let newNum = row.newLineNumber {
-            let numText = String(newNum)
-            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
-            let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-            let offsetX = gutterColWidth * 2 - numWidth - 4
-            addTextGlyphs(numGlyphs, offsetX: offsetX, baselineY: firstBaselineY, fontSize: numFontSize, builder: &builder)
-        }
-
-        // Marker indicator (flush left)
-        buildMarkerIndicator(kind: row.kind, x: 0, y: y, width: markerWidth, height: height, builder: &builder)
-
-        // Code text
-        if row.kind.isCode || row.kind == .metadata {
-            let codeColor = row.kind == .metadata ? gutterTextColor : textColor
-            let lines = wrappedLines ?? [row.text]
-            let wrapped = wrappedLines != nil
-            for (lineIndex, lineText) in lines.enumerated() {
-                let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-                let codeGlyphs = layoutEngine.layoutTextGlyphs(lineText, variant: .monospace, at: .zero, color: codeColor)
-                if !wrapped, let ranges = highlightedRanges[row.id], !ranges.isEmpty {
-                    let coloredGlyphs = applyHighlightColors(codeGlyphs, ranges: ranges)
-                    addTextGlyphs(coloredGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-                } else {
-                    addTextGlyphs(codeGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-                }
-            }
-        }
-    }
-
-    private func buildHunkHeaderRow(
-        text: String,
-        y: CGFloat, width: CGFloat, height: CGFloat,
-        builder: inout VVSceneBuilder
-    ) {
-        buildHunkHeaderRow(lines: [text], y: y, width: width, height: height, builder: &builder)
-    }
-
-    private func buildHunkHeaderRow(
-        lines: [String],
-        y: CGFloat, width: CGFloat, height: CGFloat,
-        builder: inout VVSceneBuilder
-    ) {
-        let bgQuad = VVQuadPrimitive(
-            frame: CGRect(x: 0, y: y, width: width, height: height),
-            color: hunkBgColor
-        )
-        builder.add(kind: .quad(bgQuad), zIndex: -1)
-
-        for (lineIndex, lineText) in lines.enumerated() {
-            let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-            let glyphs = layoutEngine.layoutTextGlyphs(lineText, variant: .monospace, at: .zero, color: modifiedColor)
-            addTextGlyphs(glyphs, offsetX: 12, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-        }
-    }
-
-    private func buildFileHeader(
-        section: VVDiffSection,
-        y: CGFloat, width: CGFloat, height: CGFloat,
-        builder: inout VVSceneBuilder
-    ) {
-        // Background
-        let bgQuad = VVQuadPrimitive(
-            frame: CGRect(x: 0, y: y, width: width, height: height),
-            color: headerBgColor
-        )
-        builder.add(kind: .quad(bgQuad), zIndex: -1)
-
-        let parts = pathParts(for: section.filePath)
-        let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
-        let iconX: CGFloat = 12
-        let iconWidth = buildFileHeaderIcon(
-            x: iconX,
-            centerY: y + height * 0.5,
-            builder: &builder
-        )
-        var curX: CGFloat = iconX + iconWidth + 8
-
-        // Filename (semibold)
-        let nameGlyphs = layoutEngine.layoutTextGlyphs(parts.fileName, variant: .semibold, at: .zero, color: textColor)
-        addTextGlyphs(nameGlyphs, offsetX: curX, baselineY: baselineY, fontSize: font.pointSize + 1, builder: &builder)
-        let nameWidth = nameGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-        curX += nameWidth + 8
-
-        // Directory (dim)
-        if !parts.directory.isEmpty {
-            let dirGlyphs = layoutEngine.layoutTextGlyphs(parts.directory, variant: .monospace, at: .zero, color: gutterTextColor)
-            addTextGlyphs(dirGlyphs, offsetX: curX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-            let dirWidth = dirGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-            curX += dirWidth + 12
-        }
-
-        // Stat badges
-        let badgeFontSize = max(10, font.pointSize - 1)
-        let badgeH = max(14, badgeFontSize + 6)
-        let badgeY = y + (height - badgeH) * 0.5
-
-        if section.addedCount > 0 {
-            curX = buildBadge(
-                text: "+\(section.addedCount)",
-                color: addedMarkerColor,
-                x: curX, badgeY: badgeY, badgeH: badgeH, fontSize: badgeFontSize,
-                builder: &builder
-            )
-            curX += 6
-        }
-
-        if section.deletedCount > 0 {
-            curX = buildBadge(
-                text: "-\(section.deletedCount)",
-                color: deletedMarkerColor,
-                x: curX, badgeY: badgeY, badgeH: badgeH, fontSize: badgeFontSize,
-                builder: &builder
-            )
-            curX += 6
-        }
-
-    }
-
-    @discardableResult
-    private func buildFileHeaderIcon(
-        x: CGFloat,
-        centerY: CGFloat,
-        builder: inout VVSceneBuilder
-    ) -> CGFloat {
-        let iconHeight = min(max(font.pointSize * 1.05, 12), 16)
-        let iconWidth = iconHeight * 0.78
-        let originY = centerY - iconHeight * 0.5
-        let frame = CGRect(x: x, y: originY, width: iconWidth, height: iconHeight)
-
-        let borderColor = withAlpha(textColor, 0.94)
-        let foldLineColor = withAlpha(textColor, 0.66)
-        let fillColor = withAlpha(textColor, 0.16)
-        let line = max(1, floor(iconHeight * 0.12))
-        let foldSize = max(3, floor(iconWidth * 0.34))
-
-        // Body fill
-        builder.add(kind: .quad(VVQuadPrimitive(frame: frame, color: fillColor, cornerRadius: 2)))
-
-        // Border with folded-corner cutout on top-right
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.minX, y: frame.minY, width: frame.width - foldSize, height: line),
-            color: borderColor
-        )))
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.minX, y: frame.maxY - line, width: frame.width, height: line),
-            color: borderColor
-        )))
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.minX, y: frame.minY, width: line, height: frame.height),
-            color: borderColor
-        )))
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: frame.maxX - line, y: frame.minY + foldSize, width: line, height: frame.height - foldSize),
-            color: borderColor
-        )))
-
-        // Fold corner
-        let foldX = frame.maxX - foldSize
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: foldX, y: frame.minY, width: foldSize, height: foldSize),
-            color: headerBgColor
-        )))
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: foldX, y: frame.minY + foldSize - line, width: foldSize, height: line),
-            color: foldLineColor
-        )))
-        builder.add(kind: .quad(VVQuadPrimitive(
-            frame: CGRect(x: foldX, y: frame.minY, width: line, height: foldSize),
-            color: foldLineColor
-        )))
-
-        // Inner "text line" hints so the icon reads as file, not checkbox.
-        let innerInset = line * 2
-        let innerWidth = max(2, frame.width - innerInset * 2 - 1)
-        let innerY0 = frame.minY + foldSize + line + 1
-        let innerY1 = innerY0 + line + 2
-        if innerY1 < frame.maxY - line - 1 {
-            builder.add(kind: .quad(VVQuadPrimitive(
-                frame: CGRect(x: frame.minX + innerInset, y: innerY0, width: innerWidth, height: line),
-                color: withAlpha(textColor, 0.42)
-            )))
-            builder.add(kind: .quad(VVQuadPrimitive(
-                frame: CGRect(x: frame.minX + innerInset, y: innerY1, width: innerWidth * 0.82, height: line),
-                color: withAlpha(textColor, 0.34)
-            )))
-        }
-
-        return iconWidth
-    }
-
-    private func buildSplitCell(
-        cell: VVDiffSplitRow.Cell?,
-        y: CGFloat, paneX: CGFloat, paneWidth: CGFloat, height: CGFloat,
-        gutterColWidth: CGFloat,
-        markerWidth: CGFloat,
-        codeStartX: CGFloat,
-        isLeft: Bool,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
-        builder: inout VVSceneBuilder
-    ) {
-        let bgColor: SIMD4<Float>
-        if let cell {
-            switch cell.kind {
-            case .added: bgColor = addedBgColor
-            case .deleted: bgColor = deletedBgColor
-            default: bgColor = backgroundColor
-            }
-        } else {
-            bgColor = emptyPaneBg
-        }
-
-        let bgQuad = VVQuadPrimitive(
-            frame: CGRect(x: paneX, y: y, width: paneWidth, height: height),
-            color: bgColor
-        )
-        builder.add(kind: .quad(bgQuad), zIndex: -1)
-
-        guard let cell else { return }
-
-        let baselineY = y + (height + font.pointSize) / 2 - font.pointSize * 0.15
-        let numFontSize = font.pointSize - 1
-
-        // Marker indicator
-        let effectiveKind: VVDiffRow.Kind = cell.kind
-        buildMarkerIndicator(kind: effectiveKind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
-
-        // Line number — colored for added/deleted
-        let numColor = lineNumberColor(for: cell.kind)
-        if let lineNum = cell.lineNumber {
-            let numText = String(lineNum)
-            let numGlyphs = layoutEngine.layoutTextGlyphs(numText, variant: .monospace, at: .zero, color: numColor)
-            let numWidth = numGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-            let numX = paneX + markerWidth + gutterColWidth - numWidth - 8
-            addTextGlyphs(numGlyphs, offsetX: numX, baselineY: baselineY, fontSize: numFontSize, builder: &builder)
-        }
-
-        // Code text
-        let codeGlyphs: [MDLayoutGlyph]
-        if let ranges = highlightedRanges[cell.rowID], !ranges.isEmpty {
-            let raw = layoutEngine.layoutTextGlyphs(cell.text, variant: .monospace, at: .zero, color: textColor)
-            codeGlyphs = applyHighlightColors(raw, ranges: ranges)
-        } else {
-            codeGlyphs = layoutEngine.layoutTextGlyphs(cell.text, variant: .monospace, at: .zero, color: textColor)
-        }
-        addTextGlyphs(codeGlyphs, offsetX: paneX + codeStartX + codeInsetX, baselineY: baselineY, fontSize: font.pointSize, builder: &builder)
-
-        // Inline change highlight quads
-        if !cell.inlineChanges.isEmpty {
-            let highlightColor = cell.kind == .deleted ? deletedInlineBg : addedInlineBg
-            for range in cell.inlineChanges {
-                let clampedStart = min(range.start, cell.text.count)
-                let clampedEnd = min(range.end, cell.text.count)
-                guard clampedStart < clampedEnd else { continue }
-
-                // Find glyph positions for the range
-                let startGlyphX = glyphXForCharIndex(clampedStart, in: codeGlyphs)
-                let endGlyphX = glyphXForCharIndex(clampedEnd, in: codeGlyphs)
-                let hlX = paneX + codeStartX + codeInsetX + startGlyphX
-                let hlWidth = endGlyphX - startGlyphX
-
-                if hlWidth > 0 {
-                    let hlQuad = VVQuadPrimitive(
-                        frame: CGRect(x: hlX, y: y, width: hlWidth, height: height),
-                        color: highlightColor
-                    )
-                    builder.add(kind: .quad(hlQuad), zIndex: 0)
-                }
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func buildBadge(
-        text: String,
-        color: SIMD4<Float>,
-        x: CGFloat, badgeY: CGFloat, badgeH: CGFloat, fontSize: CGFloat,
-        builder: inout VVSceneBuilder
-    ) -> CGFloat {
-        let glyphs = layoutEngine.layoutTextGlyphs(text, variant: .monospace, at: .zero, color: color)
-        let textWidth = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-        let badgeWidth = textWidth + 12
-        let badgeBg = VVQuadPrimitive(
-            frame: CGRect(x: x, y: badgeY, width: badgeWidth, height: badgeH),
-            color: withAlpha(color, 0.13),
-            cornerRadius: 5
-        )
-        builder.add(kind: .quad(badgeBg))
-        let textX = x + max(0, (badgeWidth - textWidth) * 0.5)
-        let textBaselineY = badgeY + (badgeH + fontSize) * 0.5 - fontSize * 0.16
-        addTextGlyphs(glyphs, offsetX: textX, baselineY: textBaselineY, fontSize: fontSize, builder: &builder)
-        return x + badgeWidth
-    }
-
-    private func buildMarkerIndicator(
-        kind: VVDiffRow.Kind,
-        x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat,
-        builder: inout VVSceneBuilder
-    ) {
-        let barWidth: CGFloat = 6
-
-        switch kind {
-        case .added:
-            // Solid green bar, flush left, full height (connects between rows)
-            let bar = VVQuadPrimitive(
-                frame: CGRect(x: x, y: y, width: barWidth, height: height),
-                color: addedMarkerColor
-            )
-            builder.add(kind: .quad(bar), zIndex: 1)
-
-        case .deleted:
-            // Dashed red bar, flush left, continuous pattern across rows
-            let dashHeight: CGFloat = 1
-            let gapHeight: CGFloat = 1
-            let period = dashHeight + gapHeight
-            // Align to global Y=0 so pattern is seamless across rows
-            let phase = y.truncatingRemainder(dividingBy: period)
-            var dashY = y - phase
-            while dashY < y + height {
-                let dashBottom = dashY + dashHeight
-                // Clip to this row's bounds
-                let clippedTop = max(dashY, y)
-                let clippedBottom = min(dashBottom, y + height)
-                if clippedBottom > clippedTop {
-                    let dash = VVQuadPrimitive(
-                        frame: CGRect(x: x, y: clippedTop, width: barWidth, height: clippedBottom - clippedTop),
-                        color: deletedMarkerColor
-                    )
-                    builder.add(kind: .quad(dash), zIndex: 1)
-                }
-                dashY += period
-            }
-
-        default:
-            break
-        }
-    }
-
-    private func addTextGlyphs(
-        _ glyphs: [MDLayoutGlyph],
-        offsetX: CGFloat,
-        baselineY: CGFloat,
-        fontSize: CGFloat,
-        builder: inout VVSceneBuilder
-    ) {
-        guard !glyphs.isEmpty else { return }
-        let vvGlyphs = glyphs.map { glyph -> VVTextGlyph in
-            VVTextGlyph(
-                glyphID: UInt16(glyph.glyphID),
-                position: CGPoint(x: glyph.position.x + offsetX, y: baselineY),
-                size: glyph.size,
-                color: glyph.color,
-                fontVariant: toVVFontVariant(glyph.fontVariant),
-                fontSize: glyph.fontSize,
-                fontName: glyph.fontName,
-                stringIndex: glyph.stringIndex
-            )
-        }
-        let run = VVTextRunPrimitive(
-            glyphs: vvGlyphs,
-            style: VVTextRunStyle(color: vvGlyphs.first?.color ?? textColor),
-            position: CGPoint(x: offsetX, y: baselineY),
-            fontSize: fontSize
-        )
-        builder.add(kind: .textRun(run))
-    }
-
-    private func applyHighlightColors(_ glyphs: [MDLayoutGlyph], ranges: [(NSRange, SIMD4<Float>)]) -> [MDLayoutGlyph] {
-        glyphs.map { glyph in
-            guard let idx = glyph.stringIndex else { return glyph }
-            for (range, color) in ranges {
-                if idx >= range.location && idx < range.location + range.length {
-                    return MDLayoutGlyph(
-                        glyphID: glyph.glyphID,
-                        position: glyph.position,
-                        size: glyph.size,
-                        color: color,
-                        fontVariant: glyph.fontVariant,
-                        fontSize: glyph.fontSize,
-                        fontName: glyph.fontName,
-                        stringIndex: glyph.stringIndex
-                    )
-                }
-            }
-            return glyph
-        }
-    }
-
-    private func glyphXForCharIndex(_ charIndex: Int, in glyphs: [MDLayoutGlyph]) -> CGFloat {
-        for glyph in glyphs {
-            if let si = glyph.stringIndex, si >= charIndex {
-                return glyph.position.x
-            }
-        }
-        return glyphs.last.map { $0.position.x + $0.size.width } ?? 0
-    }
-
-    private func rowBackgroundColor(for kind: VVDiffRow.Kind) -> SIMD4<Float> {
-        switch kind {
-        case .added: return addedBgColor
-        case .deleted: return deletedBgColor
-        case .hunkHeader: return hunkBgColor
-        case .metadata: return metadataBgColor
-        case .context: return backgroundColor
-        case .fileHeader: return headerBgColor
-        }
-    }
-
-    private func lineNumberColor(for kind: VVDiffRow.Kind) -> SIMD4<Float> {
-        switch kind {
-        case .added: return addedMarkerColor
-        case .deleted: return deletedMarkerColor
-        default: return gutterTextColor
-        }
-    }
-
-    private func markerColor(for kind: VVDiffRow.Kind) -> SIMD4<Float> {
-        switch kind {
-        case .added: return addedMarkerColor
-        case .deleted: return deletedMarkerColor
-        case .hunkHeader: return modifiedColor
-        case .fileHeader, .metadata, .context: return gutterTextColor
-        }
-    }
-
-    private func diffMarker(for kind: VVDiffRow.Kind) -> String {
-        switch kind {
-        case .added: return "+"
-        case .deleted: return "-"
-        case .hunkHeader: return "@"
-        case .context, .fileHeader, .metadata: return " "
-        }
-    }
-
-    private func toVVFontVariant(_ variant: MDFontVariant) -> VVFontVariant {
-        switch variant {
-        case .regular: return .regular
-        case .semibold: return .semibold
-        case .semiboldItalic: return .semiboldItalic
-        case .bold: return .bold
-        case .italic: return .italic
-        case .boldItalic: return .boldItalic
-        case .monospace: return .monospace
-        case .emoji: return .emoji
-        }
-    }
+    // Shared scene construction lives in VVUnifiedDiffSceneRenderer.
+    // This wrapper-local renderer now exists only for diff metrics and colors that
+    // are still needed for sizing, geometry, and selection math.
 
     private func withAlpha(_ color: SIMD4<Float>, _ alpha: Float) -> SIMD4<Float> {
         SIMD4(color.x, color.y, color.z, alpha)
-    }
-
-    private func rowsForFileHeader(_ header: VVDiffRow, allRows: [VVDiffRow]) -> [VVDiffRow] {
-        var result: [VVDiffRow] = []
-        var found = false
-        for row in allRows {
-            if row.id == header.id {
-                found = true
-                continue
-            }
-            if found {
-                if row.kind == .fileHeader { break }
-                result.append(row)
-            }
-        }
-        return result
     }
 }
 
@@ -1465,6 +438,7 @@ private final class VVDiffMetalView: NSView {
     var metalContext: VVMetalContext?
 
     private var rows: [VVDiffRow] = []
+    private var unifiedDiffSource: String = ""
     private var sections: [VVDiffSection] = []
     private var splitRows: [VVDiffSplitRow] = []
     private var renderStyle: VVDiffRenderStyle = .unifiedTable
@@ -1645,6 +619,7 @@ private final class VVDiffMetalView: NSView {
     }
 
     func update(
+        unifiedDiff: String,
         rows: [VVDiffRow],
         style: VVDiffRenderStyle,
         theme: VVTheme,
@@ -1653,6 +628,7 @@ private final class VVDiffMetalView: NSView {
         syntaxHighlightingEnabled: Bool,
         onFileHeaderActivate: ((String) -> Void)?
     ) {
+        self.unifiedDiffSource = unifiedDiff
         let nextFastPlainMode = Self.shouldUseFastPlainMode(rows: rows)
         let effectiveSyntaxHighlightingEnabled = syntaxHighlightingEnabled
         self.onFileHeaderActivate = onFileHeaderActivate
@@ -1708,10 +684,11 @@ private final class VVDiffMetalView: NSView {
         }
 
         if rowsChanged || styleChanged {
-            sections = makeSections(from: rows)
+            let document = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+            sections = document.sections.map(mapDiffSection)
             rebuildFileHeaderPathLookup()
             if style == .split {
-                splitRows = makeSplitRows(from: rows)
+                splitRows = document.splitRows.map(mapDiffSplitRow)
             } else {
                 splitRows = []
             }
@@ -2260,7 +1237,6 @@ extension VVDiffMetalView: MTKViewDelegate {
         renderer.beginFrame(viewportSize: view.bounds.size, scrollOffset: scrollOffset)
 
         // Build or reuse scene
-        let visibleRect = scrollView.contentView.bounds
         let scene: VVScene
         if let cached = cachedScene {
             scene = cached
@@ -2269,28 +1245,15 @@ extension VVDiffMetalView: MTKViewDelegate {
             let renderWidth = (wrapsUnified || fastPlainModeEnabled)
                 ? scrollView.bounds.width
                 : max(scrollView.bounds.width, documentView.frame.width)
-            dr.updateContentWidth(scrollView.bounds.width)
-            let result: (scene: VVScene, contentHeight: CGFloat)
-            switch renderStyle {
-            case .unifiedTable:
-                result = dr.buildUnifiedScene(
-                    sections: sections, rows: rows,
-                    width: renderWidth,
-                    viewport: visibleRect,
-                    highlightedRanges: highlightedRanges,
-                    wrapLines: wrapsUnified,
-                    measureFullHeight: false
-                )
-            case .split:
-                result = dr.buildSplitScene(
-                    splitRows: splitRows, rows: rows,
-                    width: renderWidth,
-                    viewport: visibleRect,
-                    highlightedRanges: highlightedRanges,
-                    measureFullHeight: false
-                )
-            }
-            scene = result.scene
+            let sharedResult = VVUnifiedDiffSceneRenderer.render(
+                unifiedDiff: unifiedDiffSource,
+                width: renderWidth,
+                theme: markdownTheme(from: theme),
+                baseFont: configuration.font,
+                style: renderStyle == .split ? .split : .unifiedTable,
+                highlightedRangesOverride: highlightedRanges
+            )
+            scene = sharedResult.scene
             cachedScene = scene
         }
 
@@ -2317,6 +1280,7 @@ extension VVDiffMetalView: MTKViewDelegate {
         }
 
         encoder.endEncoding()
+        renderer.recycleTransientBuffers(after: commandBuffer)
         commandBuffer?.present(drawable)
         commandBuffer?.commit()
     }
@@ -3028,6 +1992,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
         let view = VVDiffMetalView(frame: .zero)
         let rows = context.coordinator.rows(for: unifiedDiff)
         view.update(
+            unifiedDiff: unifiedDiff,
             rows: rows,
             style: renderStyle,
             theme: theme,
@@ -3042,6 +2007,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: VVDiffMetalView, context: Context) {
         let rows = context.coordinator.rows(for: unifiedDiff)
         nsView.update(
+            unifiedDiff: unifiedDiff,
             rows: rows,
             style: renderStyle,
             theme: theme,

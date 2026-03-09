@@ -43,6 +43,7 @@ Owns markdown domain pipeline:
 - Parse/layout/theme/component mapping for markdown content
 - Markdown selection/hover semantics and markdown-specific overlays
 - Rendering path that emits `VVMetalPrimitives` scenes
+- Shared inline diff scene rendering used by markdown/chat surfaces
 
 ### `VVChatTimeline` (Timeline/Chat Module)
 

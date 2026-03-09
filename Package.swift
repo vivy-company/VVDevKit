@@ -2152,12 +2152,23 @@ let package = Package(
             dependencies: ["VVCode", "VVGit", "VVHighlighting"]
         ),
         .testTarget(
+            name: "VVMarkdownTests",
+            dependencies: ["VVMarkdown"]
+        ),
+        .testTarget(
             name: "VVChatTimelineTests",
             dependencies: ["VVChatTimeline"]
         ),
         .testTarget(
             name: "VVMetalPrimitivesTests",
             dependencies: ["VVMetalPrimitives"]
+        ),
+        .testTarget(
+            name: "VVRenderingStressTests",
+            dependencies: ["VVMarkdown", "VVCode", "VVMetalPrimitives"],
+            resources: [
+                .process("Fixtures")
+            ]
         ),
     ]
 )

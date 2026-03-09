@@ -54,14 +54,20 @@ public final class VVTextSelectionController<Position>: @unchecked Sendable wher
         }
     }
 
+    @discardableResult
     public func handleMouseDragged<T: VVTextHitTestable>(
         to point: CGPoint,
         hitTester: T
-    ) where T.Position == Position {
-        guard isSelecting, let anchor = selectionAnchor else { return }
-        guard let newPosition = hitTester.hitTest(at: point) else { return }
+    ) -> Bool where T.Position == Position {
+        guard isSelecting, let anchor = selectionAnchor else { return false }
+        guard let newPosition = hitTester.nearestTextPosition(to: point) else { return false }
+
+        if selection?.active == newPosition {
+            return false
+        }
 
         selection = VVTextSelection(anchor: anchor, active: newPosition)
+        return true
     }
 
     public func handleMouseUp() {

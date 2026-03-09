@@ -131,6 +131,7 @@ public final class VVChatTimelineController {
         self.customEntryMessageMapper = customEntryMessageMapper
         entries = newEntries
         messages = newEntries.map { materializeMessage(for: $0) }
+        renderer.invalidateAll()
 
         messageImageURLs.removeAll(keepingCapacity: true)
         imageURLToMessageIDs.removeAll(keepingCapacity: true)
@@ -227,6 +228,7 @@ public final class VVChatTimelineController {
 
     public func finalizeMessage(id: String, content: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        renderer.invalidate(messageID: id)
         messages[index].state = .final
         messages[index].content = content
         messages[index].revision += 1
@@ -246,6 +248,7 @@ public final class VVChatTimelineController {
     ) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
 
+        renderer.invalidate(messageID: id)
         entries[index] = entry
         messages[index] = materializeMessage(for: entry)
 
@@ -315,6 +318,7 @@ public final class VVChatTimelineController {
     private func applyDraftUpdate(id: String, content: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         guard messages[index].state == .draft else { return }
+        renderer.invalidate(messageID: id)
         messages[index].content = content
         messages[index].revision += 1
         syncMessageBackToEntries(messages[index])

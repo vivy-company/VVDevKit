@@ -291,6 +291,8 @@ public final class MarkdownMetalRenderer {
 
     // Current uniforms
     public var uniforms = MarkdownUniforms()
+    private var transientFrameBuffers: [MTLBuffer] = []
+    private let transientFrameBuffersLock = NSLock()
 
     // MARK: - Initialization
 
@@ -336,6 +338,21 @@ public final class MarkdownMetalRenderer {
         currentUniformBufferIndex = (currentUniformBufferIndex + 1) % uniformBufferCount
         let buffer = uniformBuffers[currentUniformBufferIndex]
         memcpy(buffer.contents(), &uniforms, MemoryLayout<MarkdownUniforms>.stride)
+    }
+
+    public func recycleTransientBuffers(after commandBuffer: MTLCommandBuffer?) {
+        transientFrameBuffersLock.lock()
+        let buffers = transientFrameBuffers
+        transientFrameBuffers.removeAll(keepingCapacity: true)
+        transientFrameBuffersLock.unlock()
+
+        guard !buffers.isEmpty, let commandBuffer else { return }
+        let context = self.context
+        commandBuffer.addCompletedHandler { _ in
+            for buffer in buffers {
+                context.recycleBuffer(buffer)
+            }
+        }
     }
 
     // MARK: - Rendering
@@ -511,7 +528,11 @@ public final class MarkdownMetalRenderer {
     // MARK: - Buffer Creation
 
     public func makeBuffer<T>(for instances: [T]) -> MTLBuffer? {
-        context.makeBuffer(for: instances)
+        guard let buffer = context.makeBuffer(for: instances) else { return nil }
+        transientFrameBuffersLock.lock()
+        transientFrameBuffers.append(buffer)
+        transientFrameBuffersLock.unlock()
+        return buffer
     }
 
     // MARK: - Font Update

@@ -116,6 +116,7 @@ public enum LayoutContent {
     case inline(text: [LayoutTextRun], images: [LayoutInlineImage])
     case imageRow([LayoutInlineImage])
     case code(String, language: String?, lines: [LayoutCodeLine])
+    case diff(String, language: String?)
     case listItems([LayoutListItem])
     case quoteBlocks([LayoutBlock])
     case tableRows([LayoutTableRow])
@@ -1036,6 +1037,23 @@ public final class MarkdownLayoutEngine {
     }
 
     private func layoutCodeBlock(_ id: String, code: String, language: String?, at y: CGFloat) -> LayoutBlock {
+        if isDiffLanguage(language) {
+            let contentPadding = CGFloat(theme.contentPadding)
+            let frameWidth = max(40, contentWidth - contentPadding * 2)
+            let result = VVUnifiedDiffSceneRenderer.render(
+                unifiedDiff: code,
+                width: frameWidth,
+                theme: theme,
+                baseFont: baseFont
+            )
+            return LayoutBlock(
+                blockId: id,
+                blockType: .codeBlock(language: language),
+                frame: CGRect(x: contentPadding, y: y, width: frameWidth, height: result.contentHeight),
+                content: .diff(code, language: language)
+            )
+        }
+
         let contentPadding = CGFloat(theme.contentPadding)
         let codePadding = CGFloat(theme.codeBlockPadding)
         let headerHeight = CGFloat(theme.codeBlockHeaderHeight)
@@ -1096,6 +1114,13 @@ public final class MarkdownLayoutEngine {
             frame: CGRect(x: contentPadding, y: y, width: contentWidth - contentPadding * 2, height: height),
             content: .code(code, language: language, lines: layoutLines)
         )
+    }
+
+    private func isDiffLanguage(_ language: String?) -> Bool {
+        guard let normalized = language?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return normalized == "diff" || normalized == "patch"
     }
 
     private func wrapCodeLine(_ text: String, maxChars: Int) -> [String] {

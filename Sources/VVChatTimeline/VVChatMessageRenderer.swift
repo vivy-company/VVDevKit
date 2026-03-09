@@ -257,6 +257,10 @@ public final class VVChatMessageRenderer {
         cache.remove(where: { $0.id == messageID })
     }
 
+    public func invalidateAll() {
+        cache.removeAll()
+    }
+
     public func renderedMessage(for message: VVChatMessage) -> VVChatRenderedMessage {
         let insets = style.insets(for: message.role)
         let presentation = message.presentation
@@ -765,7 +769,26 @@ public final class VVChatMessageRenderer {
         switch content {
         case .summaryCard(let card):
             return renderSummaryCard(card, width: width)
+        case .inlineDiff(let diff):
+            return renderInlineDiff(diff, width: width)
         }
+    }
+
+    private func renderInlineDiff(_ diff: VVChatInlineDiffContent, width: CGFloat) -> CustomContentRender {
+        let result = VVUnifiedDiffSceneRenderer.render(
+            unifiedDiff: diff.unifiedDiff,
+            width: max(1, width),
+            theme: style.theme,
+            baseFont: style.baseFont,
+            options: .compactInline
+        )
+        return CustomContentRender(
+            scene: result.scene,
+            height: result.contentHeight,
+            visualWidth: width,
+            interactiveRegions: [],
+            imageURLs: []
+        )
     }
 
     private func renderSummaryCard(_ card: VVChatSummaryCard, width: CGFloat) -> CustomContentRender {
@@ -1358,7 +1381,7 @@ public final class VVChatMessageRenderer {
             return (block.frame.maxX, block.frame.maxX > 0)
         case .mermaid(let diagram):
             return (diagram.frame.maxX, diagram.frame.maxX > 0)
-        case .image, .code, .thematicBreak, .math:
+        case .image, .code, .diff, .thematicBreak, .math:
             return (block.frame.maxX, block.frame.maxX > 0)
         }
     }

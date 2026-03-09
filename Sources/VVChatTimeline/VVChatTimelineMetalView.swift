@@ -244,6 +244,7 @@ public final class VVChatTimelineMetalView: MTKView {
         }
 
         encoder.endEncoding()
+        renderer.recycleTransientBuffers(after: commandBuffer)
         commandBuffer?.present(drawable)
         commandBuffer?.commit()
     }

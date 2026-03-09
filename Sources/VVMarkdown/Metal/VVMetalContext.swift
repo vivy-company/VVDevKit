@@ -168,6 +168,12 @@ public final class VVMetalContext {
         return bufferPool.values.reduce(0) { $0 + $1.count }
     }
 
+    public var pooledBufferBytes: Int {
+        bufferPoolLock.lock()
+        defer { bufferPoolLock.unlock() }
+        return pooledBufferBytesStorage
+    }
+
     /// Drop cached glyph data from all shared atlases to reclaim GPU memory.
     public func purgeAtlases() {
         atlasCacheLock.lock()
@@ -178,8 +184,11 @@ public final class VVMetalContext {
     }
 
     private var bufferPool: [Int: [MTLBuffer]] = [:]  // size bucket -> reusable buffers
+    private var pooledBufferBytesStorage: Int = 0
     private let bufferPoolLock = NSLock()
-    private static let maxPooledBuffersPerBucket = 8
+    private static let maxPooledBuffersPerBucket = 2
+    private static let maxReusableBufferLength = 256 * 1024
+    private static let maxTotalPooledBufferBytes = 8 * 1024 * 1024
 
     // MARK: - Buffer Creation
 
@@ -192,6 +201,7 @@ public final class VVMetalContext {
         if var pooled = bufferPool[bucket], !pooled.isEmpty {
             let buffer = pooled.removeLast()
             bufferPool[bucket] = pooled
+            pooledBufferBytesStorage = max(0, pooledBufferBytesStorage - buffer.length)
             bufferPoolLock.unlock()
             if buffer.length >= size {
                 _ = instances.withUnsafeBufferPointer { ptr in
@@ -210,12 +220,15 @@ public final class VVMetalContext {
 
     /// Return a buffer to the pool for reuse.
     public func recycleBuffer(_ buffer: MTLBuffer) {
+        guard buffer.length <= Self.maxReusableBufferLength else { return }
         let bucket = Self.bufferBucket(for: buffer.length)
         bufferPoolLock.lock()
         var pooled = bufferPool[bucket] ?? []
         if pooled.count < Self.maxPooledBuffersPerBucket {
             pooled.append(buffer)
             bufferPool[bucket] = pooled
+            pooledBufferBytesStorage += buffer.length
+            trimBufferPoolIfNeededLocked()
         }
         bufferPoolLock.unlock()
     }
@@ -224,7 +237,26 @@ public final class VVMetalContext {
     public func drainBufferPool() {
         bufferPoolLock.lock()
         bufferPool.removeAll()
+        pooledBufferBytesStorage = 0
         bufferPoolLock.unlock()
+    }
+
+    private func trimBufferPoolIfNeededLocked() {
+        guard pooledBufferBytesStorage > Self.maxTotalPooledBufferBytes else { return }
+        let sortedBuckets = bufferPool.keys.sorted(by: >)
+        for bucket in sortedBuckets {
+            guard pooledBufferBytesStorage > Self.maxTotalPooledBufferBytes else { break }
+            guard var pooled = bufferPool[bucket], !pooled.isEmpty else { continue }
+            while !pooled.isEmpty && pooledBufferBytesStorage > Self.maxTotalPooledBufferBytes {
+                let removed = pooled.removeLast()
+                pooledBufferBytesStorage = max(0, pooledBufferBytesStorage - removed.length)
+            }
+            if pooled.isEmpty {
+                bufferPool.removeValue(forKey: bucket)
+            } else {
+                bufferPool[bucket] = pooled
+            }
+        }
     }
 
     private static func bufferBucket(for size: Int) -> Int {

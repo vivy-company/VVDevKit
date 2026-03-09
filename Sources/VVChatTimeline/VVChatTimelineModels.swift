@@ -95,8 +95,17 @@ public struct VVChatSummaryCard: Hashable, Sendable {
     }
 }
 
+public struct VVChatInlineDiffContent: Hashable, Sendable {
+    public var unifiedDiff: String
+
+    public init(unifiedDiff: String) {
+        self.unifiedDiff = unifiedDiff
+    }
+}
+
 public enum VVChatCustomContent: Hashable, Sendable {
     case summaryCard(VVChatSummaryCard)
+    case inlineDiff(VVChatInlineDiffContent)
 }
 
 public struct VVChatMessagePresentation: Hashable, Sendable {

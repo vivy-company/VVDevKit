@@ -9,6 +9,12 @@ import simd
 import VVHighlighting
 import VVMetalPrimitives
 
+#if canImport(AppKit)
+import AppKit
+#else
+import UIKit
+#endif
+
 struct VVMarkdownSceneBuilder {
     typealias LineMetrics = (line: CTLine, length: Int, originX: CGFloat, lineY: CGFloat, lineHeight: CGFloat, baseline: CGFloat, ascent: CGFloat, descent: CGFloat, lineWidth: CGFloat)
 
@@ -91,6 +97,16 @@ struct VVMarkdownSceneBuilder {
             let codeNode = localizedNode(from: codeBuilder.scene, blockFrame: block.frame)
             let nodeView = VVNodeView(node: codeNode, size: block.frame.size)
             return VVPositionedFrame(frame: block.frame, child: nodeView, clipRect: clipRect)
+        case .diff(let unifiedDiff, _):
+            let result = VVUnifiedDiffSceneRenderer.render(
+                unifiedDiff: unifiedDiff,
+                width: block.frame.width,
+                theme: theme,
+                baseFont: diffRenderFont()
+            )
+            let diffNode = localizedNode(from: result.scene, blockFrame: block.frame)
+            let nodeView = VVNodeView(node: diffNode, size: block.frame.size)
+            return VVPositionedFrame(frame: block.frame, child: nodeView, clipRect: clipRect)
         case .quoteBlocks, .listItems, .tableRows, .definitionList, .abbreviationList, .math, .mermaid:
             let nodeView = makeNodeView(for: block)
             return VVPositionedFrame(frame: block.frame, child: nodeView, clipRect: clipRect)
@@ -158,6 +174,20 @@ struct VVMarkdownSceneBuilder {
         }
     }
 
+    private func diffRenderFont() -> VVFont {
+        #if canImport(AppKit)
+        if let mono = layoutEngine.font(for: .monospace) {
+            return mono as NSFont
+        }
+        return NSFont.monospacedSystemFont(ofSize: layoutEngine.baseFontSize, weight: .regular)
+        #else
+        if let mono = layoutEngine.font(for: .monospace) {
+            return mono as UIFont
+        }
+        return UIFont.monospacedSystemFont(ofSize: layoutEngine.baseFontSize, weight: .regular)
+        #endif
+    }
+
     private func localizedNode(from scene: VVScene, blockFrame: CGRect) -> VVNode {
         let baseNode = VVNode.fromScene(scene)
         guard blockFrame.origin != .zero else { return baseNode }
@@ -175,6 +205,15 @@ struct VVMarkdownSceneBuilder {
 
         case .code(let code, let language, let lines):
             appendCodeBlockPrimitives(blockId: block.blockId, code: code, language: language, lines: lines, frame: block.frame, to: &builder)
+
+        case .diff(let unifiedDiff, _):
+            let result = VVUnifiedDiffSceneRenderer.render(
+                unifiedDiff: unifiedDiff,
+                width: block.frame.width,
+                theme: theme,
+                baseFont: diffRenderFont()
+            )
+            builder.add(node: localizedNode(from: result.scene, blockFrame: block.frame))
 
         case .listItems(let items):
             for item in items {

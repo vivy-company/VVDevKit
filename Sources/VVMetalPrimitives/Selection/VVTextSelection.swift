@@ -27,6 +27,13 @@ public struct VVTextSelection<Position>: Sendable where Position: VVTextPosition
 public protocol VVTextHitTestable: AnyObject {
     associatedtype Position: VVTextPosition
     func hitTest(at point: CGPoint) -> Position?
+    func nearestTextPosition(to point: CGPoint) -> Position?
+}
+
+public extension VVTextHitTestable {
+    func nearestTextPosition(to point: CGPoint) -> Position? {
+        hitTest(at: point)
+    }
 }
 
 /// Provides selection quads for rendering.

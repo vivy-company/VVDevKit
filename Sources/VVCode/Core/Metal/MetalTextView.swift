@@ -1065,6 +1065,7 @@ public final class MetalTextView: MTKView {
         encoder.endEncoding()
 
         if let drawable = currentDrawable {
+            renderer.recycleTransientBuffers(after: commandBuffer)
             commandBuffer.present(drawable)
         }
 

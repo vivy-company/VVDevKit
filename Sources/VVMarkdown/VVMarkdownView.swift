@@ -156,13 +156,22 @@ public class MetalMarkdownNSView: NSView {
     private var document: ParsedMarkdownDocument = .empty
     private var cachedLayout: MarkdownLayout?
     private var cachedScene = VVScene()
+    private var cachedOrderedScenePrimitives: [VVPrimitive] = []
     private var sceneDirty: Bool = true
 
     private var scrollOffset: CGPoint = .zero
     private var contentHeight: CGFloat = 0
-    private var needsRedraw: Bool = true
+    private var needsRedraw: Bool = true {
+        didSet {
+            guard needsRedraw else { return }
+            requestRedraw()
+        }
+    }
     private var currentDrawableSize: CGSize = .zero
     private var currentScaleFactor: CGFloat = 1.0
+    private var redrawScheduled = false
+    private var isRendering = false
+    private var continuousRedrawReasons: Set<ContinuousRedrawReason> = []
 
     /// Top content inset for safe area (e.g., titlebar)
     public var topInset: CGFloat = 0 {
@@ -205,8 +214,13 @@ public class MetalMarkdownNSView: NSView {
     private var copiedBlockId: String?
     private var copiedAt: TimeInterval = 0
     private var headingAnchors: [String: CGFloat] = [:]
+    private let renderCullPadding: CGFloat = 512
     public var debugOptions: MarkdownDebugOptions = [] {
         didSet { needsRedraw = true }
+    }
+
+    private enum ContinuousRedrawReason: Hashable {
+        case selectionAutoscroll
     }
 
     // MARK: - Initialization
@@ -262,7 +276,7 @@ public class MetalMarkdownNSView: NSView {
         super.viewDidMoveToWindow()
         if window != nil {
             window?.acceptsMouseMovedEvents = true
-            startDisplayLink()
+            requestRedraw()
         } else {
             stopDisplayLink()
         }
@@ -271,14 +285,12 @@ public class MetalMarkdownNSView: NSView {
     public override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         if superview != nil && window != nil {
-            startDisplayLink()
             needsRedraw = true
         }
     }
 
     public override func viewDidUnhide() {
         super.viewDidUnhide()
-        startDisplayLink()
         needsRedraw = true
     }
 
@@ -333,6 +345,55 @@ public class MetalMarkdownNSView: NSView {
     deinit {
         if let displayLink = displayLink {
             CVDisplayLinkStop(displayLink)
+        }
+    }
+
+    private func requestRedraw() {
+        guard window != nil, superview != nil, !isHidden else { return }
+        if usesContinuousRedraw {
+            startDisplayLink()
+            return
+        }
+        scheduleImmediateRender()
+    }
+
+    private func scheduleImmediateRender() {
+        guard !redrawScheduled else { return }
+        redrawScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.redrawScheduled = false
+            guard self.needsRedraw, self.window != nil, self.superview != nil, !self.isHidden else { return }
+            guard !self.usesContinuousRedraw else {
+                self.startDisplayLink()
+                return
+            }
+            self.render()
+        }
+    }
+
+    private var usesContinuousRedraw: Bool {
+        !continuousRedrawReasons.isEmpty
+    }
+
+    private func setContinuousRedraw(_ enabled: Bool, reason: ContinuousRedrawReason) {
+        if enabled {
+            let inserted = continuousRedrawReasons.insert(reason).inserted
+            if inserted {
+                startDisplayLink()
+                needsRedraw = true
+            }
+            return
+        }
+
+        guard continuousRedrawReasons.remove(reason) != nil else { return }
+        if usesContinuousRedraw {
+            startDisplayLink()
+        } else {
+            stopDisplayLink()
+            if needsRedraw {
+                scheduleImmediateRender()
+            }
         }
     }
 
@@ -620,9 +681,15 @@ public class MetalMarkdownNSView: NSView {
     public override func scrollWheel(with event: NSEvent) {
         let maxScrollY = max(0, contentHeight + topInset - bounds.height)
         let maxScrollX = max(0, (cachedLayout?.contentWidth ?? bounds.width) - bounds.width)
-        scrollOffset.y = max(0, min(maxScrollY, scrollOffset.y - event.scrollingDeltaY))
-        scrollOffset.x = max(0, min(maxScrollX, scrollOffset.x - event.scrollingDeltaX))
+        let newY = max(0, min(maxScrollY, scrollOffset.y - event.scrollingDeltaY))
+        let newX = max(0, min(maxScrollX, scrollOffset.x - event.scrollingDeltaX))
+        guard newY != scrollOffset.y || newX != scrollOffset.x else { return }
+        scrollOffset.y = newY
+        scrollOffset.x = newX
         needsRedraw = true
+        if !usesContinuousRedraw {
+            render()
+        }
     }
 
     // MARK: - Mouse Events & Selection
@@ -655,7 +722,7 @@ public class MetalMarkdownNSView: NSView {
             return
         }
 
-        selectionStart = selectionHelper?.nearestTextPosition(to: contentPoint)
+        selectionStart = selectionHelper?.hitTest(at: contentPoint)
         selectionEnd = selectionStart
         isSelecting = true
         NSCursor.iBeam.set()
@@ -667,6 +734,7 @@ public class MetalMarkdownNSView: NSView {
 
         let point = convert(event.locationInWindow, from: nil)
         lastDragPoint = point
+        setContinuousRedraw(needsSelectionAutoscroll(for: point), reason: .selectionAutoscroll)
         autoscrollForDrag(point)
         let contentPoint = contentPoint(from: point)
 
@@ -676,6 +744,7 @@ public class MetalMarkdownNSView: NSView {
     }
 
     public override func mouseUp(with event: NSEvent) {
+        setContinuousRedraw(false, reason: .selectionAutoscroll)
         let point = convert(event.locationInWindow, from: nil)
         lastDragPoint = nil
         let contentPoint = contentPoint(from: point)
@@ -917,6 +986,10 @@ public class MetalMarkdownNSView: NSView {
         }
     }
 
+    private func needsSelectionAutoscroll(for point: CGPoint) -> Bool {
+        point.x < 0 || point.x > bounds.width || point.y < 0 || point.y > bounds.height
+    }
+
 
     private func linkURL(at point: CGPoint) -> String? {
         guard let layout = cachedLayout else { return nil }
@@ -1031,7 +1104,15 @@ public class MetalMarkdownNSView: NSView {
         guard headerHeight > 0 else { return false }
 
         for block in layout.blocks {
-            guard case .code(let code, _, _) = block.content else { continue }
+            let code: String
+            switch block.content {
+            case .code(let raw, _, _):
+                code = raw
+            case .diff(let raw, _):
+                code = raw
+            default:
+                continue
+            }
             guard let buttonRect = codeCopyButtonRect(for: block.frame, headerHeight: headerHeight) else { continue }
             if buttonRect.insetBy(dx: -8, dy: -8).contains(point) {
                 NSPasteboard.general.clearContents()
@@ -1118,10 +1199,12 @@ public class MetalMarkdownNSView: NSView {
         guard sceneDirty, let layout = cachedLayout else {
             if cachedLayout == nil {
                 cachedScene = VVScene()
+                cachedOrderedScenePrimitives = []
             }
             return
         }
         cachedScene = buildScene(from: layout)
+        cachedOrderedScenePrimitives = cachedScene.orderedPrimitives()
         sceneDirty = false
     }
 
@@ -1152,6 +1235,9 @@ public class MetalMarkdownNSView: NSView {
     // MARK: - Rendering
 
     private func render() {
+        guard !isRendering else { return }
+        isRendering = true
+        defer { isRendering = false }
         needsRedraw = false
 
         // Validate drawable size before every render — self-corrects after release
@@ -1165,6 +1251,7 @@ public class MetalMarkdownNSView: NSView {
         }
 
         if isSelecting, let dragPoint = lastDragPoint {
+            setContinuousRedraw(needsSelectionAutoscroll(for: dragPoint), reason: .selectionAutoscroll)
             let beforeOffset = scrollOffset
             autoscrollForDrag(dragPoint)
             let contentPoint = contentPoint(from: dragPoint)
@@ -1204,7 +1291,14 @@ public class MetalMarkdownNSView: NSView {
         renderer.beginFrame(viewportSize: bounds.size, scrollOffset: adjustedScrollOffset)
 
         rebuildSceneIfNeeded()
-        renderScene(cachedScene, encoder: encoder, renderer: renderer)
+        let visibleRect = visibleContentRect(padding: renderCullPadding)
+        renderScene(
+            cachedScene,
+            orderedPrimitives: cachedOrderedScenePrimitives,
+            visibleRect: visibleRect,
+            encoder: encoder,
+            renderer: renderer
+        )
 
         // Render selection highlights on top so they are visible over block backgrounds.
         renderSelectionHighlights(encoder: encoder, renderer: renderer)
@@ -1214,13 +1308,15 @@ public class MetalMarkdownNSView: NSView {
         }
 
         encoder.endEncoding()
+        renderer.recycleTransientBuffers(after: commandBuffer)
         commandBuffer?.present(drawable)
         commandBuffer?.commit()
     }
 
     private func renderSelectionHighlights(encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
         guard let start = selectionStart, let end = selectionEnd, let helper = selectionHelper else { return }
-        let rects = helper.selectionRects(from: start, to: end)
+        let visibleRect = visibleContentRect()
+        let rects = helper.selectionRects(from: start, to: end, visibleYRange: visibleRect.minY...visibleRect.maxY)
         guard !rects.isEmpty else { return }
 
         var instances: [QuadInstance] = []
@@ -1238,7 +1334,13 @@ public class MetalMarkdownNSView: NSView {
         }
     }
 
-    private func renderScene(_ scene: VVScene, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
+    private func renderScene(
+        _ scene: VVScene,
+        orderedPrimitives: [VVPrimitive],
+        visibleRect: CGRect,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer
+    ) {
         var currentClip: CGRect? = nil
         var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
         var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
@@ -1274,7 +1376,8 @@ public class MetalMarkdownNSView: NSView {
             }
         }
 
-        for primitive in scene.orderedPrimitives() {
+        for primitive in orderedPrimitives {
+            guard primitiveIntersectsVisibleRect(primitive, visibleRect: visibleRect) else { continue }
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):
@@ -1287,6 +1390,110 @@ public class MetalMarkdownNSView: NSView {
 
         flushTextBatches()
         updateClip(nil)
+    }
+
+    private func visibleContentRect(padding: CGFloat = 0) -> CGRect {
+        let adjustedScrollOffset = CGPoint(x: scrollOffset.x, y: scrollOffset.y - topInset)
+        return CGRect(
+            x: adjustedScrollOffset.x - padding,
+            y: adjustedScrollOffset.y - padding,
+            width: bounds.width + padding * 2,
+            height: bounds.height + padding * 2
+        )
+    }
+
+    private func primitiveIntersectsVisibleRect(_ primitive: VVPrimitive, visibleRect: CGRect) -> Bool {
+        guard let bounds = primitiveVisibilityBounds(primitive) else { return true }
+        return bounds.intersects(visibleRect)
+    }
+
+    private func primitiveVisibilityBounds(_ primitive: VVPrimitive) -> CGRect? {
+        if let clipRect = primitive.clipRect, !clipRect.isNull, !clipRect.isEmpty {
+            return clipRect
+        }
+
+        switch primitive.kind {
+        case .textRun(let run):
+            let baseBounds = run.lineBounds ?? run.runBounds ?? glyphBounds(for: run.glyphs)
+            return baseBounds.map { transformed(rect: $0, by: primitive.transform) }
+
+        case .quad(let quad):
+            return transformed(rect: quad.frame, by: primitive.transform)
+
+        case .gradientQuad(let quad):
+            return transformed(rect: quad.frame, by: primitive.transform)
+
+        case .line(let line):
+            let minX = min(line.start.x, line.end.x)
+            let minY = min(line.start.y, line.end.y)
+            let rect = CGRect(
+                x: minX - line.thickness * 0.5,
+                y: minY - line.thickness * 0.5,
+                width: abs(line.end.x - line.start.x) + line.thickness,
+                height: abs(line.end.y - line.start.y) + line.thickness
+            )
+            return transformed(rect: rect, by: primitive.transform)
+
+        case .underline(let underline):
+            let rect = CGRect(
+                x: underline.origin.x,
+                y: underline.origin.y,
+                width: underline.width,
+                height: max(underline.thickness, 1)
+            )
+            return transformed(rect: rect, by: primitive.transform)
+
+        case .bullet(let bullet):
+            let rect = CGRect(x: bullet.position.x, y: bullet.position.y, width: bullet.size, height: bullet.size)
+            return transformed(rect: rect, by: primitive.transform)
+
+        case .image(let image):
+            return transformed(rect: image.frame, by: primitive.transform)
+
+        case .blockQuoteBorder(let border):
+            return transformed(rect: border.frame, by: primitive.transform)
+
+        case .tableLine(let line):
+            let minX = min(line.start.x, line.end.x)
+            let minY = min(line.start.y, line.end.y)
+            let rect = CGRect(
+                x: minX - line.lineWidth * 0.5,
+                y: minY - line.lineWidth * 0.5,
+                width: abs(line.end.x - line.start.x) + line.lineWidth,
+                height: abs(line.end.y - line.start.y) + line.lineWidth
+            )
+            return transformed(rect: rect, by: primitive.transform)
+
+        case .pieSlice(let slice):
+            let rect = CGRect(
+                x: slice.center.x - slice.radius,
+                y: slice.center.y - slice.radius,
+                width: slice.radius * 2,
+                height: slice.radius * 2
+            )
+            return transformed(rect: rect, by: primitive.transform)
+
+        case .path(let path):
+            let pathBounds = transformed(rect: path.bounds, by: path.transform)
+            return transformed(rect: pathBounds, by: primitive.transform)
+        }
+    }
+
+    private func glyphBounds(for glyphs: [VVTextGlyph]) -> CGRect? {
+        guard let first = glyphs.first else { return nil }
+        var minX = first.position.x
+        var minY = first.position.y
+        var maxX = first.position.x + first.size.width
+        var maxY = first.position.y + first.size.height
+
+        for glyph in glyphs.dropFirst() {
+            minX = min(minX, glyph.position.x)
+            minY = min(minY, glyph.position.y)
+            maxX = max(maxX, glyph.position.x + glyph.size.width)
+            maxY = max(maxY, glyph.position.y + glyph.size.height)
+        }
+
+        return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
     }
 
     private func renderPrimitive(_ primitive: VVPrimitive, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
@@ -2047,6 +2254,10 @@ public class MetalMarkdownNSView: NSView {
                 }
                 if lines.count > 12 { output.append("  … \(lines.count - 12) more lines") }
 
+            case .diff(let unifiedDiff, let language):
+                let lineCount = unifiedDiff.split(separator: "\n", omittingEmptySubsequences: false).count
+                output.append("  diff lines=\(lineCount) language=\(language ?? "diff")")
+
             case .listItems(let items):
                 output.append("  listItems=\(items.count)")
                 for item in items.prefix(20) {
@@ -2246,6 +2457,7 @@ public class MetalMarkdownUIView: UIView {
         // TODO: Render blocks (same as macOS)
 
         encoder.endEncoding()
+        renderer.recycleTransientBuffers(after: commandBuffer)
         commandBuffer?.present(drawable)
         commandBuffer?.commit()
     }

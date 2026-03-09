@@ -80,6 +80,7 @@ private struct PerformanceMetricsBar: View {
     @State private var colorPages = 0
     @State private var cachedGlyphs = 0
     @State private var pooledBuffers = 0
+    @State private var pooledBufferMB: Double = 0
     @State private var atlasMB: Double = 0
 
     private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
@@ -92,7 +93,7 @@ private struct PerformanceMetricsBar: View {
             Divider().frame(height: 14)
             MetricLabel(title: "Glyphs", value: "\(cachedGlyphs)")
             Divider().frame(height: 14)
-            MetricLabel(title: "Buf Pool", value: "\(pooledBuffers)")
+            MetricLabel(title: "Buf Pool", value: "\(pooledBuffers) (\(String(format: "%.1f", pooledBufferMB)) MB)")
             Spacer()
         }
         .padding(.horizontal, 12)
@@ -126,6 +127,7 @@ private struct PerformanceMetricsBar: View {
             colorPages = d.colorPages
             cachedGlyphs = d.cachedGlyphs
             pooledBuffers = ctx.pooledBufferCount
+            pooledBufferMB = Double(ctx.pooledBufferBytes) / (1024 * 1024)
 
             // Estimate atlas GPU memory: alpha pages = 1MB each (1024^2 * 1 byte),
             // color pages = 4MB each (1024^2 * 4 bytes)
@@ -1096,7 +1098,6 @@ struct ChatPlaygroundView: View {
     @State private var nextScriptedTurn = 0
     @State private var chatState = VVChatTimelineState()
     @State private var jumpToLatestRequestID = 0
-
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 12) {
@@ -1282,7 +1283,12 @@ struct ChatPlaygroundView: View {
             case .toolGroup(let group):
                 entries.append(.custom(groupEntry(for: group)))
                 if expandedToolGroupIDs.contains(group.id) {
-                    entries.append(contentsOf: group.toolCalls.map { .custom(toolDetailEntry(for: $0, group: group)) })
+                    for call in group.toolCalls {
+                        entries.append(.custom(toolDetailEntry(for: call, group: group)))
+                        if let diffEntry = toolInlineDiffEntry(for: call, group: group) {
+                            entries.append(.custom(diffEntry))
+                        }
+                    }
                 }
 
             case .turnSummary(let summary):
@@ -1417,6 +1423,28 @@ struct ChatPlaygroundView: View {
         )
     }
 
+    private func toolInlineDiffEntry(for call: PlaygroundToolCall, group: PlaygroundToolGroup) -> VVCustomTimelineEntry? {
+        guard let diff = call.diff?.trimmingCharacters(in: .whitespacesAndNewlines), !diff.isEmpty else {
+            return nil
+        }
+        let payload = PlaygroundTimelineCustomPayload(
+            title: nil,
+            body: diff,
+            status: call.status.rawValue,
+            toolKind: call.kind.rawValue,
+            showsAgentLaneIcon: false,
+            badges: nil,
+            summaryCard: nil
+        )
+        return VVCustomTimelineEntry(
+            id: "\(group.id)::\(call.id)::diff",
+            kind: "toolCallInlineDiff",
+            payload: encodeCustomPayload(payload, fallback: diff),
+            revision: group.revision ^ call.revision ^ 1,
+            timestamp: call.timestamp
+        )
+    }
+
     private func customEntryMapper() -> VVChatTimelineController.CustomEntryMessageMapper {
         { custom in
             let decoded = decodeCustomPayload(from: custom.payload)
@@ -1477,6 +1505,25 @@ struct ChatPlaygroundView: View {
                         textOpacityMultiplier: dimmedMetaOpacity * 0.93,
                         headerBadges: badges
                     )
+                )
+
+            case "toolCallInlineDiff":
+                return VVChatMessage(
+                    id: custom.id,
+                    role: .assistant,
+                    state: .final,
+                    content: "",
+                    revision: custom.revision,
+                    timestamp: custom.timestamp,
+                    presentation: VVChatMessagePresentation(
+                        bubbleStyle: nil,
+                        showsHeader: false,
+                        leadingLaneWidth: 0,
+                        showsTimestamp: false,
+                        contentFontScale: 0.82,
+                        textOpacityMultiplier: 0.97
+                    ),
+                    customContent: .inlineDiff(.init(unifiedDiff: body))
                 )
 
             case "turnSummary":
@@ -1822,15 +1869,22 @@ struct ChatPlaygroundView: View {
     }
 
     private func handleEntryActivate(_ entryID: String) {
+        let hadStateChange: Bool
         if expandedToolGroupIDs.contains(entryID) {
             expandedToolGroupIDs.remove(entryID)
+            hadStateChange = true
         } else if timelineItems.contains(where: { item in
             guard case .toolGroup(let group) = item else { return false }
             return group.id == entryID
         }) {
             expandedToolGroupIDs.insert(entryID)
+            hadStateChange = true
+        } else {
+            hadStateChange = false
         }
-        applyTimeline(scrollToBottom: false)
+        if hadStateChange {
+            applyTimeline(scrollToBottom: false)
+        }
     }
 
     private func handleLinkActivate(_ url: String) {
@@ -2078,8 +2132,29 @@ private struct PlaygroundToolCall: Identifiable, Hashable {
     let kind: PlaygroundToolKind
     let status: PlaygroundToolStatus
     let badges: [PlaygroundToolBadge]
+    let diff: String?
     let timestamp: Date
     let revision: Int
+
+    init(
+        id: String,
+        title: String,
+        kind: PlaygroundToolKind,
+        status: PlaygroundToolStatus,
+        badges: [PlaygroundToolBadge],
+        diff: String? = nil,
+        timestamp: Date,
+        revision: Int
+    ) {
+        self.id = id
+        self.title = title
+        self.kind = kind
+        self.status = status
+        self.badges = badges
+        self.diff = diff
+        self.timestamp = timestamp
+        self.revision = revision
+    }
 }
 
 private struct PlaygroundToolGroup: Identifiable, Hashable {
@@ -2469,6 +2544,27 @@ enum SampleData {
       merge feature
     ```
     """
+
+    static let chatEditDiffSample = [
+        "diff --git a/Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift b/Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift",
+        "index 4b7b9b1..d25f8c2 100644",
+        "--- a/Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift",
+        "+++ b/Examples/VVDevKitPlayground/VVDevKitPlaygroundApp.swift",
+        "@@ -1450,6 +1450,16 @@ struct ChatPlaygroundView: View {",
+        "     private func handleLinkActivate(_ url: String) {",
+        "         guard let parsed = URL(string: url), parsed.scheme == \"playground-file\" else { return }",
+        "     }",
+        "",
+        "+        private func diffPreview(for entryID: String) -> PlaygroundDiffPreview? {",
+        "+            guard entryID.contains(\"::\") else { return nil }",
+        "+            return PlaygroundDiffPreview(",
+        "+                id: entryID,",
+        "+                title: \"VVDevKitPlaygroundApp.swift\",",
+        "+                diff: SampleData.chatEditDiffSample",
+        "+            )",
+        "+        }",
+        " }"
+    ].joined(separator: "\n")
 
     static let gitDiff = """
     diff --git a/Sample.swift b/Sample.swift
@@ -2872,6 +2968,7 @@ enum SampleData {
                         PlaygroundToolBadge(text: "+34", color: .rgba(0.42, 0.82, 0.52, 1)),
                         PlaygroundToolBadge(text: "-8", color: .rgba(0.92, 0.42, 0.44, 1))
                     ],
+                    diff: chatEditDiffSample,
                     timestamp: base.addingTimeInterval(18),
                     revision: 1
                 ),
@@ -3071,7 +3168,7 @@ enum SampleData {
                     title: "Edited 1, Ran 1 • 2s",
                     status: .inProgress,
                     toolCalls: [
-                        PlaygroundToolCall(id: "turn2-edit1", title: "Edited", kind: .edit, status: .completed, badges: [PlaygroundToolBadge(text: "…/VVDevKitPlaygroundApp.swift", color: neutral), PlaygroundToolBadge(text: "+18", color: green), PlaygroundToolBadge(text: "-3", color: red)], timestamp: base.addingTimeInterval(43), revision: 1),
+                        PlaygroundToolCall(id: "turn2-edit1", title: "Edited", kind: .edit, status: .completed, badges: [PlaygroundToolBadge(text: "…/VVDevKitPlaygroundApp.swift", color: neutral), PlaygroundToolBadge(text: "+18", color: green), PlaygroundToolBadge(text: "-3", color: red)], diff: chatEditDiffSample, timestamp: base.addingTimeInterval(43), revision: 1),
                         PlaygroundToolCall(id: "turn2-run1", title: "Ran…", kind: .execute, status: .inProgress, badges: [PlaygroundToolBadge(text: "swift build --product VVDevKitPlayground", color: neutral)], timestamp: base.addingTimeInterval(44), revision: 1)
                     ],
                     timestamp: base.addingTimeInterval(43),
@@ -3082,7 +3179,7 @@ enum SampleData {
                     title: "Edited 1, Ran 1 • 4s",
                     status: .failed,
                     toolCalls: [
-                        PlaygroundToolCall(id: "turn2-edit1", title: "Edited", kind: .edit, status: .completed, badges: [PlaygroundToolBadge(text: "…/VVDevKitPlaygroundApp.swift", color: neutral), PlaygroundToolBadge(text: "+18", color: green), PlaygroundToolBadge(text: "-3", color: red)], timestamp: base.addingTimeInterval(43), revision: 2),
+                        PlaygroundToolCall(id: "turn2-edit1", title: "Edited", kind: .edit, status: .completed, badges: [PlaygroundToolBadge(text: "…/VVDevKitPlaygroundApp.swift", color: neutral), PlaygroundToolBadge(text: "+18", color: green), PlaygroundToolBadge(text: "-3", color: red)], diff: chatEditDiffSample, timestamp: base.addingTimeInterval(43), revision: 2),
                         PlaygroundToolCall(id: "turn2-run1", title: "Ran", kind: .execute, status: .failed, badges: [PlaygroundToolBadge(text: "swift build --product VVDevKitPlayground", color: neutral), PlaygroundToolBadge(text: "failed", color: red)], timestamp: base.addingTimeInterval(46), revision: 2)
                     ],
                     timestamp: base.addingTimeInterval(43),
