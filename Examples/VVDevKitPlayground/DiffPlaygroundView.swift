@@ -635,9 +635,9 @@ private enum DiffSamples {
             lines.append("@@ -1,\(linesPerHunk) +1,\(linesPerHunk) @@")
 
             for lineIndex in 0..<linesPerHunk {
-                lines.append("-let removed\(fileIndex)_\(lineIndex) = LegacyRenderer.render(id: \(fileIndex), line: \(lineIndex))")
-                lines.append("+let added\(fileIndex)_\(lineIndex) = DiffRenderer.render(id: \(fileIndex), line: \(lineIndex), theme: .dark, isEnabled: true)")
-                lines.append(" let context\(fileIndex)_\(lineIndex) = added\(fileIndex)_\(lineIndex).debugDescription")
+                lines.append("-private let removed\(fileIndex)_\(lineIndex) = LegacyRenderer.render(id: \(fileIndex), line: \(lineIndex), isEnabled: false) // legacy")
+                lines.append("+let added\(fileIndex)_\(lineIndex): String? = DiffRenderer.render(id: \(fileIndex), line: \(lineIndex), theme: .dark, isEnabled: true) ?? \"fallback-\\(\\(lineIndex))\"")
+                lines.append(" if let context\(fileIndex)_\(lineIndex) = added\(fileIndex)_\(lineIndex), context\(fileIndex)_\(lineIndex).hasPrefix(\"line\") { metrics[\(lineIndex)] = context\(fileIndex)_\(lineIndex).count }")
             }
         }
 

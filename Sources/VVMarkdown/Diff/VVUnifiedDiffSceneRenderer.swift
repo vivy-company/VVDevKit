@@ -124,6 +124,37 @@ public enum VVUnifiedDiffSceneRenderer {
         }
         return renderResult
     }
+
+    public static func render(
+        document: VVUnifiedDiffDocument,
+        width: CGFloat,
+        theme: MarkdownTheme,
+        baseFont: VVFont,
+        style: VVDiffSceneRenderStyle = .unifiedTable,
+        options: VVUnifiedDiffRenderOptions = .full,
+        highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]] = [:],
+        includedRowIDs: Set<Int>? = nil
+    ) -> VVUnifiedDiffRenderResult {
+        let renderer = UnifiedDiffRenderer(
+            font: baseFont,
+            theme: theme,
+            contentWidth: width,
+            highlightedRanges: highlightedRangesOverride
+        )
+        renderer.updateContentWidth(width)
+        let result = renderer.buildScene(
+            document: document,
+            width: width,
+            style: style,
+            wrapLines: true,
+            options: options,
+            includedRowIDs: includedRowIDs
+        )
+        return VVUnifiedDiffRenderResult(
+            scene: result.scene,
+            contentHeight: result.contentHeight
+        )
+    }
 }
 
 private enum UnifiedDiffParsingCache {
@@ -902,10 +933,11 @@ private final class UnifiedDiffRenderer {
         width: CGFloat,
         style: VVDiffSceneRenderStyle,
         wrapLines: Bool,
-        options: VVUnifiedDiffRenderOptions
+        options: VVUnifiedDiffRenderOptions,
+        includedRowIDs: Set<Int>? = nil
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         if style == .split {
-            return buildSplitScene(document: document, width: width, options: options)
+            return buildSplitScene(document: document, width: width, options: options, includedRowIDs: includedRowIDs)
         }
 
         let sections = document.sections
@@ -921,9 +953,11 @@ private final class UnifiedDiffRenderer {
         var y: CGFloat = 0
 
         for section in sections {
-            if options.showsFileHeaders, section.headerRow != nil {
+            if options.showsFileHeaders, let headerRow = section.headerRow {
                 let rowHeight = max(20, lineHeight * 1.5)
-                buildFileHeader(section: section, y: y, width: width, height: rowHeight, builder: &builder)
+                if includedRowIDs == nil || includedRowIDs?.contains(headerRow.id) == true {
+                    buildFileHeader(section: section, y: y, width: width, height: rowHeight, builder: &builder)
+                }
                 y += rowHeight
             }
 
@@ -938,17 +972,19 @@ private final class UnifiedDiffRenderer {
                     ? wrappedTextSegments(row.text, maxChars: maxCharsPerVisualLine)
                     : [row.text]
                 let rowHeight = lineHeight * CGFloat(max(1, wrappedLines.count))
-                buildUnifiedRow(
-                    row: row,
-                    y: y,
-                    width: width,
-                    height: rowHeight,
-                    gutterColWidth: gutterColWidth,
-                    markerWidth: markerWidth,
-                    codeStartX: codeStartX,
-                    wrappedLines: wrappedLines,
-                    builder: &builder
-                )
+                if includedRowIDs == nil || includedRowIDs?.contains(row.id) == true {
+                    buildUnifiedRow(
+                        row: row,
+                        y: y,
+                        width: width,
+                        height: rowHeight,
+                        gutterColWidth: gutterColWidth,
+                        markerWidth: markerWidth,
+                        codeStartX: codeStartX,
+                        wrappedLines: wrappedLines,
+                        builder: &builder
+                    )
+                }
                 y += rowHeight
             }
         }
@@ -959,7 +995,8 @@ private final class UnifiedDiffRenderer {
     private func buildSplitScene(
         document: VVUnifiedDiffDocument,
         width: CGFloat,
-        options: VVUnifiedDiffRenderOptions
+        options: VVUnifiedDiffRenderOptions,
+        includedRowIDs: Set<Int>? = nil
     ) -> (scene: VVScene, contentHeight: CGFloat) {
         let splitRows = document.splitRows
         let maxOld = document.maxOldLineNumber
@@ -983,37 +1020,48 @@ private final class UnifiedDiffRenderer {
                     continue
                 }
                 let rowHeight = header.kind == .fileHeader ? max(20, lineHeight * 1.5) : lineHeight
-                if header.kind == .fileHeader {
-                    let section = UnifiedDiffSection(id: header.id, filePath: header.text, headerRow: header, rows: [])
-                    buildFileHeader(section: section, y: y, width: totalWidth, height: rowHeight, builder: &builder)
-                } else {
-                    buildHunkHeaderRow(lines: [header.text], y: y, width: totalWidth, height: rowHeight, builder: &builder)
+                if includedRowIDs == nil || includedRowIDs?.contains(header.id) == true {
+                    if header.kind == .fileHeader {
+                        let section = UnifiedDiffSection(id: header.id, filePath: header.text, headerRow: header, rows: [])
+                        buildFileHeader(section: section, y: y, width: totalWidth, height: rowHeight, builder: &builder)
+                    } else {
+                        buildHunkHeaderRow(lines: [header.text], y: y, width: totalWidth, height: rowHeight, builder: &builder)
+                    }
                 }
                 y += rowHeight
             } else {
                 let rowHeight = lineHeight
-                buildSplitCell(
-                    cell: splitRow.left,
-                    y: y,
-                    paneX: 0,
-                    paneWidth: columnWidth,
-                    height: rowHeight,
-                    gutterColWidth: gutterColWidth,
-                    markerWidth: markerWidth,
-                    codeStartX: paneCodeStartX,
-                    builder: &builder
-                )
-                buildSplitCell(
-                    cell: splitRow.right,
-                    y: y,
-                    paneX: columnWidth,
-                    paneWidth: columnWidth,
-                    height: rowHeight,
-                    gutterColWidth: gutterColWidth,
-                    markerWidth: markerWidth,
-                    codeStartX: paneCodeStartX,
-                    builder: &builder
-                )
+                let includesLeft = splitRow.left.map { cell in
+                    includedRowIDs == nil || includedRowIDs?.contains(cell.rowID) == true
+                } ?? false
+                let includesRight = splitRow.right.map { cell in
+                    includedRowIDs == nil || includedRowIDs?.contains(cell.rowID) == true
+                } ?? false
+
+                if includesLeft || includesRight {
+                    buildSplitCell(
+                        cell: includesLeft ? splitRow.left : nil,
+                        y: y,
+                        paneX: 0,
+                        paneWidth: columnWidth,
+                        height: rowHeight,
+                        gutterColWidth: gutterColWidth,
+                        markerWidth: markerWidth,
+                        codeStartX: paneCodeStartX,
+                        builder: &builder
+                    )
+                    buildSplitCell(
+                        cell: includesRight ? splitRow.right : nil,
+                        y: y,
+                        paneX: columnWidth,
+                        paneWidth: columnWidth,
+                        height: rowHeight,
+                        gutterColWidth: gutterColWidth,
+                        markerWidth: markerWidth,
+                        codeStartX: paneCodeStartX,
+                        builder: &builder
+                    )
+                }
                 y += rowHeight
             }
         }
