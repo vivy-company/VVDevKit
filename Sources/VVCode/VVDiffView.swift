@@ -442,6 +442,10 @@ private final class VVDiffMetalView: NSView {
         updateMetalViewport()
         noteScrollActivity()
         requestViewportHighlightingIfNeeded()
+        if !staleHighlightedRowIDs.isEmpty, shouldRedrawForHighlightedRowIDs(staleHighlightedRowIDs) {
+            deferredHighlightSceneRefresh = true
+            startDisplayLink()
+        }
         if displayLink == nil {
             metalView.setNeedsDisplay(metalView.bounds)
         }
@@ -501,13 +505,6 @@ private final class VVDiffMetalView: NSView {
         if deferredHighlightSceneRefresh {
             applyDeferredHighlightSceneRefresh(redraw: false)
             shouldRedraw = true
-            needsAnotherTick = true
-        }
-
-        if syntaxHighlightingEnabled,
-           effectiveHighlightLanguageConfiguration() != nil,
-           pendingHighlightCodeRowCount < codeRows.count {
-            scheduleHighlightingIfNeeded(targetCodeRowCount: codeRows.count)
             needsAnotherTick = true
         }
 
@@ -718,9 +715,10 @@ private final class VVDiffMetalView: NSView {
         let width = scrollView?.bounds.width ?? bounds.width
         let dr = ensureDiffRenderer()
         dr.updateContentWidth(width)
+        let previousContentHeight = contentHeight
+        let previousDocumentFrame = documentView.frame
         buildRowGeometries(width: width)
         contentHeight = rowGeometriesContentHeight
-        invalidateSceneCache(clearScene: false)
 
         let wrapsUnified = self.wrapsUnified
 
@@ -751,6 +749,13 @@ private final class VVDiffMetalView: NSView {
         // Size the document view for scroll bars; MTKView stays viewport-sized
         let docWidth = (wrapsUnified || fastPlainModeEnabled) ? width : max(maxLineWidth, minWidth, width)
         let docHeight = max(contentHeight, scrollView.bounds.height)
+        let documentSizeChanged =
+            abs(previousDocumentFrame.width - docWidth) > 0.5 ||
+            abs(previousDocumentFrame.height - docHeight) > 0.5
+        let contentHeightChanged = abs(previousContentHeight - contentHeight) > 0.5
+        if documentSizeChanged || contentHeightChanged || cachedScene == nil {
+            invalidateSceneCache(clearScene: false)
+        }
         documentView.frame = CGRect(x: 0, y: 0, width: docWidth, height: docHeight)
         updateMetalViewport()
         prewarmSceneBuildIfNeeded()
@@ -1235,19 +1240,22 @@ private final class VVDiffMetalView: NSView {
                     guard targetRowIDs.contains(rowID) else { continue }
                     self.highlightedRanges[rowID] = rowRanges
                 }
-                if self.cachedSceneIntersectsRowIDs(targetRowIDs) {
+                if !targetRowIDs.isEmpty {
                     self.staleHighlightedRowIDs.formUnion(targetRowIDs)
                 }
                 self.highlightedCodeRowCount = max(self.highlightedCodeRowCount, endIndex)
                 self.highlightTask = nil
-                if self.isActivelyScrolling {
+                if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
+                    if self.isActivelyScrolling {
+                        self.deferredHighlightSceneRefresh = true
+                        self.startDisplayLink()
+                    } else {
+                        self.deferredHighlightSceneRefresh = true
+                        self.applyDeferredHighlightSceneRefresh(redraw: true)
+                    }
+                } else if self.isActivelyScrolling, !self.staleHighlightedRowIDs.isEmpty {
                     self.deferredHighlightSceneRefresh = true
                     self.startDisplayLink()
-                } else if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
-                    self.deferredHighlightSceneRefresh = true
-                    self.applyDeferredHighlightSceneRefresh(redraw: true)
-                } else if !targetRowIDs.isEmpty {
-                    self.deferredHighlightSceneRefresh = true
                 }
                 self.startNextHighlightBatchIfNeeded()
             }
@@ -1273,9 +1281,36 @@ private final class VVDiffMetalView: NSView {
         return geometryRange(visibleGeometryRange(in: visibleRect), intersects: rowIDs)
     }
 
-    private func cachedSceneIntersectsRowIDs(_ rowIDs: Set<Int>) -> Bool {
-        guard !rowIDs.isEmpty, !cachedSceneRowIDs.isEmpty else { return false }
-        return !cachedSceneRowIDs.isDisjoint(with: rowIDs)
+    private static func buildSceneArtifacts(
+        analyzedDocument: VVDiffDocument,
+        renderWidth: CGFloat,
+        theme: MarkdownTheme,
+        baseFont: NSFont,
+        style: VVMarkdown.VVDiffRenderStyle,
+        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
+        rowIDs: Set<Int>,
+        includesAllRows: Bool
+    ) -> (scene: VVScene, orderedPrimitiveIndices: [Int], visibilityIndex: VVPrimitiveVisibilityIndex, rowIDs: Set<Int>) {
+        autoreleasepool {
+            let result = VVDiffSceneRenderer.render(
+                document: analyzedDocument,
+                width: renderWidth,
+                theme: theme,
+                baseFont: baseFont,
+                style: style,
+                options: .full,
+                highlightedRangesOverride: highlightedRanges,
+                includedRowIDs: includesAllRows ? nil : rowIDs
+            )
+            let scene = result.scene
+            let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
+            let visibilityIndex = VVPrimitiveVisibilityIndex(
+                scene: scene,
+                orderedPrimitiveIndices: orderedPrimitiveIndices,
+                bucketHeight: 192
+            )
+            return (scene, orderedPrimitiveIndices, visibilityIndex, rowIDs)
+        }
     }
 
     private func scheduleSceneBuildIfNeeded(renderWidth: CGFloat, sceneKey: ViewportSceneCacheKey) {
@@ -1289,39 +1324,39 @@ private final class VVDiffMetalView: NSView {
         let style: VVMarkdown.VVDiffRenderStyle = renderStyle == .sideBySide ? .sideBySide : .inline
         let highlightedRanges = highlightedRanges
         let rowIDs = sceneKey.startBlockIndex == 0 && sceneKey.endBlockIndex == displayBlocks.count
-            ? nil
+            ? Set(rows.map(\.id))
             : rowIDs(inDisplayBlockRange: sceneKey.startBlockIndex..<sceneKey.endBlockIndex)
+        let includesAllRows = rowIDs.count == rows.count
 
         sceneBuildInFlightKey = sceneKey
         Self.sceneBuildQueue.async { [weak self] in
-            let result = VVDiffSceneRenderer.render(
-                document: analyzedDocument,
-                width: renderWidth,
+            let artifacts = Self.buildSceneArtifacts(
+                analyzedDocument: analyzedDocument,
+                renderWidth: renderWidth,
                 theme: theme,
                 baseFont: baseFont,
                 style: style,
-                options: .full,
-                highlightedRangesOverride: highlightedRanges,
-                includedRowIDs: rowIDs
-            )
-            let scene = result.scene
-            let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
-            let visibilityIndex = VVPrimitiveVisibilityIndex(
-                scene: scene,
-                orderedPrimitiveIndices: orderedPrimitiveIndices,
-                bucketHeight: 192
+                highlightedRanges: highlightedRanges,
+                rowIDs: rowIDs,
+                includesAllRows: includesAllRows
             )
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                guard self.sceneBuildGeneration == generation else { return }
+                guard self.sceneBuildGeneration == generation else {
+                    if self.sceneBuildInFlightKey == sceneKey {
+                        self.sceneBuildInFlightKey = nil
+                        self.metalView?.setNeedsDisplay(self.metalView.bounds)
+                    }
+                    return
+                }
                 guard self.sceneBuildInFlightKey == sceneKey else { return }
 
-                self.cachedScene = scene
+                self.cachedScene = artifacts.scene
                 self.cachedSceneKey = sceneKey
-                self.cachedOrderedPrimitiveIndices = orderedPrimitiveIndices
-                self.cachedSceneVisibilityIndex = visibilityIndex
-                self.cachedSceneRowIDs = rowIDs ?? Set(self.rows.map(\.id))
+                self.cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
+                self.cachedSceneVisibilityIndex = artifacts.visibilityIndex
+                self.cachedSceneRowIDs = artifacts.rowIDs
                 self.cachedVisibleBucketRange = nil
                 self.cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
                 self.staleHighlightedRowIDs.removeAll(keepingCapacity: true)
@@ -1438,9 +1473,9 @@ extension VVDiffMetalView: MTKViewDelegate {
         let renderWidth = currentRenderWidth()
         let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
 
-        let scene: VVScene?
-        let orderedPrimitiveIndices: [Int]
-        let visibilityIndex: VVPrimitiveVisibilityIndex?
+        var scene: VVScene?
+        var orderedPrimitiveIndices: [Int]
+        var visibilityIndex: VVPrimitiveVisibilityIndex?
         if let cached = cachedScene,
            let cachedSceneKey,
            cachedSceneKey.contains(renderWidth: renderWidth, highlightVersion: highlightSceneVersion) {
@@ -1452,6 +1487,34 @@ extension VVDiffMetalView: MTKViewDelegate {
             scene = cachedScene
             orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
             visibilityIndex = cachedSceneVisibilityIndex
+        }
+
+        if scene == nil, let analyzedDocument {
+            let rowIDs = sceneKey.startBlockIndex == 0 && sceneKey.endBlockIndex == displayBlocks.count
+                ? Set(rows.map(\.id))
+                : rowIDs(inDisplayBlockRange: sceneKey.startBlockIndex..<sceneKey.endBlockIndex)
+            let artifacts = Self.buildSceneArtifacts(
+                analyzedDocument: analyzedDocument,
+                renderWidth: renderWidth,
+                theme: markdownTheme(from: theme),
+                baseFont: configuration.font,
+                style: renderStyle == .sideBySide ? .sideBySide : .inline,
+                highlightedRanges: highlightedRanges,
+                rowIDs: rowIDs,
+                includesAllRows: rowIDs.count == rows.count
+            )
+            scene = artifacts.scene
+            orderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
+            visibilityIndex = artifacts.visibilityIndex
+            cachedScene = artifacts.scene
+            cachedSceneKey = sceneKey
+            cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
+            cachedSceneVisibilityIndex = artifacts.visibilityIndex
+            cachedSceneRowIDs = artifacts.rowIDs
+            cachedVisibleBucketRange = nil
+            cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+            staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+            sceneBuildInFlightKey = nil
         }
 
         let visiblePrimitiveIndicesForDraw: [Int]

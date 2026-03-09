@@ -29,6 +29,7 @@ public final class MarkdownScenePrimitiveRenderer {
     private struct PreparedTextRun {
         var glyphBatches: [[MarkdownGlyphInstance]]
         var colorGlyphBatches: [[MarkdownGlyphInstance]]
+        var estimatedByteCount: Int
     }
 
     private let baseFont: VVFont
@@ -43,7 +44,9 @@ public final class MarkdownScenePrimitiveRenderer {
     private var strikethroughs: [LineInstance] = []
     private var preparedTextRunCache: [VVTextRunPrimitive: PreparedTextRun] = [:]
     private var preparedTextRunOrder: [VVTextRunPrimitive] = []
-    private static let maxPreparedTextRuns = 2048
+    private var preparedTextRunBytes: Int = 0
+    private static let maxPreparedTextRuns = 1024
+    private static let maxPreparedTextRunBytes = 24 * 1024 * 1024
 
     public init(baseFont: VVFont, behavior: MarkdownSceneRenderingBehavior = MarkdownSceneRenderingBehavior()) {
         self.baseFont = baseFont
@@ -766,13 +769,20 @@ public final class MarkdownScenePrimitiveRenderer {
 
         let prepared = PreparedTextRun(
             glyphBatches: glyphBatches,
-            colorGlyphBatches: colorGlyphBatches
+            colorGlyphBatches: colorGlyphBatches,
+            estimatedByteCount: estimatePreparedTextRunBytes(
+                glyphBatches: glyphBatches,
+                colorGlyphBatches: colorGlyphBatches
+            )
         )
         preparedTextRunCache[run] = prepared
+        preparedTextRunBytes += prepared.estimatedByteCount
         touchPreparedTextRun(run)
-        while preparedTextRunOrder.count > Self.maxPreparedTextRuns {
+        while preparedTextRunOrder.count > Self.maxPreparedTextRuns || preparedTextRunBytes > Self.maxPreparedTextRunBytes {
             let evicted = preparedTextRunOrder.removeFirst()
-            preparedTextRunCache.removeValue(forKey: evicted)
+            if let removed = preparedTextRunCache.removeValue(forKey: evicted) {
+                preparedTextRunBytes -= removed.estimatedByteCount
+            }
         }
         return prepared
     }
@@ -780,6 +790,18 @@ public final class MarkdownScenePrimitiveRenderer {
     private func touchPreparedTextRun(_ run: VVTextRunPrimitive) {
         preparedTextRunOrder.removeAll { $0 == run }
         preparedTextRunOrder.append(run)
+    }
+
+    private func estimatePreparedTextRunBytes(
+        glyphBatches: [[MarkdownGlyphInstance]],
+        colorGlyphBatches: [[MarkdownGlyphInstance]]
+    ) -> Int {
+        let glyphCount = glyphBatches.reduce(0) { $0 + $1.count }
+        let colorGlyphCount = colorGlyphBatches.reduce(0) { $0 + $1.count }
+        let totalGlyphCount = glyphCount + colorGlyphCount
+        let bufferBytes = totalGlyphCount * MemoryLayout<MarkdownGlyphInstance>.stride
+        let arrayOverhead = (glyphBatches.count + colorGlyphBatches.count) * MemoryLayout<[MarkdownGlyphInstance]>.stride
+        return bufferBytes + arrayOverhead
     }
 
     private func appendQuadPrimitive(
