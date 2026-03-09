@@ -249,7 +249,26 @@ public enum VVDiffTable {
 }
 
 private func parseDiffRows(unifiedDiff: String) -> [VVDiffRow] {
-    VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff).rows.map(mapDiffRow)
+    let analysis = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+    let rawHunkHeaders = unifiedDiff
+        .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        .lazy
+        .filter { $0.hasPrefix("@@") }
+        .map(String.init)
+
+    var rawHeaderIterator = rawHunkHeaders.makeIterator()
+    return analysis.rows.map { row in
+        guard row.kind == .hunkHeader, let rawHeader = rawHeaderIterator.next() else {
+            return mapDiffRow(row)
+        }
+        return VVDiffRow(
+            id: row.id,
+            kind: .hunkHeader,
+            oldLineNumber: row.oldLineNumber,
+            newLineNumber: row.newLineNumber,
+            text: rawHeader
+        )
+    }
 }
 
 // MARK: - VVDiffRenderer

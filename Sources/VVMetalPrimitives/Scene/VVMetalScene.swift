@@ -43,12 +43,51 @@ public struct VVScene: Sendable {
         primitives.append(VVPrimitive(kind: kind, clipRect: clipRect, zIndex: zIndex, transform: transform))
     }
 
-    public func orderedPrimitives() -> [VVPrimitive] {
-        primitives.enumerated().sorted { lhs, rhs in
-            if lhs.element.zIndex == rhs.element.zIndex {
-                return lhs.offset < rhs.offset
+    public func orderedPrimitiveIndices() -> [Int] {
+        guard !primitives.isEmpty else { return [] }
+
+        var indices = Array(primitives.indices)
+        var alreadyOrdered = true
+        var previous = primitives[indices[0]].zIndex
+
+        for index in indices.dropFirst() {
+            let current = primitives[index].zIndex
+            if current < previous {
+                alreadyOrdered = false
+                break
             }
-            return lhs.element.zIndex < rhs.element.zIndex
-        }.map(\.element)
+            previous = current
+        }
+
+        guard !alreadyOrdered else { return indices }
+
+        indices.sort { lhs, rhs in
+            if primitives[lhs].zIndex == primitives[rhs].zIndex {
+                return lhs < rhs
+            }
+            return primitives[lhs].zIndex < primitives[rhs].zIndex
+        }
+        return indices
+    }
+
+    public func orderedPrimitives() -> [VVPrimitive] {
+        let indices = orderedPrimitiveIndices()
+        guard !indices.isEmpty else { return [] }
+
+        var isIdentityOrder = indices.count == primitives.count
+        if isIdentityOrder {
+            for position in indices.indices where indices[position] != position {
+                isIdentityOrder = false
+                break
+            }
+        }
+        guard !isIdentityOrder else { return primitives }
+
+        var ordered: [VVPrimitive] = []
+        ordered.reserveCapacity(indices.count)
+        for index in indices {
+            ordered.append(primitives[index])
+        }
+        return ordered
     }
 }

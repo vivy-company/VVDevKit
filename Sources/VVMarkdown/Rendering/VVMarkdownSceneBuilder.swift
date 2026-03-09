@@ -53,10 +53,12 @@ struct VVMarkdownSceneBuilder {
         }
 
         for block in layout.blocks {
-            let view = viewProvider?(block, context, defaultViewFactory) ?? defaultViewFactory(block)
-            let styledView = viewFactory.applyStyleRegistryView(to: view, for: block)
-            let viewLayout = styledView.layout(in: env, constraint: VVLayoutConstraint(maxWidth: layout.contentWidth))
-            builder.add(node: viewLayout.node)
+            autoreleasepool {
+                let view = viewProvider?(block, context, defaultViewFactory) ?? defaultViewFactory(block)
+                let styledView = viewFactory.applyStyleRegistryView(to: view, for: block)
+                let viewLayout = styledView.layout(in: env, constraint: VVLayoutConstraint(maxWidth: layout.contentWidth))
+                builder.add(node: viewLayout.node)
+            }
         }
         return builder.scene
     }

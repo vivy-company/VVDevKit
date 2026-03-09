@@ -29,12 +29,20 @@ public final class MarkdownScenePrimitiveRenderer {
     private let baseFont: VVFont
     private let baseFontAscent: CGFloat
     private let baseFontDescent: CGFloat
-    private let behavior: MarkdownSceneRenderingBehavior
+    private var behavior: MarkdownSceneRenderingBehavior
+    private var glyphInstances: [[MarkdownGlyphInstance]] = []
+    private var colorGlyphInstances: [[MarkdownGlyphInstance]] = []
+    private var underlines: [LineInstance] = []
+    private var strikethroughs: [LineInstance] = []
 
     public init(baseFont: VVFont, behavior: MarkdownSceneRenderingBehavior = MarkdownSceneRenderingBehavior()) {
         self.baseFont = baseFont
         self.baseFontAscent = CGFloat(CTFontGetAscent(baseFont))
         self.baseFontDescent = CGFloat(CTFontGetDescent(baseFont))
+        self.behavior = behavior
+    }
+
+    public func updateBehavior(_ behavior: MarkdownSceneRenderingBehavior) {
         self.behavior = behavior
     }
 
@@ -50,13 +58,10 @@ public final class MarkdownScenePrimitiveRenderer {
     ) {
         let offset = SIMD2<Float>(Float(itemOffset.x), Float(itemOffset.y))
         var currentClip: CGRect?
-        var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-        var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-        var underlines: [LineInstance] = []
-        var strikethroughs: [LineInstance] = []
+        resetScratchBatches()
 
         func flushTextBatches() {
-            if !glyphInstances.isEmpty || !colorGlyphInstances.isEmpty {
+            if hasPendingTextBatches {
                 renderGlyphBatches(glyphInstances, encoder: encoder, renderer: renderer, isColor: false)
                 renderGlyphBatches(colorGlyphInstances, encoder: encoder, renderer: renderer, isColor: true)
             }
@@ -66,10 +71,7 @@ public final class MarkdownScenePrimitiveRenderer {
             if !strikethroughs.isEmpty, let buffer = renderer.makeBuffer(for: strikethroughs) {
                 renderer.renderStrikethroughs(encoder: encoder, instances: buffer, instanceCount: strikethroughs.count)
             }
-            glyphInstances.removeAll(keepingCapacity: true)
-            colorGlyphInstances.removeAll(keepingCapacity: true)
-            underlines.removeAll(keepingCapacity: true)
-            strikethroughs.removeAll(keepingCapacity: true)
+            resetScratchBatches()
         }
 
         func updateClip(_ clip: CGRect?) {
@@ -86,6 +88,78 @@ public final class MarkdownScenePrimitiveRenderer {
         }
 
         for primitive in orderedPrimitives {
+            if let visibleRect,
+               let bounds = primitiveVisibilityBounds(primitive),
+               !bounds.intersects(visibleRect) {
+                continue
+            }
+            updateClip(primitive.clipRect)
+            switch primitive.kind {
+            case .textRun(let run):
+                appendTextPrimitive(
+                    run,
+                    offset: offset,
+                    renderer: renderer,
+                    glyphInstances: &glyphInstances,
+                    colorGlyphInstances: &colorGlyphInstances,
+                    underlines: &underlines,
+                    strikethroughs: &strikethroughs
+                )
+            default:
+                flushTextBatches()
+                renderPrimitive(primitive, offset: offset, encoder: encoder, renderer: renderer)
+            }
+        }
+
+        flushTextBatches()
+        updateClip(nil)
+    }
+
+    public func renderScene(
+        _ scene: VVScene,
+        orderedPrimitiveIndices: [Int],
+        visibleRect: CGRect? = nil,
+        encoder: MTLRenderCommandEncoder,
+        renderer: MarkdownMetalRenderer,
+        itemOffset: CGPoint = .zero,
+        scissorRectForClip: ((CGRect) -> MTLScissorRect)? = nil,
+        fullScissorRect: (() -> MTLScissorRect)? = nil
+    ) {
+        let offset = SIMD2<Float>(Float(itemOffset.x), Float(itemOffset.y))
+        var currentClip: CGRect?
+        resetScratchBatches()
+
+        func flushTextBatches() {
+            if hasPendingTextBatches {
+                renderGlyphBatches(glyphInstances, encoder: encoder, renderer: renderer, isColor: false)
+                renderGlyphBatches(colorGlyphInstances, encoder: encoder, renderer: renderer, isColor: true)
+            }
+            if !underlines.isEmpty, let buffer = renderer.makeBuffer(for: underlines) {
+                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: underlines.count)
+            }
+            if !strikethroughs.isEmpty, let buffer = renderer.makeBuffer(for: strikethroughs) {
+                renderer.renderStrikethroughs(encoder: encoder, instances: buffer, instanceCount: strikethroughs.count)
+            }
+            resetScratchBatches()
+        }
+
+        func updateClip(_ clip: CGRect?) {
+            guard scissorRectForClip != nil || fullScissorRect != nil else { return }
+            let offsetClip = clip.map { $0.offsetBy(dx: itemOffset.x, dy: itemOffset.y) }
+            guard offsetClip != currentClip else { return }
+            flushTextBatches()
+            if let offsetClip, let scissorRectForClip {
+                encoder.setScissorRect(scissorRectForClip(offsetClip))
+            } else if let fullScissorRect {
+                encoder.setScissorRect(fullScissorRect())
+            }
+            currentClip = offsetClip
+        }
+
+        let primitives = scene.primitives
+        for index in orderedPrimitiveIndices {
+            guard index >= primitives.startIndex && index < primitives.endIndex else { continue }
+            let primitive = primitives[index]
             if let visibleRect,
                let bounds = primitiveVisibilityBounds(primitive),
                !bounds.intersects(visibleRect) {
@@ -486,12 +560,17 @@ public final class MarkdownScenePrimitiveRenderer {
         _ run: VVTextRunPrimitive,
         offset: SIMD2<Float>,
         renderer: MarkdownMetalRenderer,
-        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
-        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]],
+        glyphInstances: inout [[MarkdownGlyphInstance]],
+        colorGlyphInstances: inout [[MarkdownGlyphInstance]],
         underlines: inout [LineInstance],
         strikethroughs: inout [LineInstance]
     ) {
+        var glyphMinX = CGFloat.greatestFiniteMagnitude
+        var glyphMaxX = -CGFloat.greatestFiniteMagnitude
+
         for glyph in run.glyphs {
+            glyphMinX = min(glyphMinX, glyph.position.x)
+            glyphMaxX = max(glyphMaxX, glyph.position.x + glyph.size.width)
             appendGlyphInstance(
                 glyph,
                 offset: offset,
@@ -505,8 +584,10 @@ public final class MarkdownScenePrimitiveRenderer {
         let scale = baseSize > 0 ? run.fontSize / baseSize : 1
         let ascent = baseFontAscent * scale
         let descent = baseFontDescent * scale
-        let glyphMinX = run.glyphs.map(\.position.x).min() ?? run.position.x
-        let glyphMaxX = run.glyphs.map { $0.position.x + $0.size.width }.max() ?? run.position.x
+        if glyphMinX == .greatestFiniteMagnitude {
+            glyphMinX = run.position.x
+            glyphMaxX = run.position.x
+        }
         let fallbackBounds = run.runBounds ?? run.lineBounds
         let underlineStartX = fallbackBounds?.minX ?? glyphMinX
         let underlineWidth = max(0, fallbackBounds?.width ?? (glyphMaxX - glyphMinX))
@@ -540,8 +621,8 @@ public final class MarkdownScenePrimitiveRenderer {
         _ glyph: VVTextGlyph,
         offset: SIMD2<Float>,
         renderer: MarkdownMetalRenderer,
-        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
-        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]]
+        glyphInstances: inout [[MarkdownGlyphInstance]],
+        colorGlyphInstances: inout [[MarkdownGlyphInstance]]
     ) {
         guard let cached = cachedGlyph(for: glyph, renderer: renderer) else { return }
         let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
@@ -557,9 +638,9 @@ public final class MarkdownScenePrimitiveRenderer {
             atlasIndex: UInt32(cached.atlasIndex)
         )
         if cached.isColor {
-            colorGlyphInstances[cached.atlasIndex, default: []].append(instance)
+            append(instance, toAtlasBatch: cached.atlasIndex, batches: &colorGlyphInstances)
         } else {
-            glyphInstances[cached.atlasIndex, default: []].append(instance)
+            append(instance, toAtlasBatch: cached.atlasIndex, batches: &glyphInstances)
         }
     }
 
@@ -583,23 +664,66 @@ public final class MarkdownScenePrimitiveRenderer {
     }
 
     private func renderGlyphBatches(
-        _ batches: [Int: [MarkdownGlyphInstance]],
+        _ batches: [[MarkdownGlyphInstance]],
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
         isColor: Bool
     ) {
         let textures = isColor ? renderer.glyphAtlas.allColorAtlasTextures : renderer.glyphAtlas.allAtlasTextures
-        for atlasIndex in batches.keys.sorted() {
-            guard atlasIndex >= 0 && atlasIndex < textures.count,
-                  let instances = batches[atlasIndex],
-                  let buffer = renderer.makeBuffer(for: instances) else { continue }
-            renderer.renderGlyphs(
-                encoder: encoder,
-                instances: buffer,
-                instanceCount: instances.count,
-                texture: textures[atlasIndex]
-            )
+        let limit = min(batches.count, textures.count)
+        guard limit > 0 else { return }
+
+        for atlasIndex in 0..<limit {
+            let instances = batches[atlasIndex]
+            guard !instances.isEmpty, let buffer = renderer.makeBuffer(for: instances) else { continue }
+            if isColor {
+                renderer.renderColorGlyphs(
+                    encoder: encoder,
+                    instances: buffer,
+                    instanceCount: instances.count,
+                    texture: textures[atlasIndex]
+                )
+            } else {
+                renderer.renderGlyphs(
+                    encoder: encoder,
+                    instances: buffer,
+                    instanceCount: instances.count,
+                    texture: textures[atlasIndex]
+                )
+            }
         }
+    }
+
+    private var hasPendingTextBatches: Bool {
+        !underlines.isEmpty ||
+        !strikethroughs.isEmpty ||
+        glyphInstances.contains(where: { !$0.isEmpty }) ||
+        colorGlyphInstances.contains(where: { !$0.isEmpty })
+    }
+
+    private func resetScratchBatches() {
+        clearGlyphBatches(&glyphInstances)
+        clearGlyphBatches(&colorGlyphInstances)
+        underlines.removeAll(keepingCapacity: true)
+        strikethroughs.removeAll(keepingCapacity: true)
+    }
+
+    private func clearGlyphBatches(_ batches: inout [[MarkdownGlyphInstance]]) {
+        for index in batches.indices {
+            batches[index].removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func append(
+        _ instance: MarkdownGlyphInstance,
+        toAtlasBatch atlasIndex: Int,
+        batches: inout [[MarkdownGlyphInstance]]
+    ) {
+        guard atlasIndex >= 0 else { return }
+        if batches.count <= atlasIndex {
+            batches.append(contentsOf: repeatElement([], count: atlasIndex - batches.count + 1))
+        }
+        batches[atlasIndex].append(instance)
     }
 
     private func glyphBounds(for glyphs: [VVTextGlyph]) -> CGRect? {

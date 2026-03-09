@@ -7,6 +7,7 @@ import VVMetalPrimitives
 
 final class HeadlessSceneStressHarness {
     private let renderer: MarkdownMetalRenderer
+    private let sceneRenderer: MarkdownScenePrimitiveRenderer
     private let viewportSize: CGSize
 
     init(baseFont: VVFont, viewportSize: CGSize) throws {
@@ -15,6 +16,7 @@ final class HeadlessSceneStressHarness {
         }
         let context = try VVMetalContext(device: device)
         self.renderer = MarkdownMetalRenderer(context: context, baseFont: baseFont, scaleFactor: 2.0)
+        self.sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: baseFont)
         self.viewportSize = viewportSize
     }
 
@@ -90,10 +92,9 @@ final class HeadlessSceneStressHarness {
     }
 
     private func render(scene: VVScene, visibleRect: CGRect, encoder: MTLRenderCommandEncoder) {
-        let sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
         sceneRenderer.renderScene(
             scene,
-            orderedPrimitives: scene.orderedPrimitives(),
+            orderedPrimitiveIndices: scene.orderedPrimitiveIndices(),
             visibleRect: visibleRect,
             encoder: encoder,
             renderer: renderer

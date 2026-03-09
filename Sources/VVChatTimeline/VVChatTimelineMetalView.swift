@@ -56,6 +56,7 @@ public final class VVChatTimelineMetalView: MTKView {
     public weak var selectionDelegate: VVChatTimelineSelectionDelegate?
 
     private var renderer: MarkdownMetalRenderer?
+    private var sceneRenderer: MarkdownScenePrimitiveRenderer?
     private var currentDrawableSize: CGSize = .zero
     private var currentScrollOffset: CGPoint = .zero
     private var baseFont: VVFont = .systemFont(ofSize: 14)
@@ -141,8 +142,10 @@ public final class VVChatTimelineMetalView: MTKView {
         isPaused = true
         if let ctx = metalContext {
             renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: window?.backingScaleFactor ?? 2.0)
+            sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: font)
         } else {
             renderer = nil
+            sceneRenderer = nil
         }
     }
 
@@ -266,12 +269,10 @@ public final class VVChatTimelineMetalView: MTKView {
         imageProvider: VVChatTimelineRenderDataSource,
         itemOffset: CGPoint = .zero
     ) {
-        let orderedPrimitives = orderedPrimitiveIndices.compactMap { index in
-            scene.primitives.indices.contains(index) ? scene.primitives[index] : nil
-        }
-        let sceneRenderer = MarkdownScenePrimitiveRenderer(
-            baseFont: baseFont,
-            behavior: MarkdownSceneRenderingBehavior(
+        let sceneRenderer = sceneRenderer ?? MarkdownScenePrimitiveRenderer(baseFont: baseFont)
+        self.sceneRenderer = sceneRenderer
+        sceneRenderer.updateBehavior(
+            MarkdownSceneRenderingBehavior(
                 imageTextureProvider: { url in imageProvider.texture(for: url) },
                 shouldUnderlineLinkRun: { $0.style.isLink },
                 missingImageBehavior: MarkdownSceneRenderingBehavior.MissingImageBehavior.skip
@@ -279,7 +280,7 @@ public final class VVChatTimelineMetalView: MTKView {
         )
         sceneRenderer.renderScene(
             scene,
-            orderedPrimitives: orderedPrimitives,
+            orderedPrimitiveIndices: orderedPrimitiveIndices,
             encoder: encoder,
             renderer: renderer,
             itemOffset: itemOffset,

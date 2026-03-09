@@ -149,6 +149,7 @@ public class MetalMarkdownNSView: NSView {
 
     private var metalLayer: CAMetalLayer!
     private var renderer: MarkdownMetalRenderer?
+    private var sceneRenderer: MarkdownScenePrimitiveRenderer?
     private var displayLink: CVDisplayLink?
 
     private let parser = MarkdownParser()
@@ -266,6 +267,7 @@ public class MetalMarkdownNSView: NSView {
 
         if let ctx {
             renderer = MarkdownMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: metalLayer.contentsScale)
+            sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: baseFont)
             imageLoader = MarkdownImageLoader(device: ctx.device)
         }
 
@@ -1342,9 +1344,10 @@ public class MetalMarkdownNSView: NSView {
         renderer: MarkdownMetalRenderer
     ) {
         let hoveredLink = hoveredLinkURL
-        let sceneRenderer = MarkdownScenePrimitiveRenderer(
-            baseFont: renderer.baseFont,
-            behavior: MarkdownSceneRenderingBehavior(
+        let sceneRenderer = sceneRenderer ?? MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
+        self.sceneRenderer = sceneRenderer
+        sceneRenderer.updateBehavior(
+            MarkdownSceneRenderingBehavior(
                 imageTextureProvider: { [loadedImages] url in loadedImages[url] },
                 shouldUnderlineLinkRun: { run in
                     guard run.style.isLink, let url = run.style.linkURL else { return false }

@@ -2,6 +2,10 @@ import Foundation
 
 /// Parser for unified diff format (git diff output)
 public struct VVDiffParser {
+    private static let hunkHeaderRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"#
+    )
+
     /// Parse unified diff output into hunks
     /// - Parameter unifiedDiff: The unified diff string (output of `git diff`)
     /// - Returns: Array of diff hunks
@@ -106,10 +110,7 @@ public struct VVDiffParser {
     /// Parse the hunk header line
     /// Format: @@ -oldStart,oldCount +newStart,newCount @@
     private static func parseHunkHeader(_ line: String) -> (Int, Int, Int, Int)? {
-        // Regex: @@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@
-        let pattern = #"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"#
-
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard let regex = hunkHeaderRegex,
               let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else {
             return nil
         }
@@ -138,6 +139,7 @@ public struct VVDiffParser {
     /// - Returns: Array of line statuses sorted by line number
     public static func lineStatuses(from hunks: [VVDiffHunk]) -> [VVLineGitStatus] {
         var statuses: [VVLineGitStatus] = []
+        statuses.reserveCapacity(hunks.count * 4)
 
         for hunk in hunks {
             var lastDeletedLine: Int?
