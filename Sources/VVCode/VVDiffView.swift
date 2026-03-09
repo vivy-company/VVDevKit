@@ -78,18 +78,8 @@ private struct DiffTextPosition: Sendable, Hashable, Comparable, VVMetalPrimitiv
     }
 }
 
-/// Geometry cache for a single row in the diff view.
-private struct RowGeometry {
-    let rowIndex: Int
-    let rowID: Int
-    let y: CGFloat
-    let height: CGFloat
-    let isCodeRow: Bool
-    let text: String
-    let codeStartX: CGFloat
-    let paneX: CGFloat      // For split mode: left pane = 0, right pane = columnWidth + 1
-    let paneWidth: CGFloat  // For split mode: width of the pane containing this row
-}
+/// Geometry cache for a single visual row in the diff view.
+private typealias RowGeometry = VVDiffLayoutVisualLine
 
 private struct RowGeometryCacheKey: Equatable {
     let rowsSignature: Int
@@ -105,19 +95,185 @@ private struct ViewportSceneCacheKey: Equatable {
     let renderWidthBucket: Int
     let highlightVersion: Int
 
-    func contains(renderWidth: CGFloat, highlightVersion: Int) -> Bool {
+    func contains(
+        renderWidth: CGFloat,
+        highlightVersion: Int,
+        requiredBlockRange: Range<Int>
+    ) -> Bool {
         renderWidthBucket == Int((renderWidth * 2).rounded()) &&
-        self.highlightVersion == highlightVersion
+        self.highlightVersion == highlightVersion &&
+        startBlockIndex <= requiredBlockRange.lowerBound &&
+        endBlockIndex >= requiredBlockRange.upperBound
     }
 }
 
-private struct DisplayBlock {
-    let blockIndex: Int
-    let geometryStartIndex: Int
-    let geometryEndIndex: Int
-    let rowIDs: Set<Int>
-    let y: CGFloat
-    let height: CGFloat
+private typealias DisplayBlock = VVDiffLayoutBlock
+
+struct VVDiffViewDebugMetrics {
+    let rowGeometryCount: Int
+    let storedTextGeometryCount: Int
+    let storedTextCharacterCount: Int
+    let desiredHighlightRange: Range<Int>
+    let codeRowCount: Int
+    let contentHeight: CGFloat
+    let totalDisplayBlockCount: Int
+    let visibleDisplayBlockRange: Range<Int>
+    let cachedSceneBlockRange: Range<Int>
+    let cachedScenePrimitiveCount: Int
+
+    var sceneCoversVisibleBlocks: Bool {
+        cachedSceneBlockRange.lowerBound <= visibleDisplayBlockRange.lowerBound &&
+        cachedSceneBlockRange.upperBound >= visibleDisplayBlockRange.upperBound
+    }
+}
+
+private actor DiffViewportHighlighter {
+    private struct CacheKey: Hashable {
+        let rowID: Int
+        let textHash: Int
+        let languageID: String
+        let usesDarkTheme: Bool
+    }
+
+    private var highlightersByLanguageID: [String: TreeSitterHighlighter] = [:]
+    private var usesDarkTheme = true
+    private var highlightTheme: HighlightTheme = .defaultDark
+    private var rowCache: [CacheKey: [(NSRange, SIMD4<Float>)]] = [:]
+
+    func clear() {
+        rowCache.removeAll(keepingCapacity: true)
+    }
+
+    func highlightRanges(
+        rows: [VVDiffRow],
+        language: LanguageConfiguration,
+        theme: VVTheme
+    ) async -> [Int: [(NSRange, SIMD4<Float>)]] {
+        await updateThemeIfNeeded(theme)
+        guard let highlighter = await highlighter(for: language) else {
+            return [:]
+        }
+
+        var result: [Int: [(NSRange, SIMD4<Float>)]] = [:]
+        result.reserveCapacity(rows.count)
+
+        for row in rows where row.kind.isCode {
+            let cacheKey = makeCacheKey(row: row, languageID: language.identifier)
+            if let cached = rowCache[cacheKey] {
+                if !cached.isEmpty {
+                    result[row.id] = cached
+                }
+                continue
+            }
+
+            let highlighted = await highlightRow(
+                row,
+                with: highlighter
+            )
+            rowCache[cacheKey] = highlighted
+            if !highlighted.isEmpty {
+                result[row.id] = highlighted
+            }
+        }
+
+        return result
+    }
+
+    private func makeCacheKey(row: VVDiffRow, languageID: String) -> CacheKey {
+        var hasher = Hasher()
+        hasher.combine(row.text)
+        return CacheKey(
+            rowID: row.id,
+            textHash: hasher.finalize(),
+            languageID: languageID,
+            usesDarkTheme: usesDarkTheme
+        )
+    }
+
+    private func updateThemeIfNeeded(_ theme: VVTheme) async {
+        let shouldUseDarkTheme = theme.backgroundColor.brightnessComponent < 0.5
+        guard shouldUseDarkTheme != usesDarkTheme else { return }
+        usesDarkTheme = shouldUseDarkTheme
+        highlightTheme = shouldUseDarkTheme ? .defaultDark : .defaultLight
+        rowCache.removeAll(keepingCapacity: true)
+        for highlighter in highlightersByLanguageID.values {
+            await highlighter.setTheme(highlightTheme)
+        }
+    }
+
+    private func highlighter(for language: LanguageConfiguration) async -> TreeSitterHighlighter? {
+        if let cached = highlightersByLanguageID[language.identifier] {
+            return cached
+        }
+
+        let highlighter = TreeSitterHighlighter(theme: highlightTheme)
+        do {
+            try await highlighter.setLanguage(language)
+            highlightersByLanguageID[language.identifier] = highlighter
+            return highlighter
+        } catch {
+            return nil
+        }
+    }
+
+    private func highlightRow(
+        _ row: VVDiffRow,
+        with highlighter: TreeSitterHighlighter
+    ) async -> [(NSRange, SIMD4<Float>)] {
+        do {
+            _ = try await highlighter.parse(row.text)
+            let highlights = try await highlighter.highlights(in: nil)
+            guard !highlights.isEmpty else { return [] }
+
+            return highlights.compactMap { highlight in
+                guard highlight.range.length > 0 else { return nil }
+                return (
+                    highlight.range,
+                    SIMD4<Float>(
+                        Float(highlight.style.color.redComponent),
+                        Float(highlight.style.color.greenComponent),
+                        Float(highlight.style.color.blueComponent),
+                        Float(highlight.style.color.alphaComponent)
+                    )
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+}
+
+@MainActor
+enum VVDiffViewDebug {
+    static func makeMetrics(
+        unifiedDiff: String,
+        style: VVDiffRenderStyle,
+        theme: VVTheme = .defaultDark,
+        configuration: VVConfiguration = .default,
+        language: VVLanguage? = nil,
+        syntaxHighlightingEnabled: Bool = true,
+        viewportSize: CGSize = CGSize(width: 1100, height: 760),
+        scrollOffsetY: CGFloat = 0
+    ) -> VVDiffViewDebugMetrics {
+        let view = VVDiffMetalView(frame: CGRect(origin: .zero, size: viewportSize))
+        let analysis = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+        view.update(
+            unifiedDiff: unifiedDiff,
+            analysis: analysis,
+            style: style,
+            theme: theme,
+            configuration: configuration,
+            language: language,
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+            onFileHeaderActivate: nil
+        )
+
+        if scrollOffsetY > 0 {
+            view.debugScrollTo(y: scrollOffsetY)
+        }
+
+        return view.debugMetrics()
+    }
 }
 
 // MARK: - VVDiffRenderer
@@ -197,45 +353,6 @@ private final class VVDiffRenderer {
         layoutEngine.updateContentWidth(width)
     }
 
-    private func wrapCapacity(totalWidth: CGFloat, codeStartX: CGFloat) -> Int {
-        let available = max(0, totalWidth - codeStartX - codeInsetX - 12)
-        guard available > 0 else { return 1 }
-        return max(1, Int(floor(available / max(charWidth, 1))))
-    }
-
-    private func wrappedTextSegments(_ text: String, maxChars: Int) -> [String] {
-        guard maxChars > 0 else { return [text] }
-        var result: [String] = []
-        let logicalLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        for line in logicalLines {
-            if line.isEmpty {
-                result.append("")
-                continue
-            }
-            var start = line.startIndex
-            while start < line.endIndex {
-                let end = line.index(start, offsetBy: maxChars, limitedBy: line.endIndex) ?? line.endIndex
-                result.append(String(line[start..<end]))
-                start = end
-            }
-        }
-        return result.isEmpty ? [""] : result
-    }
-
-    private func wrappedTextSegmentCount(_ text: String, maxChars: Int) -> Int {
-        guard maxChars > 0 else { return 1 }
-        var count = 0
-        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byLines, .substringNotRequired]) { _, range, _, _ in
-            let length = text.distance(from: range.lowerBound, to: range.upperBound)
-            if length == 0 {
-                count += 1
-            } else {
-                count += max(1, Int(ceil(Double(length) / Double(maxChars))))
-            }
-        }
-        return max(count, 1)
-    }
-
     // Shared scene construction lives in VVDiffSceneRenderer.
     // This wrapper-local renderer now exists only for diff metrics and colors that
     // are still needed for sizing, geometry, and selection math.
@@ -297,7 +414,6 @@ private final class VVDiffMetalView: NSView {
     private var cachedSceneKey: ViewportSceneCacheKey?
     private var cachedOrderedPrimitiveIndices: [Int] = []
     private var cachedSceneVisibilityIndex: VVPrimitiveVisibilityIndex?
-    private var cachedSceneRowIDs: Set<Int> = []
     private var cachedVisibleBucketRange: ClosedRange<Int>?
     private var cachedVisiblePrimitiveIndices: [Int] = []
     private var sceneBuildGeneration: Int = 0
@@ -314,7 +430,9 @@ private final class VVDiffMetalView: NSView {
     private var highlightSceneVersion: Int = 0
     private var highlightGeneration: Int = 0
     private var highlightTask: Task<Void, Never>?
+    private let viewportHighlighter = DiffViewportHighlighter()
     private var codeRows: [VVDiffRow] = []
+    private var rowIndexByID: [Int: Int] = [:]
     private var codeRowIndexByID: [Int: Int] = [:]
     private var pendingHighlightCodeRowRange: Range<Int>?
 
@@ -340,6 +458,7 @@ private final class VVDiffMetalView: NSView {
     private let selectionColor: SIMD4<Float> = .rgba(0.24, 0.40, 0.65, 0.55)
     private var rowGeometries: [RowGeometry] = []
     private var displayBlocks: [DisplayBlock] = []
+    private var layoutPlan: VVDiffLayoutPlan?
     private var filePathByHeaderRowID: [Int: String] = [:]
     private var rowGeometryCacheKey: RowGeometryCacheKey?
     private var rowGeometriesContentHeight: CGFloat = 0
@@ -530,11 +649,13 @@ private final class VVDiffMetalView: NSView {
             cachedScene = nil
             cachedOrderedPrimitiveIndices.removeAll(keepingCapacity: true)
             cachedSceneVisibilityIndex = nil
-            cachedSceneRowIDs.removeAll(keepingCapacity: true)
         }
     }
 
     private func currentRenderWidth() -> CGFloat {
+        if renderStyle == .sideBySide, let layoutPlan {
+            return layoutPlan.width
+        }
         let viewportWidth = scrollView?.bounds.width ?? bounds.width
         return (wrapsUnified || fastPlainModeEnabled)
             ? viewportWidth
@@ -674,14 +795,14 @@ private final class VVDiffMetalView: NSView {
             diffRenderer = nil
         }
 
-        if rowsChanged || langChanged || fontChanged || syntaxHighlightingChanged {
-            resetHighlightingState()
+        let shouldResetHighlighting = rowsChanged || langChanged || fontChanged || themeChanged || syntaxHighlightingChanged
+        if shouldResetHighlighting {
+            resetHighlightingState(scheduleImmediately: false)
         }
 
         invalidateSceneCache(clearScene: true)
         updateContentSize()
         requestViewportHighlightingIfNeeded()
-        prewarmSceneBuildIfNeeded()
         metalView?.setNeedsDisplay(metalView.bounds)
     }
 
@@ -699,7 +820,7 @@ private final class VVDiffMetalView: NSView {
         dr.updateContentWidth(width)
         let previousContentHeight = contentHeight
         let previousDocumentFrame = documentView.frame
-        buildRowGeometries(width: width)
+        buildLayoutIfNeeded(width: width)
         contentHeight = rowGeometriesContentHeight
 
         let wrapsUnified = self.wrapsUnified
@@ -711,7 +832,7 @@ private final class VVDiffMetalView: NSView {
         } else {
             var widestLine = width
             for geo in rowGeometries {
-                let candidate = geo.codeStartX + codeInsetX + CGFloat(geo.text.count) * dr.charWidth + 20
+                let candidate = geo.codeStartX + codeInsetX + CGFloat(geo.textLength) * dr.charWidth + 20
                 if candidate > widestLine {
                     widestLine = candidate
                 }
@@ -729,7 +850,12 @@ private final class VVDiffMetalView: NSView {
         }
 
         // Size the document view for scroll bars; MTKView stays viewport-sized
-        let docWidth = (wrapsUnified || fastPlainModeEnabled) ? width : max(maxLineWidth, minWidth, width)
+        let docWidth: CGFloat
+        if renderStyle == .sideBySide {
+            docWidth = max(width, layoutPlan?.width ?? width)
+        } else {
+            docWidth = (wrapsUnified || fastPlainModeEnabled) ? width : max(maxLineWidth, minWidth, width)
+        }
         let docHeight = max(contentHeight, scrollView.bounds.height)
         let documentSizeChanged =
             abs(previousDocumentFrame.width - docWidth) > 0.5 ||
@@ -743,7 +869,7 @@ private final class VVDiffMetalView: NSView {
         prewarmSceneBuildIfNeeded()
     }
 
-    private func buildRowGeometries(width: CGFloat) {
+    private func buildLayoutIfNeeded(width: CGFloat) {
         let widthBucket = Int((width * 2).rounded())
         let cacheKey = RowGeometryCacheKey(
             rowsSignature: rowsSignature,
@@ -756,306 +882,57 @@ private final class VVDiffMetalView: NSView {
             return
         }
 
-        rowGeometries.removeAll(keepingCapacity: true)
-        displayBlocks.removeAll(keepingCapacity: true)
-        let dr = ensureDiffRenderer()
-
-        switch renderStyle {
-        case .inline:
-            buildRowGeometriesUnified(width: width, renderer: dr, wrapLines: wrapsUnified)
-        case .sideBySide:
-            buildRowGeometriesSplit(width: width, renderer: dr, wrapLines: wrapsUnified)
+        guard let analyzedDocument else {
+            layoutPlan = nil
+            rowGeometries.removeAll(keepingCapacity: true)
+            displayBlocks.removeAll(keepingCapacity: true)
+            rowGeometriesContentHeight = 0
+            rowGeometryCacheKey = cacheKey
+            return
         }
 
-        rowGeometriesContentHeight = rowGeometries.last.map { $0.y + $0.height } ?? 0
+        let dr = ensureDiffRenderer()
+        let layoutWidth = desiredLayoutWidth(viewportWidth: width, renderer: dr)
+        let plan = VVDiffLayoutBuilder.makeLayout(
+            document: analyzedDocument,
+            width: layoutWidth,
+            baseFont: configuration.font,
+            style: renderStyle == .sideBySide ? .sideBySide : .inline,
+            wrapLines: wrapsUnified,
+            includesMetadata: false
+        )
+        layoutPlan = plan
+        rowGeometries = plan.visualLines
+        displayBlocks = plan.blocks
+        rowGeometriesContentHeight = plan.contentHeight
         assertRowGeometriesAreSorted()
         rowGeometryCacheKey = cacheKey
     }
 
-    private func appendDisplayBlock(
-        geometryStartIndex: Int,
-        rowIDs: Set<Int>,
-        y: CGFloat,
-        height: CGFloat
-    ) {
-        guard height > 0 else { return }
-        let geometryEndIndex = rowGeometries.count
-        guard geometryEndIndex > geometryStartIndex else { return }
-        displayBlocks.append(
-            DisplayBlock(
-                blockIndex: displayBlocks.count,
-                geometryStartIndex: geometryStartIndex,
-                geometryEndIndex: geometryEndIndex,
-                rowIDs: rowIDs,
-                y: y,
-                height: height
-            )
-        )
-    }
+    private func desiredLayoutWidth(viewportWidth: CGFloat, renderer: VVDiffRenderer) -> CGFloat {
+        guard renderStyle == .sideBySide else { return viewportWidth }
+        guard !wrapsUnified else { return max(viewportWidth, 840) }
 
-    private func buildRowGeometriesUnified(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
-        let maxOld = analyzedDocument?.maxOldLineNumber ?? rows.compactMap(\.oldLineNumber).max() ?? 0
-        let maxNew = analyzedDocument?.maxNewLineNumber ?? rows.compactMap(\.newLineNumber).max() ?? 0
-        let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
-        let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
-        let markerWidth = renderer.charWidth + 8
-        let codeStartX = gutterColWidth * 2 + markerWidth
-        let maxCharsPerVisualLine = wrapCapacity(totalWidth: width, codeStartX: codeStartX, charWidth: renderer.charWidth)
-
-        var y: CGFloat = 0
-        var rowIndex = 0
-
-        for section in sections {
-            // File header
-            if let header = section.headerRow {
-                let rowH = renderer.headerHeight
-                let geometryStartIndex = rowGeometries.count
-                rowGeometries.append(RowGeometry(
-                    rowIndex: rowIndex,
-                    rowID: header.id,
-                    y: y,
-                    height: rowH,
-                    isCodeRow: false,
-                    text: header.text,
-                    codeStartX: codeStartX,
-                    paneX: 0,
-                    paneWidth: width
-                ))
-                y += rowH
-                rowIndex += 1
-                appendDisplayBlock(
-                    geometryStartIndex: geometryStartIndex,
-                    rowIDs: [header.id],
-                    y: y - rowH,
-                    height: rowH
-                )
-            }
-
-            // Section rows (skip metadata)
-            for row in section.rows {
-                if row.kind == .metadata { continue }
-                let displayText = VVDiffDisplayText(for: row)
-                let wrappedLines: [String]
-                if wrapLines && (row.kind.isCode || row.kind == .hunkHeader) {
-                    wrappedLines = wrappedTextSegments(displayText, maxChars: maxCharsPerVisualLine)
-                } else {
-                    wrappedLines = [displayText]
-                }
-                let blockY = y
-                let blockHeight = renderer.lineHeight * CGFloat(max(1, wrappedLines.count))
-                let geometryStartIndex = rowGeometries.count
-
-                for line in wrappedLines {
-                    let rowH = renderer.lineHeight
-                    rowGeometries.append(RowGeometry(
-                        rowIndex: rowIndex,
-                        rowID: row.id,
-                        y: y,
-                        height: rowH,
-                        isCodeRow: row.kind.isCode,
-                        text: line,
-                        codeStartX: codeStartX,
-                        paneX: 0,
-                        paneWidth: width
-                    ))
-                    y += rowH
-                    rowIndex += 1
-                }
-                appendDisplayBlock(
-                    geometryStartIndex: geometryStartIndex,
-                    rowIDs: [row.id],
-                    y: blockY,
-                    height: blockHeight
-                )
-            }
-        }
-    }
-
-    private func wrapCapacity(totalWidth: CGFloat, codeStartX: CGFloat, charWidth: CGFloat) -> Int {
-        let available = max(0, totalWidth - codeStartX - codeInsetX - 12)
-        guard available > 0 else { return 1 }
-        return max(1, Int(floor(available / max(charWidth, 1))))
-    }
-
-    private func wrappedTextSegments(_ text: String, maxChars: Int) -> [String] {
-        guard maxChars > 0 else { return [text] }
-        var result: [String] = []
-        let logicalLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        for line in logicalLines {
-            if line.isEmpty {
-                result.append("")
-                continue
-            }
-            var start = line.startIndex
-            while start < line.endIndex {
-                let end = line.index(start, offsetBy: maxChars, limitedBy: line.endIndex) ?? line.endIndex
-                result.append(String(line[start..<end]))
-                start = end
-            }
-        }
-        return result.isEmpty ? [""] : result
-    }
-
-    private func buildRowGeometriesSplit(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
         let maxOld = analyzedDocument?.maxOldLineNumber ?? rows.compactMap(\.oldLineNumber).max() ?? 0
         let maxNew = analyzedDocument?.maxNewLineNumber ?? rows.compactMap(\.newLineNumber).max() ?? 0
         let gutterDigits = max(1, String(max(maxOld, maxNew)).count)
         let gutterColWidth = CGFloat(gutterDigits) * renderer.charWidth + 16
         let markerWidth = renderer.charWidth + 4
-        let columnWidth = max(420, floor(width / 2))
         let paneCodeStartX = markerWidth + gutterColWidth
-        let paneMaxCharsPerVisualLine = wrapCapacity(totalWidth: columnWidth, codeStartX: paneCodeStartX, charWidth: renderer.charWidth)
-        let headerMaxCharsPerVisualLine = wrapCapacity(totalWidth: columnWidth * 2, codeStartX: 12, charWidth: renderer.charWidth)
 
-        var y: CGFloat = 0
-        var rowIndex = 0
-
+        var paneWidth = max(420, floor(viewportWidth / 2))
         for splitRow in splitRows {
-            if let header = splitRow.header {
-                let headerDisplayText = VVDiffDisplayText(for: header)
-                let wrappedLines: [String]
-                if wrapLines && header.kind == .hunkHeader {
-                    wrappedLines = wrappedTextSegments(headerDisplayText, maxChars: headerMaxCharsPerVisualLine)
-                } else {
-                    wrappedLines = [headerDisplayText]
-                }
-                let rowH = header.kind == .fileHeader
-                    ? renderer.headerHeight
-                    : renderer.lineHeight * CGFloat(max(1, wrappedLines.count))
-                let geometryStartIndex = rowGeometries.count
-                let blockY = y
-                if header.kind == .fileHeader {
-                    rowGeometries.append(RowGeometry(
-                        rowIndex: rowIndex,
-                        rowID: header.id,
-                        y: y,
-                        height: rowH,
-                        isCodeRow: false,
-                            text: headerDisplayText,
-                        codeStartX: paneCodeStartX,
-                        paneX: 0,
-                        paneWidth: columnWidth * 2
-                    ))
-                    rowIndex += 1
-                } else {
-                    for line in wrappedLines {
-                        rowGeometries.append(RowGeometry(
-                            rowIndex: rowIndex,
-                            rowID: header.id,
-                            y: y,
-                            height: renderer.lineHeight,
-                            isCodeRow: false,
-                            text: line,
-                            codeStartX: paneCodeStartX,
-                            paneX: 0,
-                            paneWidth: columnWidth * 2
-                        ))
-                        y += renderer.lineHeight
-                        rowIndex += 1
-                    }
-                    appendDisplayBlock(
-                        geometryStartIndex: geometryStartIndex,
-                        rowIDs: [header.id],
-                        y: blockY,
-                        height: rowH
-                    )
-                    continue
-                }
-                appendDisplayBlock(
-                    geometryStartIndex: geometryStartIndex,
-                    rowIDs: [header.id],
-                    y: blockY,
-                    height: rowH
-                )
-                y += rowH
-            } else {
-                let leftWrappedLines = splitRow.left.map { cell in
-                    wrapLines && cell.kind.isCode
-                        ? wrappedTextSegments(cell.text, maxChars: paneMaxCharsPerVisualLine)
-                        : [cell.text]
-                } ?? []
-                let rightWrappedLines = splitRow.right.map { cell in
-                    wrapLines && cell.kind.isCode
-                        ? wrappedTextSegments(cell.text, maxChars: paneMaxCharsPerVisualLine)
-                        : [cell.text]
-                } ?? []
-                let visualLineCount = max(1, max(leftWrappedLines.count, rightWrappedLines.count))
-                let rowH = renderer.lineHeight * CGFloat(visualLineCount)
-                let geometryStartIndex = rowGeometries.count
-                for lineIndex in 0..<visualLineCount {
-                    if let left = splitRow.left, lineIndex < leftWrappedLines.count {
-                        let line = leftWrappedLines[lineIndex]
-                        rowGeometries.append(RowGeometry(
-                            rowIndex: rowIndex,
-                            rowID: left.rowID,
-                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
-                            height: renderer.lineHeight,
-                            isCodeRow: left.kind.isCode,
-                            text: line,
-                            codeStartX: paneCodeStartX,
-                            paneX: 0,
-                            paneWidth: columnWidth
-                        ))
-                        rowIndex += 1
-                    } else if let left = splitRow.left {
-                        rowGeometries.append(RowGeometry(
-                            rowIndex: rowIndex,
-                            rowID: left.rowID,
-                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
-                            height: renderer.lineHeight,
-                            isCodeRow: false,
-                            text: "",
-                            codeStartX: paneCodeStartX,
-                            paneX: 0,
-                            paneWidth: columnWidth
-                        ))
-                        rowIndex += 1
-                    }
-                    if let right = splitRow.right, lineIndex < rightWrappedLines.count {
-                        let line = rightWrappedLines[lineIndex]
-                        rowGeometries.append(RowGeometry(
-                            rowIndex: rowIndex,
-                            rowID: right.rowID,
-                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
-                            height: renderer.lineHeight,
-                            isCodeRow: right.kind.isCode,
-                            text: line,
-                            codeStartX: paneCodeStartX,
-                            paneX: columnWidth,
-                            paneWidth: columnWidth
-                        ))
-                        rowIndex += 1
-                    } else if let right = splitRow.right {
-                        rowGeometries.append(RowGeometry(
-                            rowIndex: rowIndex,
-                            rowID: right.rowID,
-                            y: y + CGFloat(lineIndex) * renderer.lineHeight,
-                            height: renderer.lineHeight,
-                            isCodeRow: false,
-                            text: "",
-                            codeStartX: paneCodeStartX,
-                            paneX: columnWidth,
-                            paneWidth: columnWidth
-                        ))
-                        rowIndex += 1
-                    }
-                }
-                var rowIDs: Set<Int> = []
-                if let left = splitRow.left {
-                    rowIDs.insert(left.rowID)
-                }
-                if let right = splitRow.right {
-                    rowIDs.insert(right.rowID)
-                }
-                appendDisplayBlock(
-                    geometryStartIndex: geometryStartIndex,
-                    rowIDs: rowIDs,
-                    y: y,
-                    height: rowH
-                )
-                y += rowH
+            if let left = splitRow.left {
+                let candidate = paneCodeStartX + codeInsetX + CGFloat(left.text.count) * renderer.charWidth + 20
+                paneWidth = max(paneWidth, candidate)
+            }
+            if let right = splitRow.right {
+                let candidate = paneCodeStartX + codeInsetX + CGFloat(right.text.count) * renderer.charWidth + 20
+                paneWidth = max(paneWidth, candidate)
             }
         }
+
+        return max(viewportWidth, paneWidth * 2)
     }
 
     private func assertRowGeometriesAreSorted() {
@@ -1081,15 +958,20 @@ private final class VVDiffMetalView: NSView {
     // MARK: - Syntax Highlighting
 
     private func rebuildCodeRowLookup() {
+        rowIndexByID.removeAll(keepingCapacity: true)
+        rowIndexByID.reserveCapacity(rows.count)
         codeRows = rows.filter { $0.kind.isCode }
         codeRowIndexByID.removeAll(keepingCapacity: true)
         codeRowIndexByID.reserveCapacity(codeRows.count)
+        for (index, row) in rows.enumerated() {
+            rowIndexByID[row.id] = index
+        }
         for (index, row) in codeRows.enumerated() {
             codeRowIndexByID[row.id] = index
         }
     }
 
-    private func resetHighlightingState() {
+    private func resetHighlightingState(scheduleImmediately: Bool = true) {
         highlightGeneration += 1
         highlightTask?.cancel()
         highlightTask = nil
@@ -1099,6 +981,7 @@ private final class VVDiffMetalView: NSView {
         highlightSceneVersion &+= 1
         pendingHighlightCodeRowRange = nil
 
+        guard scheduleImmediately else { return }
         guard syntaxHighlightingEnabled else { return }
         guard !codeRows.isEmpty else { return }
         guard effectiveHighlightLanguageConfiguration() != nil else { return }
@@ -1231,17 +1114,19 @@ private final class VVDiffMetalView: NSView {
         let parseStart = startIndex - warmupRows
         let batchRows = Array(codeRows[parseStart..<endIndex])
         let targetRowIDs = Set(codeRows[startIndex..<endIndex].map(\.id))
-        let currentLanguage = effectiveHighlightLanguageConfiguration()
+        guard let currentLanguage = effectiveHighlightLanguageConfiguration() else {
+            pendingHighlightCodeRowRange = nil
+            return
+        }
         let currentTheme = theme
-        let currentFont = configuration.font
+        let viewportHighlighter = viewportHighlighter
 
         highlightTask = Task(priority: .utility) { [weak self] in
             guard !Task.isCancelled else { return }
-            let ranges = await Self.computeHighlightRanges(
+            let ranges = await viewportHighlighter.highlightRanges(
                 rows: batchRows,
                 language: currentLanguage,
-                theme: currentTheme,
-                font: currentFont
+                theme: currentTheme
             )
             guard !Task.isCancelled else { return }
 
@@ -1256,10 +1141,13 @@ private final class VVDiffMetalView: NSView {
                 }
                 self.trimHighlightedRanges(keeping: self.highlightRetentionRange(for: targetRange))
                 self.highlightTask = nil
+                let hasRemainingTargetHighlights = self.hasMissingHighlightRows(in: targetRange)
                 if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
                     if self.isActivelyScrolling {
                         self.deferredHighlightSceneRefresh = true
                         self.startDisplayLink()
+                    } else if hasRemainingTargetHighlights {
+                        self.deferredHighlightSceneRefresh = true
                     } else {
                         self.deferredHighlightSceneRefresh = true
                         self.applyDeferredHighlightSceneRefresh(redraw: true)
@@ -1277,6 +1165,14 @@ private final class VVDiffMetalView: NSView {
         let lowerBound = max(0, targetRange.lowerBound - Self.retainedHighlightLeadingCodeRows)
         let upperBound = min(codeRows.count, targetRange.upperBound + Self.retainedHighlightTrailingCodeRows)
         return lowerBound..<upperBound
+    }
+
+    private func hasMissingHighlightRows(in targetRange: Range<Int>) -> Bool {
+        guard targetRange.lowerBound < targetRange.upperBound else { return false }
+        for index in targetRange where highlightedRanges[codeRows[index].id] == nil {
+            return true
+        }
+        return false
     }
 
     private func trimHighlightedRanges(keeping keepRange: Range<Int>) {
@@ -1312,25 +1208,20 @@ private final class VVDiffMetalView: NSView {
     }
 
     private static func buildSceneArtifacts(
-        analyzedDocument: VVDiffDocument,
-        renderWidth: CGFloat,
+        layoutPlan: VVDiffLayoutPlan,
+        blockRange: Range<Int>,
         theme: MarkdownTheme,
         baseFont: NSFont,
-        style: VVMarkdown.VVDiffRenderStyle,
-        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]],
-        rowIDs: Set<Int>,
-        includesAllRows: Bool
-    ) -> (scene: VVScene, orderedPrimitiveIndices: [Int], visibilityIndex: VVPrimitiveVisibilityIndex, rowIDs: Set<Int>) {
+        highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
+    ) -> (scene: VVScene, orderedPrimitiveIndices: [Int], visibilityIndex: VVPrimitiveVisibilityIndex) {
         autoreleasepool {
             let result = VVDiffSceneRenderer.render(
-                document: analyzedDocument,
-                width: renderWidth,
+                layout: layoutPlan,
                 theme: theme,
                 baseFont: baseFont,
-                style: style,
                 options: .full,
                 highlightedRangesOverride: highlightedRanges,
-                includedRowIDs: includesAllRows ? nil : rowIDs
+                blockRange: blockRange
             )
             let scene = result.scene
             let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
@@ -1339,34 +1230,36 @@ private final class VVDiffMetalView: NSView {
                 orderedPrimitiveIndices: orderedPrimitiveIndices,
                 bucketHeight: 192
             )
-            return (scene, orderedPrimitiveIndices, visibilityIndex, rowIDs)
+            return (scene, orderedPrimitiveIndices, visibilityIndex)
         }
     }
 
     private func scheduleSceneBuildIfNeeded(renderWidth: CGFloat, sceneKey: ViewportSceneCacheKey) {
-        guard let analyzedDocument else { return }
-        guard cachedSceneKey != sceneKey else { return }
+        guard let layoutPlan else { return }
+        let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
+        if let cachedSceneKey,
+           cachedSceneKey.contains(
+            renderWidth: renderWidth,
+            highlightVersion: highlightSceneVersion,
+            requiredBlockRange: requiredBlockRange
+           ) {
+            return
+        }
         guard sceneBuildInFlightKey != sceneKey else { return }
 
         let generation = sceneBuildGeneration
         let theme = markdownTheme(from: theme)
         let baseFont = configuration.font
-        let style: VVMarkdown.VVDiffRenderStyle = renderStyle == .sideBySide ? .sideBySide : .inline
         let highlightedRanges = highlightedRanges
-        let rowIDs = Set(rows.map(\.id))
-        let includesAllRows = true
 
         sceneBuildInFlightKey = sceneKey
         Self.sceneBuildQueue.async { [weak self] in
             let artifacts = Self.buildSceneArtifacts(
-                analyzedDocument: analyzedDocument,
-                renderWidth: renderWidth,
+                layoutPlan: layoutPlan,
+                blockRange: requiredBlockRange,
                 theme: theme,
                 baseFont: baseFont,
-                style: style,
-                highlightedRanges: highlightedRanges,
-                rowIDs: rowIDs,
-                includesAllRows: includesAllRows
+                highlightedRanges: highlightedRanges
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -1384,7 +1277,6 @@ private final class VVDiffMetalView: NSView {
                 self.cachedSceneKey = sceneKey
                 self.cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
                 self.cachedSceneVisibilityIndex = artifacts.visibilityIndex
-                self.cachedSceneRowIDs = artifacts.rowIDs
                 self.cachedVisibleBucketRange = nil
                 self.cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
                 self.staleHighlightedRowIDs.removeAll(keepingCapacity: true)
@@ -1417,26 +1309,19 @@ private final class VVDiffMetalView: NSView {
         return nil
     }
 
-    private static func computeHighlightRanges(
-        rows: [VVDiffRow],
-        language: LanguageConfiguration?,
-        theme: VVTheme,
-        font: NSFont
-    ) async -> [Int: [(NSRange, SIMD4<Float>)]] {
-        guard let language else {
-            return [:]
+    private func textForGeometry(_ geometry: RowGeometry) -> String {
+        guard geometry.textLength > 0 else { return "" }
+        guard let rowIndex = rowIndexByID[geometry.rowID], rows.indices.contains(rowIndex) else { return "" }
+        let sourceText = rows[rowIndex].text
+        if geometry.textStart == 0 && geometry.textLength >= sourceText.count {
+            return sourceText
         }
-        return await VVDiffHighlighting.computeHighlightedRanges(
-            rows: rows,
-            language: language,
-            highlightTheme: VVDiffHighlighting.highlightTheme(
-                isDarkBackground: theme.backgroundColor.brightnessComponent < 0.5
-            ),
-            font: font,
-            rowID: \.id,
-            rowText: \.text,
-            rowIsCode: { $0.kind.isCode }
-        )
+
+        let boundedStart = min(max(0, geometry.textStart), sourceText.count)
+        let boundedLength = min(max(0, geometry.textLength), sourceText.count - boundedStart)
+        let startIndex = sourceText.index(sourceText.startIndex, offsetBy: boundedStart)
+        let endIndex = sourceText.index(startIndex, offsetBy: boundedLength)
+        return String(sourceText[startIndex..<endIndex])
     }
 
     override func viewDidMoveToWindow() {
@@ -1500,27 +1385,28 @@ extension VVDiffMetalView: MTKViewDelegate {
         let visibleRect = scrollView.contentView.bounds.insetBy(dx: -renderCullPadding, dy: -renderCullPadding)
         let renderWidth = currentRenderWidth()
         let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
+        let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
 
         var scene: VVScene?
         var orderedPrimitiveIndices: [Int]
         var visibilityIndex: VVPrimitiveVisibilityIndex?
         if let cached = cachedScene,
            let cachedSceneKey,
-           cachedSceneKey.contains(renderWidth: renderWidth, highlightVersion: highlightSceneVersion) {
+           cachedSceneKey.contains(
+            renderWidth: renderWidth,
+            highlightVersion: highlightSceneVersion,
+            requiredBlockRange: requiredBlockRange
+           ) {
             scene = cached
             orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
             visibilityIndex = cachedSceneVisibilityIndex
-        } else if let analyzedDocument {
-            let rowIDs = Set(rows.map(\.id))
+        } else if let layoutPlan {
             let artifacts = Self.buildSceneArtifacts(
-                analyzedDocument: analyzedDocument,
-                renderWidth: renderWidth,
+                layoutPlan: layoutPlan,
+                blockRange: requiredBlockRange,
                 theme: markdownTheme(from: theme),
                 baseFont: configuration.font,
-                style: renderStyle == .sideBySide ? .sideBySide : .inline,
-                highlightedRanges: highlightedRanges,
-                rowIDs: rowIDs,
-                includesAllRows: true
+                highlightedRanges: highlightedRanges
             )
             scene = artifacts.scene
             orderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
@@ -1529,7 +1415,6 @@ extension VVDiffMetalView: MTKViewDelegate {
             cachedSceneKey = sceneKey
             cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
             cachedSceneVisibilityIndex = artifacts.visibilityIndex
-            cachedSceneRowIDs = artifacts.rowIDs
             cachedVisibleBucketRange = nil
             cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
             staleHighlightedRowIDs.removeAll(keepingCapacity: true)
@@ -1606,15 +1491,6 @@ extension VVDiffMetalView: MTKViewDelegate {
         commandBuffer?.commit()
     }
 
-    private func rowIDs(inDisplayBlockRange range: Range<Int>) -> Set<Int> {
-        guard range.lowerBound < range.upperBound else { return [] }
-        var rowIDs: Set<Int> = []
-        for index in range where index >= 0 && index < displayBlocks.count {
-            rowIDs.formUnion(displayBlocks[index].rowIDs)
-        }
-        return rowIDs
-    }
-
     private func visibleGeometryRange(in visibleRect: CGRect) -> Range<Int> {
         guard !rowGeometries.isEmpty else { return 0..<0 }
 
@@ -1663,11 +1539,97 @@ extension VVDiffMetalView: MTKViewDelegate {
     }
 
     private func makeViewportSceneCacheKey(renderWidth: CGFloat) -> ViewportSceneCacheKey {
+        let renderWidthBucket = Int((renderWidth * 2).rounded())
+        guard let scrollView, !displayBlocks.isEmpty else {
+            return ViewportSceneCacheKey(
+                startBlockIndex: 0,
+                endBlockIndex: 0,
+                renderWidthBucket: renderWidthBucket,
+                highlightVersion: highlightSceneVersion
+            )
+        }
+
+        let visibleRange = visibleDisplayBlockRange(
+            in: scrollView.contentView.bounds.insetBy(dx: 0, dy: -Self.renderCullPadding)
+        )
+        guard visibleRange.lowerBound < visibleRange.upperBound else {
+            return ViewportSceneCacheKey(
+                startBlockIndex: 0,
+                endBlockIndex: min(displayBlocks.count, 1),
+                renderWidthBucket: renderWidthBucket,
+                highlightVersion: highlightSceneVersion
+            )
+        }
+
+        let visibleCount = max(visibleRange.count, 1)
+        let paddingBlocks = max(48, Int((CGFloat(visibleCount) * Self.sceneCacheViewportPaddingMultiplier).rounded(.up)))
+        let startBlockIndex = max(0, visibleRange.lowerBound - paddingBlocks)
+        let endBlockIndex = min(displayBlocks.count, visibleRange.upperBound + paddingBlocks)
         return ViewportSceneCacheKey(
-            startBlockIndex: 0,
-            endBlockIndex: displayBlocks.count,
-            renderWidthBucket: Int((renderWidth * 2).rounded()),
+            startBlockIndex: startBlockIndex,
+            endBlockIndex: endBlockIndex,
+            renderWidthBucket: renderWidthBucket,
             highlightVersion: highlightSceneVersion
+        )
+    }
+
+    fileprivate func debugMetrics() -> VVDiffViewDebugMetrics {
+        debugBuildCurrentSceneIfNeeded()
+        let visibleBlockRange = visibleDisplayBlockRange(in: scrollView.contentView.bounds)
+        let cachedSceneBlockRange = if let cachedSceneKey {
+            cachedSceneKey.startBlockIndex..<cachedSceneKey.endBlockIndex
+        } else {
+            0..<0
+        }
+        return VVDiffViewDebugMetrics(
+            rowGeometryCount: rowGeometries.count,
+            storedTextGeometryCount: 0,
+            storedTextCharacterCount: 0,
+            desiredHighlightRange: desiredHighlightedCodeRowRangeForVisibleViewport(),
+            codeRowCount: codeRows.count,
+            contentHeight: contentHeight,
+            totalDisplayBlockCount: displayBlocks.count,
+            visibleDisplayBlockRange: visibleBlockRange,
+            cachedSceneBlockRange: cachedSceneBlockRange,
+            cachedScenePrimitiveCount: cachedScene?.primitives.count ?? 0
+        )
+    }
+
+    private func debugBuildCurrentSceneIfNeeded() {
+        let renderWidth = currentRenderWidth()
+        let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
+        let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
+        guard let layoutPlan else { return }
+        guard cachedScene == nil || !(cachedSceneKey?.contains(
+            renderWidth: renderWidth,
+            highlightVersion: highlightSceneVersion,
+            requiredBlockRange: requiredBlockRange
+        ) ?? false) else {
+            return
+        }
+        let artifacts = Self.buildSceneArtifacts(
+            layoutPlan: layoutPlan,
+            blockRange: requiredBlockRange,
+            theme: markdownTheme(from: theme),
+            baseFont: configuration.font,
+            highlightedRanges: highlightedRanges
+        )
+        cachedScene = artifacts.scene
+        cachedSceneKey = sceneKey
+        cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
+        cachedSceneVisibilityIndex = artifacts.visibilityIndex
+        cachedVisibleBucketRange = nil
+        cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+    }
+
+    fileprivate func debugScrollTo(y: CGFloat) {
+        let maxOffsetY = max(0, documentView.frame.height - bounds.height)
+        let clampedOffsetY = min(max(0, y), maxOffsetY)
+        let clipView = scrollView.contentView
+        clipView.scroll(to: CGPoint(x: 0, y: clampedOffsetY))
+        scrollView.reflectScrolledClipView(clipView)
+        scrollViewBoundsChanged(
+            Notification(name: NSView.boundsDidChangeNotification, object: clipView)
         )
     }
 
@@ -1843,7 +1805,7 @@ extension VVDiffMetalView: MTKViewDelegate {
     @IBAction override func selectAll(_ sender: Any?) {
         guard !rowGeometries.isEmpty else { return }
         let first = DiffTextPosition(rowIndex: 0, charOffset: 0)
-        let last = DiffTextPosition(rowIndex: rowGeometries.count - 1, charOffset: rowGeometries.last!.text.count)
+        let last = DiffTextPosition(rowIndex: rowGeometries.count - 1, charOffset: rowGeometries.last!.textLength)
         selectionController.selectAll(from: first, to: last)
         invalidateAndRedraw()
     }
@@ -1873,7 +1835,7 @@ extension VVDiffMetalView: VVTextHitTestable {
 
         // Convert X to character offset (monospace: relativeX / charWidth)
         let relativeX = docPoint.x - geo.paneX - geo.codeStartX - codeInsetX
-        let charOffset = max(0, min(Int(relativeX / dr.charWidth), geo.text.count))
+        let charOffset = max(0, min(Int(relativeX / dr.charWidth), geo.textLength))
 
         return DiffTextPosition(rowIndex: geo.rowIndex, charOffset: charOffset, paneX: geo.paneX)
     }
@@ -1918,7 +1880,7 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
                 extendToEnd = false
             } else if geo.rowIndex == start.rowIndex {
                 startChar = start.charOffset
-                endChar = geo.text.count
+                endChar = geo.textLength
                 extendToEnd = true
             } else if geo.rowIndex == end.rowIndex {
                 startChar = 0
@@ -1926,7 +1888,7 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
                 extendToEnd = false
             } else {
                 startChar = 0
-                endChar = geo.text.count
+                endChar = geo.textLength
                 extendToEnd = true
             }
 
@@ -1965,7 +1927,7 @@ extension VVDiffMetalView: VVTextExtractor {
             if renderStyle == .sideBySide && geo.paneX != selectionPane { continue }
             guard geo.isCodeRow else { continue }
 
-            let text = geo.text
+            let text = textForGeometry(geo)
             if geo.rowIndex == start.rowIndex && geo.rowIndex == end.rowIndex {
                 let startIdx = text.index(text.startIndex, offsetBy: min(start.charOffset, text.count))
                 let endIdx = text.index(text.startIndex, offsetBy: min(end.charOffset, text.count))

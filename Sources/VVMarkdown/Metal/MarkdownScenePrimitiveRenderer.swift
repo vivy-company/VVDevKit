@@ -26,6 +26,11 @@ public struct MarkdownSceneRenderingBehavior {
 }
 
 public final class MarkdownScenePrimitiveRenderer {
+    private struct SceneStorageToken: Equatable {
+        let baseAddress: Int
+        let count: Int
+    }
+
     private struct PreparedTextRun {
         var glyphBatches: [[MarkdownGlyphInstance]]
         var colorGlyphBatches: [[MarkdownGlyphInstance]]
@@ -42,8 +47,9 @@ public final class MarkdownScenePrimitiveRenderer {
     private var roundedQuadInstances: [QuadInstance] = []
     private var underlines: [LineInstance] = []
     private var strikethroughs: [LineInstance] = []
-    private var preparedTextRunCache: [VVTextRunPrimitive: PreparedTextRun] = [:]
-    private var preparedTextRunOrder: [VVTextRunPrimitive] = []
+    private var preparedTextRunSceneToken: SceneStorageToken?
+    private var preparedTextRunCache: [Int: PreparedTextRun] = [:]
+    private var preparedTextRunOrder: [Int] = []
     private var preparedTextRunBytes: Int = 0
     private static let maxPreparedTextRuns = 1024
     private static let maxPreparedTextRunBytes = 24 * 1024 * 1024
@@ -57,6 +63,13 @@ public final class MarkdownScenePrimitiveRenderer {
 
     public func updateBehavior(_ behavior: MarkdownSceneRenderingBehavior) {
         self.behavior = behavior
+    }
+
+    public func clearPreparedTextRunCache() {
+        preparedTextRunSceneToken = nil
+        preparedTextRunCache.removeAll(keepingCapacity: false)
+        preparedTextRunOrder.removeAll(keepingCapacity: false)
+        preparedTextRunBytes = 0
     }
 
     public func renderScene(
@@ -73,6 +86,12 @@ public final class MarkdownScenePrimitiveRenderer {
         let offset = SIMD2<Float>(Float(itemOffset.x), Float(itemOffset.y))
         var currentClip: CGRect?
         resetScratchBatches()
+        updatePreparedTextRunCacheToken(
+            baseAddress: orderedPrimitives.withUnsafeBufferPointer { buffer in
+                buffer.baseAddress.map { Int(bitPattern: $0) } ?? 0
+            },
+            count: orderedPrimitives.count
+        )
 
         func flushTextBatches() {
             if hasPendingTextBatches {
@@ -132,6 +151,7 @@ public final class MarkdownScenePrimitiveRenderer {
                 flushQuadBatches()
                 appendTextPrimitive(
                     run,
+                    cacheKey: position,
                     offset: offset,
                     renderer: renderer,
                     glyphInstances: &glyphInstances,
@@ -168,6 +188,10 @@ public final class MarkdownScenePrimitiveRenderer {
         let offset = SIMD2<Float>(Float(itemOffset.x), Float(itemOffset.y))
         var currentClip: CGRect?
         resetScratchBatches()
+        updatePreparedTextRunCacheToken(
+            baseAddress: primitivesStorageBaseAddress(for: scene),
+            count: scene.primitives.count
+        )
 
         func flushTextBatches() {
             if hasPendingTextBatches {
@@ -225,6 +249,7 @@ public final class MarkdownScenePrimitiveRenderer {
                 flushQuadBatches()
                 appendTextPrimitive(
                     run,
+                    cacheKey: index,
                     offset: offset,
                     renderer: renderer,
                     glyphInstances: &glyphInstances,
@@ -541,6 +566,7 @@ public final class MarkdownScenePrimitiveRenderer {
 
     private func appendTextPrimitive(
         _ run: VVTextRunPrimitive,
+        cacheKey: Int,
         offset: SIMD2<Float>,
         renderer: MarkdownMetalRenderer,
         glyphInstances: inout [[MarkdownGlyphInstance]],
@@ -548,7 +574,7 @@ public final class MarkdownScenePrimitiveRenderer {
         underlines: inout [LineInstance],
         strikethroughs: inout [LineInstance]
     ) {
-        let prepared = preparedTextRun(for: run, renderer: renderer)
+        let prepared = preparedTextRun(for: run, cacheKey: cacheKey, renderer: renderer)
         appendPreparedBatches(prepared.glyphBatches, to: &glyphInstances, offset: offset)
         appendPreparedBatches(prepared.colorGlyphBatches, to: &colorGlyphInstances, offset: offset)
 
@@ -746,10 +772,11 @@ public final class MarkdownScenePrimitiveRenderer {
 
     private func preparedTextRun(
         for run: VVTextRunPrimitive,
+        cacheKey: Int,
         renderer: MarkdownMetalRenderer
     ) -> PreparedTextRun {
-        if let cached = preparedTextRunCache[run] {
-            touchPreparedTextRun(run)
+        if let cached = preparedTextRunCache[cacheKey] {
+            touchPreparedTextRun(cacheKey)
             return cached
         }
 
@@ -775,9 +802,9 @@ public final class MarkdownScenePrimitiveRenderer {
                 colorGlyphBatches: colorGlyphBatches
             )
         )
-        preparedTextRunCache[run] = prepared
+        preparedTextRunCache[cacheKey] = prepared
         preparedTextRunBytes += prepared.estimatedByteCount
-        touchPreparedTextRun(run)
+        touchPreparedTextRun(cacheKey)
         while preparedTextRunOrder.count > Self.maxPreparedTextRuns || preparedTextRunBytes > Self.maxPreparedTextRunBytes {
             let evicted = preparedTextRunOrder.removeFirst()
             if let removed = preparedTextRunCache.removeValue(forKey: evicted) {
@@ -787,9 +814,22 @@ public final class MarkdownScenePrimitiveRenderer {
         return prepared
     }
 
-    private func touchPreparedTextRun(_ run: VVTextRunPrimitive) {
-        preparedTextRunOrder.removeAll { $0 == run }
-        preparedTextRunOrder.append(run)
+    private func touchPreparedTextRun(_ cacheKey: Int) {
+        preparedTextRunOrder.removeAll { $0 == cacheKey }
+        preparedTextRunOrder.append(cacheKey)
+    }
+
+    private func primitivesStorageBaseAddress(for scene: VVScene) -> Int {
+        scene.primitives.withUnsafeBufferPointer { buffer in
+            buffer.baseAddress.map { Int(bitPattern: $0) } ?? 0
+        }
+    }
+
+    private func updatePreparedTextRunCacheToken(baseAddress: Int, count: Int) {
+        let token = SceneStorageToken(baseAddress: baseAddress, count: count)
+        guard preparedTextRunSceneToken != token else { return }
+        clearPreparedTextRunCache()
+        preparedTextRunSceneToken = token
     }
 
     private func estimatePreparedTextRunBytes(

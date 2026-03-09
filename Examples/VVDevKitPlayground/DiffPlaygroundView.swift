@@ -8,6 +8,7 @@ struct DiffPlaygroundView: View {
     @State private var renderStyle: VVDiffRenderStyle = .sideBySide
     @State private var useDarkTheme = true
     @State private var syntaxHighlightingEnabled = true
+    @State private var wrapLinesEnabled = true
     @State private var fontSize: Double = 13
 
     private var theme: VVTheme {
@@ -19,6 +20,7 @@ struct DiffPlaygroundView: View {
         config.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         config.showLineNumbers = true
         config.showGutter = true
+        config.wrapLines = wrapLinesEnabled
         return config
     }
 
@@ -44,6 +46,7 @@ struct DiffPlaygroundView: View {
 
                 Toggle("Dark Theme", isOn: $useDarkTheme)
                 Toggle("Syntax Highlighting", isOn: $syntaxHighlightingEnabled)
+                Toggle("Wrap Lines", isOn: $wrapLinesEnabled)
 
                 HStack {
                     Text("Font")

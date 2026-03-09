@@ -139,6 +139,28 @@ public enum VVDiffSceneRenderer {
             includedRowIDs: includedRowIDs
         )
     }
+
+    package static func render(
+        layout: VVDiffLayoutPlan,
+        theme: MarkdownTheme,
+        baseFont: VVFont,
+        options: VVDiffRenderOptions = .full,
+        highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]] = [:],
+        blockRange: Range<Int>? = nil
+    ) -> VVDiffRenderResult {
+        let renderer = makeSceneBuilder(
+            width: layout.width,
+            theme: theme,
+            baseFont: baseFont,
+            highlightedRanges: highlightedRangesOverride
+        )
+        let result = renderer.buildScene(
+            layout: layout,
+            blockRange: blockRange ?? 0..<layout.blocks.count,
+            options: options
+        )
+        return VVDiffRenderResult(scene: result.scene, contentHeight: layout.contentHeight)
+    }
 }
 
 private final class DiffLRUCache<Value> {
@@ -859,6 +881,137 @@ private final class DiffSceneBuilder {
     }
 
     func buildScene(
+        layout: VVDiffLayoutPlan,
+        blockRange: Range<Int>,
+        options: VVDiffRenderOptions
+    ) -> (scene: VVScene, contentHeight: CGFloat) {
+        guard !layout.blocks.isEmpty, blockRange.lowerBound < blockRange.upperBound else {
+            return (VVScene(primitives: []), layout.contentHeight)
+        }
+
+        let clampedRange = max(0, blockRange.lowerBound)..<min(layout.blocks.count, blockRange.upperBound)
+        guard clampedRange.lowerBound < clampedRange.upperBound else {
+            return (VVScene(primitives: []), layout.contentHeight)
+        }
+
+        var builder = VVSceneBuilder()
+        let rows = layout.document.rows
+        let sections = layout.document.sections
+        let splitRows = layout.document.splitRows
+
+        for block in layout.blocks[clampedRange] {
+            switch block.kind {
+            case let .unifiedFileHeader(sectionIndex, _):
+                guard options.showsFileHeaders, sections.indices.contains(sectionIndex) else { continue }
+                buildFileHeader(
+                    section: sections[sectionIndex],
+                    y: block.y,
+                    width: layout.metrics.totalWidth,
+                    height: block.height,
+                    builder: &builder
+                )
+
+            case let .unifiedRow(rowIndex, wrappedLines):
+                guard rows.indices.contains(rowIndex) else { continue }
+                let row = rows[rowIndex]
+                if row.kind == .metadata && (!options.showsMetadata || row.text.isEmpty) {
+                    continue
+                }
+                if row.kind == .hunkHeader && !options.showsHunkHeaders {
+                    continue
+                }
+                if row.kind == .hunkHeader {
+                    buildHunkHeaderRow(
+                        lines: materializeWrappedTextSegments(
+                            wrappedLines,
+                            from: VVDiffDisplayText(for: row)
+                        ),
+                        y: block.y,
+                        width: layout.metrics.totalWidth,
+                        height: block.height,
+                        builder: &builder
+                    )
+                } else {
+                    buildUnifiedRow(
+                        row: row,
+                        y: block.y,
+                        width: layout.metrics.totalWidth,
+                        height: block.height,
+                        gutterColWidth: layout.metrics.gutterColWidth,
+                        markerWidth: layout.metrics.markerWidth,
+                        codeStartX: layout.metrics.codeStartX,
+                        wrappedLines: materializeWrappedTextSegments(wrappedLines, from: row.text),
+                        builder: &builder
+                    )
+                }
+
+            case let .splitHeader(rowIndex, isFileHeader, wrappedLines):
+                guard rows.indices.contains(rowIndex) else { continue }
+                let row = rows[rowIndex]
+                if isFileHeader {
+                    guard options.showsFileHeaders else { continue }
+                    let section = ParsedDiffSection(id: row.id, filePath: row.text, headerRow: row, rows: [])
+                    buildFileHeader(
+                        section: section,
+                        y: block.y,
+                        width: layout.metrics.totalWidth,
+                        height: block.height,
+                        builder: &builder
+                    )
+                } else {
+                    guard options.showsHunkHeaders else { continue }
+                    buildHunkHeaderRow(
+                        lines: materializeWrappedTextSegments(
+                            wrappedLines,
+                            from: VVDiffDisplayText(for: row)
+                        ),
+                        y: block.y,
+                        width: layout.metrics.totalWidth,
+                        height: block.height,
+                        builder: &builder
+                    )
+                }
+
+            case let .splitRow(splitRowIndex, leftWrappedLines, rightWrappedLines):
+                guard splitRows.indices.contains(splitRowIndex) else { continue }
+                let splitRow = splitRows[splitRowIndex]
+                buildSplitCell(
+                    cell: splitRow.left,
+                    wrappedLines: materializeWrappedTextSegments(
+                        leftWrappedLines,
+                        from: splitRow.left?.text ?? ""
+                    ),
+                    y: block.y,
+                    paneX: 0,
+                    paneWidth: layout.metrics.columnWidth,
+                    height: block.height,
+                    gutterColWidth: layout.metrics.gutterColWidth,
+                    markerWidth: layout.metrics.markerWidth,
+                    codeStartX: layout.metrics.codeStartX,
+                    builder: &builder
+                )
+                buildSplitCell(
+                    cell: splitRow.right,
+                    wrappedLines: materializeWrappedTextSegments(
+                        rightWrappedLines,
+                        from: splitRow.right?.text ?? ""
+                    ),
+                    y: block.y,
+                    paneX: layout.metrics.columnWidth,
+                    paneWidth: layout.metrics.columnWidth,
+                    height: block.height,
+                    gutterColWidth: layout.metrics.gutterColWidth,
+                    markerWidth: layout.metrics.markerWidth,
+                    codeStartX: layout.metrics.codeStartX,
+                    builder: &builder
+                )
+            }
+        }
+
+        return (builder.scene, layout.contentHeight)
+    }
+
+    func buildScene(
         document: VVDiffDocument,
         width: CGFloat,
         style: VVDiffRenderStyle,
@@ -1079,8 +1232,14 @@ private final class DiffSceneBuilder {
             for (lineIndex, lineText) in wrappedLines.enumerated() {
                 let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
                 let glyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: codeColor)
-                let coloredGlyphs = applyHighlightColors(glyphs, ranges: clippedHighlightRanges(for: row.id, segment: lineText))
-                addTextGlyphs(coloredGlyphs, offsetX: codeStartX + codeInsetX, baselineY: baselineY, builder: &builder)
+                let highlightRanges = clippedHighlightRanges(for: row.id, segment: lineText)
+                addTextGlyphs(
+                    glyphs,
+                    highlightRanges: highlightRanges,
+                    offsetX: codeStartX + codeInsetX,
+                    baselineY: baselineY,
+                    builder: &builder
+                )
             }
         }
     }
@@ -1269,6 +1428,7 @@ private final class DiffSceneBuilder {
         codeStartX: CGFloat,
         builder: inout VVSceneBuilder
     ) {
+        let paneRect = CGRect(x: paneX, y: y, width: paneWidth, height: height)
         let background: SIMD4<Float>
         if let cell {
             switch cell.kind {
@@ -1282,7 +1442,7 @@ private final class DiffSceneBuilder {
         builder.add(
             kind: .quad(
                 VVQuadPrimitive(
-                    frame: CGRect(x: paneX, y: y, width: paneWidth, height: height),
+                    frame: paneRect,
                     color: background
                 )
             ),
@@ -1291,50 +1451,59 @@ private final class DiffSceneBuilder {
 
         guard let cell else { return }
 
-        let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-        buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
+        builder.withClip(paneRect) { builder in
+            let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+            buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
 
-        if let lineNumber = cell.lineNumber {
-            let glyphs = lineNumberGlyphs(text: String(lineNumber), color: lineNumberColor(for: cell.kind))
-            let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-            let numX = paneX + markerWidth + gutterColWidth - width - 8
-            addTextGlyphs(glyphs, offsetX: numX, baselineY: firstBaselineY, builder: &builder)
-        }
-
-        let inlineHighlightColor = cell.kind == .deleted ? withAlpha(deletedMarkerColor, 0.22) : withAlpha(addedMarkerColor, 0.22)
-        for (lineIndex, lineText) in wrappedLines.enumerated() {
-            let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-            let baseGlyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: textColor)
-            let glyphs = applyHighlightColors(baseGlyphs, ranges: clippedHighlightRanges(for: cell.rowID, segment: lineText))
-
-            for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
-                let startX = glyphXForCharIndex(range.start, in: glyphs)
-                let endX = glyphXForCharIndex(range.end, in: glyphs)
-                let highlightWidth = endX - startX
-                if highlightWidth > 0 {
-                    builder.add(
-                        kind: .quad(
-                            VVQuadPrimitive(
-                                frame: CGRect(
-                                    x: paneX + codeStartX + codeInsetX + startX,
-                                    y: y + CGFloat(lineIndex) * lineHeight,
-                                    width: highlightWidth,
-                                    height: lineHeight
-                                ),
-                                color: inlineHighlightColor
-                            )
-                        ),
-                        zIndex: 0
-                    )
-                }
+            if let lineNumber = cell.lineNumber {
+                let glyphs = lineNumberGlyphs(text: String(lineNumber), color: lineNumberColor(for: cell.kind))
+                let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
+                let numX = paneX + markerWidth + gutterColWidth - width - 8
+                addTextGlyphs(glyphs, offsetX: numX, baselineY: firstBaselineY, builder: &builder)
             }
 
-            addTextGlyphs(glyphs, offsetX: paneX + codeStartX + codeInsetX, baselineY: baselineY, builder: &builder)
+            let inlineHighlightColor = cell.kind == .deleted ? withAlpha(deletedMarkerColor, 0.22) : withAlpha(addedMarkerColor, 0.22)
+            for (lineIndex, lineText) in wrappedLines.enumerated() {
+                let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+                let baseGlyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: textColor)
+                let highlightRanges = clippedHighlightRanges(for: cell.rowID, segment: lineText)
+
+                for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
+                    let startX = glyphXForCharIndex(range.start, in: baseGlyphs)
+                    let endX = glyphXForCharIndex(range.end, in: baseGlyphs)
+                    let highlightWidth = endX - startX
+                    if highlightWidth > 0 {
+                        builder.add(
+                            kind: .quad(
+                                VVQuadPrimitive(
+                                    frame: CGRect(
+                                        x: paneX + codeStartX + codeInsetX + startX,
+                                        y: y + CGFloat(lineIndex) * lineHeight,
+                                        width: highlightWidth,
+                                        height: lineHeight
+                                    ),
+                                    color: inlineHighlightColor
+                                )
+                            ),
+                            zIndex: 0
+                        )
+                    }
+                }
+
+                addTextGlyphs(
+                    baseGlyphs,
+                    highlightRanges: highlightRanges,
+                    offsetX: paneX + codeStartX + codeInsetX,
+                    baselineY: baselineY,
+                    builder: &builder
+                )
+            }
         }
     }
 
     private func addTextGlyphs(
         _ glyphs: [MDLayoutGlyph],
+        highlightRanges: [(NSRange, SIMD4<Float>)] = [],
         offsetX: CGFloat,
         baselineY: CGFloat,
         builder: inout VVSceneBuilder
@@ -1346,15 +1515,37 @@ private final class DiffSceneBuilder {
         var minY = CGFloat.greatestFiniteMagnitude
         var maxX = -CGFloat.greatestFiniteMagnitude
         var maxY = -CGFloat.greatestFiniteMagnitude
+        var firstResolvedColor: SIMD4<Float>?
+        var rangeIndex = 0
 
         for glyph in glyphs {
+            let resolvedColor: SIMD4<Float>
+            if highlightRanges.isEmpty {
+                resolvedColor = glyph.color
+            } else if let stringIndex = glyph.stringIndex {
+                while rangeIndex < highlightRanges.count && NSMaxRange(highlightRanges[rangeIndex].0) <= stringIndex {
+                    rangeIndex += 1
+                }
+                if rangeIndex < highlightRanges.count {
+                    let (range, color) = highlightRanges[rangeIndex]
+                    resolvedColor = (stringIndex >= range.location && stringIndex < NSMaxRange(range)) ? color : glyph.color
+                } else {
+                    resolvedColor = glyph.color
+                }
+            } else {
+                resolvedColor = glyph.color
+            }
+
+            if firstResolvedColor == nil {
+                firstResolvedColor = resolvedColor
+            }
             let position = CGPoint(x: glyph.position.x + offsetX, y: baselineY)
             vvGlyphs.append(
                 VVTextGlyph(
                     glyphID: UInt16(glyph.glyphID),
                     position: position,
                     size: glyph.size,
-                    color: glyph.color,
+                    color: resolvedColor,
                     fontVariant: toVVFontVariant(glyph.fontVariant),
                     fontSize: glyph.fontSize,
                     fontName: glyph.fontName,
@@ -1377,7 +1568,7 @@ private final class DiffSceneBuilder {
             kind: .textRun(
                 VVTextRunPrimitive(
                     glyphs: vvGlyphs,
-                    style: VVTextRunStyle(color: vvGlyphs.first?.color ?? textColor),
+                    style: VVTextRunStyle(color: firstResolvedColor ?? textColor),
                     lineBounds: runBounds,
                     runBounds: runBounds,
                     position: CGPoint(x: offsetX, y: baselineY),
@@ -1385,48 +1576,6 @@ private final class DiffSceneBuilder {
                 )
             )
         )
-    }
-
-    private func applyHighlightColors(_ glyphs: [MDLayoutGlyph], ranges: [(NSRange, SIMD4<Float>)]) -> [MDLayoutGlyph] {
-        guard !glyphs.isEmpty, !ranges.isEmpty else { return glyphs }
-
-        var colored: [MDLayoutGlyph] = []
-        colored.reserveCapacity(glyphs.count)
-        var rangeIndex = 0
-
-        for glyph in glyphs {
-            guard let idx = glyph.stringIndex else {
-                colored.append(glyph)
-                continue
-            }
-
-            while rangeIndex < ranges.count && NSMaxRange(ranges[rangeIndex].0) <= idx {
-                rangeIndex += 1
-            }
-
-            if rangeIndex < ranges.count {
-                let (range, color) = ranges[rangeIndex]
-                if idx >= range.location && idx < NSMaxRange(range) {
-                    colored.append(
-                        MDLayoutGlyph(
-                            glyphID: glyph.glyphID,
-                            position: glyph.position,
-                            size: glyph.size,
-                            color: color,
-                            fontVariant: glyph.fontVariant,
-                            fontSize: glyph.fontSize,
-                            fontName: glyph.fontName,
-                            stringIndex: glyph.stringIndex
-                        )
-                    )
-                    continue
-                }
-            }
-
-            colored.append(glyph)
-        }
-
-        return colored
     }
 
     private func glyphXForCharIndex(_ charIndex: Int, in glyphs: [MDLayoutGlyph]) -> CGFloat {
@@ -1506,6 +1655,26 @@ private final class DiffSceneBuilder {
             }
         }
         return result.isEmpty ? [WrappedTextSegment(text: "", start: 0)] : result
+    }
+
+    private func materializeWrappedTextSegments(
+        _ descriptors: [VVDiffWrappedTextDescriptor],
+        from sourceText: String
+    ) -> [WrappedTextSegment] {
+        guard !descriptors.isEmpty else { return [WrappedTextSegment(text: "", start: 0)] }
+        return descriptors.map { descriptor in
+            guard descriptor.length > 0 else {
+                return WrappedTextSegment(text: "", start: descriptor.start)
+            }
+            let boundedStart = min(max(0, descriptor.start), sourceText.count)
+            let boundedLength = min(max(0, descriptor.length), sourceText.count - boundedStart)
+            let startIndex = sourceText.index(sourceText.startIndex, offsetBy: boundedStart)
+            let endIndex = sourceText.index(startIndex, offsetBy: boundedLength)
+            return WrappedTextSegment(
+                text: String(sourceText[startIndex..<endIndex]),
+                start: descriptor.start
+            )
+        }
     }
 
     private func measureCharWidth() -> CGFloat {
