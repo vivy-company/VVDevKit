@@ -184,24 +184,7 @@ public class CompletionProvider {
         }
 
         let location = textView.selectedRange().location
-        let text = textView.string
-
-        var line = 0
-        var character = 0
-
-        for (index, char) in text.enumerated() {
-            if index >= location {
-                break
-            }
-            if char == "\n" {
-                line += 1
-                character = 0
-            } else {
-                character += 1
-            }
-        }
-
-        return VVTextPosition(line: line, character: character)
+        return VVTextCoordinateConverter(text: textView.string).position(atUTF16Offset: location)
     }
 
     private func handleCompletionResponse(_ items: [VVCompletionItem]) {
@@ -231,9 +214,13 @@ public class CompletionProvider {
         }
 
         if prefixLength > 0 {
-            let start = textView.string.index(textView.string.startIndex, offsetBy: anchorPosition)
-            let end = textView.string.index(start, offsetBy: prefixLength)
-            currentPrefix = String(textView.string[start..<end]).lowercased()
+            let range = NSRange(location: anchorPosition, length: prefixLength)
+            if let prefix = VVTextCoordinateConverter(text: textView.string).substring(utf16Range: range) {
+                currentPrefix = prefix.lowercased()
+            } else {
+                dismissCompletion()
+                return
+            }
         } else {
             currentPrefix = ""
         }

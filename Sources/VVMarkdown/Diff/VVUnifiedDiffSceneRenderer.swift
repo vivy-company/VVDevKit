@@ -109,6 +109,12 @@ public enum VVUnifiedDiffSceneRenderer {
     }
 }
 
+private enum UnifiedDiffParsingCache {
+    static let hunkHeaderRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@"#
+    )
+}
+
 private enum UnifiedDiffHighlightCache {
     private static let lock = NSLock()
     private static var cache: [Int: [Int: [(NSRange, SIMD4<Float>)]]] = [:]
@@ -651,8 +657,7 @@ private func isMetadataLine(_ line: String) -> Bool {
 }
 
 private func parseHunkHeader(_ line: String) -> (oldStart: Int, newStart: Int)? {
-    let pattern = #"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@"#
-    guard let regex = try? NSRegularExpression(pattern: pattern),
+    guard let regex = UnifiedDiffParsingCache.hunkHeaderRegex,
           let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
           let oldRange = Range(match.range(at: 1), in: line),
           let newRange = Range(match.range(at: 2), in: line),
@@ -1329,36 +1334,18 @@ private func highlightedRanges(
 }
 
 private func detectedLanguageConfiguration(for unifiedDiff: String) -> LanguageConfiguration? {
-    for line in unifiedDiff.components(separatedBy: .newlines) where line.hasPrefix("+++ ") {
+    var detected: LanguageConfiguration?
+    unifiedDiff.enumerateLines { line, stop in
+        guard line.hasPrefix("+++ ") else { return }
         let path = line
             .replacingOccurrences(of: "+++ b/", with: "")
             .replacingOccurrences(of: "+++ ", with: "")
         if path != "/dev/null", let config = LanguageRegistry.shared.language(forPath: path) {
-            return config
+            detected = config
+            stop = true
         }
     }
-    return nil
-}
-
-private func makeJoinedCodeBuffer(from rows: [UnifiedDiffRow]) -> (text: String, rowRanges: [Int: NSRange]) {
-    let codeRows = rows.filter { $0.kind.isCode }
-    var totalUTF16 = 0
-    for row in codeRows {
-        totalUTF16 += row.text.utf16.count + 1
-    }
-
-    var text = ""
-    text.reserveCapacity(totalUTF16)
-    var rowRanges: [Int: NSRange] = [:]
-    var offset = 0
-    for row in codeRows {
-        let length = row.text.utf16.count
-        rowRanges[row.id] = NSRange(location: offset, length: length)
-        text.append(row.text)
-        text.append("\n")
-        offset += length + 1
-    }
-    return (text, rowRanges)
+    return detected
 }
 
 private func computeHighlightedRanges(
@@ -1367,78 +1354,15 @@ private func computeHighlightedRanges(
     theme: MarkdownTheme,
     font: VVFont
 ) async -> [Int: [(NSRange, SIMD4<Float>)]] {
-    let codeRows = rows.filter { $0.kind.isCode }
-    guard !codeRows.isEmpty else { return [:] }
-
-    let maxHighlightRows = 3_500
-    let maxHighlightUTF16 = 360_000
-    let maxSingleLineUTF16 = 8_192
-    guard codeRows.count <= maxHighlightRows else { return [:] }
-    var totalUTF16 = 0
-    for row in codeRows {
-        let rowUTF16 = row.text.utf16.count
-        if rowUTF16 > maxSingleLineUTF16 { return [:] }
-        totalUTF16 += rowUTF16 + 1
-        if totalUTF16 > maxHighlightUTF16 { return [:] }
-    }
-
-    let highlightTheme: HighlightTheme = brightness(of: theme.codeBackgroundColor) > 0.58 ? .defaultLight : .defaultDark
-    let highlighter = TreeSitterHighlighter(theme: highlightTheme)
-    let joined = makeJoinedCodeBuffer(from: rows)
-
-    do {
-        try await highlighter.setLanguage(language)
-        _ = try await highlighter.parse(joined.text)
-        let sortedRanges = try await highlighter.allHighlights().sorted { $0.range.location < $1.range.location }
-        var result: [Int: [(NSRange, SIMD4<Float>)]] = [:]
-        let sortedRows = joined.rowRanges.sorted { $0.value.location < $1.value.location }
-        var rangeStartIndex = 0
-
-        for (rowID, rowNSRange) in sortedRows {
-            var rowRanges: [(NSRange, SIMD4<Float>)] = []
-            while rangeStartIndex < sortedRanges.count {
-                let rangeEnd = NSMaxRange(sortedRanges[rangeStartIndex].range)
-                if rangeEnd <= rowNSRange.location {
-                    rangeStartIndex += 1
-                    continue
-                }
-                break
-            }
-
-            var index = rangeStartIndex
-            while index < sortedRanges.count {
-                let range = sortedRanges[index]
-                if range.range.location >= NSMaxRange(rowNSRange) {
-                    break
-                }
-                let intersection = NSIntersectionRange(range.range, rowNSRange)
-                if intersection.length > 0 {
-                    let localStart = intersection.location - rowNSRange.location
-                    let localRange = NSRange(location: localStart, length: intersection.length)
-                    let attrs = range.style.attributes(baseFont: font)
-                    let color = ((attrs[.foregroundColor] as? NSColor) ?? .white).simdRGBA
-                    rowRanges.append((localRange, color))
-                }
-                index += 1
-            }
-            if !rowRanges.isEmpty {
-                result[rowID] = rowRanges
-            }
-        }
-        return result
-    } catch {
-        return [:]
-    }
-}
-
-private extension NSColor {
-    var simdRGBA: SIMD4<Float> {
-        let color = usingColorSpace(.sRGB) ?? self
-        var r: CGFloat = 0
-        var g: CGFloat = 0
-        var b: CGFloat = 0
-        var a: CGFloat = 0
-        color.getRed(&r, green: &g, blue: &b, alpha: &a)
-        return SIMD4(Float(r), Float(g), Float(b), Float(a))
-    }
+    await VVDiffHighlighting.computeHighlightedRanges(
+        rows: rows,
+        language: language,
+        highlightTheme: VVDiffHighlighting.highlightTheme(
+            isDarkBackground: !(brightness(of: theme.codeBackgroundColor) > 0.58)
+        ),
+        font: font,
+        rowID: \.id,
+        rowText: \.text,
+        rowIsCode: { $0.kind.isCode }
+    )
 }

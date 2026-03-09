@@ -187,41 +187,7 @@ public class DiagnosticsRenderer {
     }
 
     private func convertToNSRange(_ range: VVTextRange, in text: String) -> NSRange? {
-        var currentLine = 0
-        var currentChar = 0
-        var startOffset: Int?
-        var endOffset: Int?
-
-        for (index, char) in text.enumerated() {
-            // Check for start position
-            if currentLine == range.start.line && currentChar == range.start.character {
-                startOffset = index
-            }
-
-            // Check for end position
-            if currentLine == range.end.line && currentChar == range.end.character {
-                endOffset = index
-                break
-            }
-
-            if char == "\n" {
-                currentLine += 1
-                currentChar = 0
-            } else {
-                currentChar += 1
-            }
-        }
-
-        // Handle end of file
-        if endOffset == nil && currentLine == range.end.line {
-            endOffset = text.count
-        }
-
-        guard let start = startOffset, let end = endOffset else {
-            return nil
-        }
-
-        return NSRange(location: start, length: max(0, end - start))
+        VVTextCoordinateConverter(text: text).nsRange(for: range)
     }
 
     /// Custom attribute key for storing diagnostic references

@@ -240,6 +240,51 @@ final class HighlighterTests: XCTestCase {
         // Just verify no crash occurs
         XCTAssertNotNil(theme)
     }
+
+    func testCanonicalLanguageIdentifierAliases() {
+        let aliases: [String: String] = [
+            "embeddedtemplate": "embedded-template",
+            "gitconfig": "git-config",
+            "gitrebase": "git-rebase",
+            "godotresource": "godot-resource",
+            "haskellliterate": "haskell-literate",
+            "haskellpersistent": "haskell-persistent",
+            "janetsimple": "janet-simple",
+            "llvmmir": "llvm-mir",
+            "markdowninline": "markdown-inline",
+            "rustformatargs": "rust-format-args",
+        ]
+
+        for (legacy, canonical) in aliases {
+            XCTAssertEqual(
+                HighlightingLanguageIdentifiers.canonicalIdentifier(for: legacy),
+                canonical,
+                "Expected \(legacy) to canonicalize to \(canonical)"
+            )
+            XCTAssertEqual(
+                HighlightingLanguageIdentifiers.canonicalIdentifier(for: canonical),
+                canonical,
+                "Expected canonical identifier \(canonical) to remain stable"
+            )
+            XCTAssertEqual(
+                HighlightingLanguageIdentifiers.highlightsQueryResourceName(for: legacy),
+                "\(canonical)-highlights",
+                "Expected \(legacy) to resolve to the canonical query resource"
+            )
+        }
+    }
+
+    func testRegisteredLanguagesUseCanonicalIdentifiers() {
+        let languages = LanguageRegistry.shared.registeredLanguages
+
+        XCTAssertTrue(languages.contains("embedded-template"))
+        XCTAssertTrue(languages.contains("git-config"))
+        XCTAssertTrue(languages.contains("markdown-inline"))
+
+        XCTAssertFalse(languages.contains("embeddedtemplate"))
+        XCTAssertFalse(languages.contains("gitconfig"))
+        XCTAssertFalse(languages.contains("markdowninline"))
+    }
 }
 
 // Helper extension for testing

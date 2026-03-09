@@ -102,101 +102,10 @@ final class EditorTests: XCTestCase {
     }
 
     func testAllLanguages() {
-        XCTAssertEqual(VVLanguage.allLanguages.count, 17)
+        XCTAssertEqual(VVLanguage.allLanguages.count, 18)
         XCTAssertTrue(VVLanguage.allLanguages.contains(.swift))
         XCTAssertTrue(VVLanguage.allLanguages.contains(.rust))
         XCTAssertTrue(VVLanguage.allLanguages.contains(.python))
-    }
-
-    // MARK: - VVEditorContainerView Tests
-
-    func testEditorContainerInit() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-        XCTAssertNotNil(editor)
-        XCTAssertEqual(editor.text, "")
-    }
-
-    func testEditorSetText() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-
-        editor.setText("Hello World")
-        XCTAssertEqual(editor.text, "Hello World")
-    }
-
-    func testEditorSetMultilineText() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-
-        let multilineText = """
-        Line 1
-        Line 2
-        Line 3
-        """
-        editor.setText(multilineText)
-        XCTAssertEqual(editor.text, multilineText)
-    }
-
-    func testEditorThemeChange() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-
-        // Should not crash
-        editor.setTheme(.defaultLight)
-        editor.setTheme(.defaultDark)
-    }
-
-    func testEditorConfigurationChange() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-
-        let newConfig = VVConfiguration.default.with(wrapLines: true)
-        editor.setConfiguration(newConfig)
-        // Should not crash
-    }
-
-    func testEditorLanguageChange() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-
-        editor.setLanguage(.swift)
-        editor.setLanguage(.rust)
-        editor.setLanguage(.python)
-        // Should not crash
-    }
-
-    func testEditorGitHunks() {
-        let editor = VVEditorContainerView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            configuration: .default,
-            theme: .defaultDark
-        )
-
-        let hunks = [
-            VVDiffHunk(oldStart: 1, oldCount: 3, newStart: 1, newCount: 4, changeType: .added)
-        ]
-        editor.setGitHunks(hunks)
-        editor.setGitHunks([])
-        // Should not crash
     }
 
     // MARK: - VVTextView Tests

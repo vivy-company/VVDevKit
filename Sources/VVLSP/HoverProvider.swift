@@ -195,23 +195,7 @@ public class HoverProvider {
             return VVTextPosition(line: 0, character: 0)
         }
 
-        let text = textView.string
-        var line = 0
-        var character = 0
-
-        for (index, char) in text.enumerated() {
-            if index >= charIndex {
-                break
-            }
-            if char == "\n" {
-                line += 1
-                character = 0
-            } else {
-                character += 1
-            }
-        }
-
-        return VVTextPosition(line: line, character: character)
+        return VVTextCoordinateConverter(text: textView.string).position(atUTF16Offset: charIndex)
     }
 }
 

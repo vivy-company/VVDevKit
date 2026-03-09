@@ -90,44 +90,14 @@ final class HeadlessSceneStressHarness {
     }
 
     private func render(scene: VVScene, visibleRect: CGRect, encoder: MTLRenderCommandEncoder) {
-        var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-        var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-        var underlines: [LineInstance] = []
-        var strikethroughs: [LineInstance] = []
-
-        func flushTextBatches() {
-            renderGlyphBatches(glyphInstances, encoder: encoder, isColor: false)
-            renderGlyphBatches(colorGlyphInstances, encoder: encoder, isColor: true)
-            if !underlines.isEmpty, let buffer = renderer.makeBuffer(for: underlines) {
-                renderer.renderLinkUnderlines(encoder: encoder, instances: buffer, instanceCount: underlines.count)
-            }
-            if !strikethroughs.isEmpty, let buffer = renderer.makeBuffer(for: strikethroughs) {
-                renderer.renderStrikethroughs(encoder: encoder, instances: buffer, instanceCount: strikethroughs.count)
-            }
-            glyphInstances.removeAll(keepingCapacity: true)
-            colorGlyphInstances.removeAll(keepingCapacity: true)
-            underlines.removeAll(keepingCapacity: true)
-            strikethroughs.removeAll(keepingCapacity: true)
-        }
-
-        for primitive in scene.orderedPrimitives() {
-            guard primitiveIntersectsVisibleRect(primitive, visibleRect: visibleRect) else { continue }
-            switch primitive.kind {
-            case .textRun(let run):
-                appendTextPrimitive(
-                    run,
-                    glyphInstances: &glyphInstances,
-                    colorGlyphInstances: &colorGlyphInstances,
-                    underlines: &underlines,
-                    strikethroughs: &strikethroughs
-                )
-            default:
-                flushTextBatches()
-                renderPrimitive(primitive, encoder: encoder)
-            }
-        }
-
-        flushTextBatches()
+        let sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
+        sceneRenderer.renderScene(
+            scene,
+            orderedPrimitives: scene.orderedPrimitives(),
+            visibleRect: visibleRect,
+            encoder: encoder,
+            renderer: renderer
+        )
     }
 
     private func primitiveIntersectsVisibleRect(_ primitive: VVPrimitive, visibleRect: CGRect) -> Bool {

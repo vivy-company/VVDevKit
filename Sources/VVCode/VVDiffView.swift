@@ -252,31 +252,6 @@ private func parseDiffRows(unifiedDiff: String) -> [VVDiffRow] {
     VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff).rows.map(mapDiffRow)
 }
 
-private func makeJoinedCodeBuffer(from rows: [VVDiffRow]) -> (text: String, rowRanges: [Int: NSRange]) {
-    let codeRows = rows.filter { $0.kind.isCode }
-    var totalUTF16 = 0
-    for row in codeRows {
-        totalUTF16 += row.text.utf16.count + 1
-    }
-
-    var text = ""
-    text.reserveCapacity(totalUTF16)
-
-    var rowRanges: [Int: NSRange] = [:]
-    rowRanges.reserveCapacity(codeRows.count)
-
-    var offset = 0
-    for row in codeRows {
-        let length = row.text.utf16.count
-        rowRanges[row.id] = NSRange(location: offset, length: length)
-        text.append(row.text)
-        text.append("\n")
-        offset += length + 1
-    }
-
-    return (text: text, rowRanges: rowRanges)
-}
-
 // MARK: - VVDiffRenderer
 
 private typealias MDLayoutGlyph = VVMarkdown.LayoutGlyph
@@ -1095,93 +1070,21 @@ private final class VVDiffMetalView: NSView {
         theme: VVTheme,
         font: NSFont
     ) async -> [Int: [(NSRange, SIMD4<Float>)]] {
-        let codeRows = rows.filter { $0.kind.isCode }
-        guard !codeRows.isEmpty,
-              let language,
+        guard let language,
               let languageConfig = LanguageRegistry.shared.language(for: language.identifier) else {
             return [:]
         }
-
-        // Guardrails: skip expensive highlighting for large or pathological diffs.
-        let maxHighlightRows = 3_500
-        let maxHighlightUTF16 = 360_000
-        let maxSingleLineUTF16 = 8_192
-        guard codeRows.count <= maxHighlightRows else { return [:] }
-        var totalUTF16 = 0
-        for row in codeRows {
-            if Task.isCancelled { return [:] }
-            let rowUTF16 = row.text.utf16.count
-            if rowUTF16 > maxSingleLineUTF16 { return [:] }
-            totalUTF16 += rowUTF16 + 1
-            if totalUTF16 > maxHighlightUTF16 {
-                return [:]
-            }
-        }
-
-        let highlightTheme: HighlightTheme = theme.backgroundColor.brightnessComponent < 0.5
-            ? .defaultDark
-            : .defaultLight
-
-        let highlighter = TreeSitterHighlighter(theme: highlightTheme)
-        let joined = makeJoinedCodeBuffer(from: rows)
-
-        do {
-            try await highlighter.setLanguage(languageConfig)
-            if Task.isCancelled { return [:] }
-            _ = try await highlighter.parse(joined.text)
-            if Task.isCancelled { return [:] }
-            let sortedRanges = try await highlighter.allHighlights().sorted { lhs, rhs in
-                lhs.range.location < rhs.range.location
-            }
-            if Task.isCancelled { return [:] }
-
-            var result: [Int: [(NSRange, SIMD4<Float>)]] = [:]
-            let sortedRows = joined.rowRanges.sorted { lhs, rhs in
-                lhs.value.location < rhs.value.location
-            }
-            var rangeStartIndex = 0
-
-            for (rowID, rowNSRange) in sortedRows {
-                if Task.isCancelled { return [:] }
-                var rowRanges: [(NSRange, SIMD4<Float>)] = []
-                while rangeStartIndex < sortedRanges.count {
-                    let rangeEnd = NSMaxRange(sortedRanges[rangeStartIndex].range)
-                    if rangeEnd <= rowNSRange.location {
-                        rangeStartIndex += 1
-                        continue
-                    }
-                    break
-                }
-
-                var index = rangeStartIndex
-                while index < sortedRanges.count {
-                    let range = sortedRanges[index]
-                    if range.range.location >= NSMaxRange(rowNSRange) {
-                        break
-                    }
-
-                    let intersection = NSIntersectionRange(range.range, rowNSRange)
-                    if intersection.length > 0 {
-                        let localStart = intersection.location - rowNSRange.location
-                        let localRange = NSRange(location: localStart, length: intersection.length)
-
-                        let attrs = range.style.attributes(baseFont: font)
-                        let nsColor = attrs[.foregroundColor] as? NSColor ?? NSColor.white
-                        let color = nsColor.simdColor
-
-                        rowRanges.append((localRange, color))
-                    }
-                    index += 1
-                }
-                if !rowRanges.isEmpty {
-                    result[rowID] = rowRanges
-                }
-            }
-
-            return result
-        } catch {
-            return [:]
-        }
+        return await VVDiffHighlighting.computeHighlightedRanges(
+            rows: rows,
+            language: languageConfig,
+            highlightTheme: VVDiffHighlighting.highlightTheme(
+                isDarkBackground: theme.backgroundColor.brightnessComponent < 0.5
+            ),
+            font: font,
+            rowID: \.id,
+            rowText: \.text,
+            rowIsCode: { $0.kind.isCode }
+        )
     }
 
     override func viewDidMoveToWindow() {

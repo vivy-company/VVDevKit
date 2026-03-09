@@ -6,7 +6,13 @@ import VVHighlighting
 import SwiftTreeSitter
 import VVLSP
 
-/// Metal-based editor container view - replaces VVEditorContainerView for GPU-accelerated rendering
+public protocol VVEditorDelegate: AnyObject {
+    func editorDidChangeText(_ text: String)
+    func editorDidChangeSelection(_ range: NSRange)
+    func editorDidChangeCursorPosition(_ position: VVTextPosition)
+}
+
+/// Metal-based editor container view for GPU-accelerated rendering.
 public final class VVMetalEditorContainerView: NSView {
 
     // MARK: - Properties
@@ -2211,7 +2217,7 @@ public final class VVMetalEditorContainerView: NSView {
         return columns
     }
 
-    // MARK: - Public API (VVEditorContainerView compatible)
+    // MARK: - Public API
 
     /// Set the language for syntax highlighting
     public func setLanguage(_ language: VVLanguage) {

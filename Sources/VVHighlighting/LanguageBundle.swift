@@ -121,7 +121,7 @@ public final class LanguageRegistry: @unchecked Sendable {
             ("elixir", ["ex", "exs"]),
             ("elm", ["elm"]),
             ("elvish", ["elv"]),
-            ("embeddedtemplate", ["erb", "ejs"]),
+            ("embedded-template", ["erb", "ejs"]),
             ("erlang", ["erl", "hrl"]),
             ("fennel", ["fnl"]),
             ("fga", ["fga"]),
@@ -137,15 +137,15 @@ public final class LanguageRegistry: @unchecked Sendable {
             ("ghostty", ["ghostty"]),
             ("gitattributes", [".gitattributes"]),
             ("gitcommit", ["COMMIT_EDITMSG"]),
-            ("gitconfig", [".gitconfig", ".gitmodules"]),
+            ("git-config", [".gitconfig", ".gitmodules"]),
             ("gitignore", [".gitignore", ".dockerignore"]),
-            ("gitrebase", ["git-rebase-todo"]),
+            ("git-rebase", ["git-rebase-todo"]),
             ("gleam", ["gleam"]),
             ("glimmer", ["hbs", "handlebars"]),
             ("glsl", ["glsl", "vert", "frag", "geom", "comp"]),
             ("gn", ["gn", "gni"]),
             ("go", ["go"]),
-            ("godotresource", ["tres", "tscn"]),
+            ("godot-resource", ["tres", "tscn"]),
             ("gomod", ["go.mod"]),
             ("gotmpl", ["tmpl", "gotmpl"]),
             ("gowork", ["go.work"]),
@@ -154,8 +154,8 @@ public final class LanguageRegistry: @unchecked Sendable {
             ("gren", ["gren"]),
             ("groovy", ["groovy", "gradle"]),
             ("hare", ["ha"]),
-            ("haskellliterate", ["lhs"]),
-            ("haskellpersistent", ["persistentmodels"]),
+            ("haskell-literate", ["lhs"]),
+            ("haskell-persistent", ["persistentmodels"]),
             ("hcl", ["hcl", "tf", "tfvars"]),
             ("hdl", ["hdl"]),
             ("heex", ["heex"]),
@@ -170,7 +170,7 @@ public final class LanguageRegistry: @unchecked Sendable {
             ("ini", ["ini", "cfg", "desktop"]),
             ("ink", ["ink"]),
             ("inko", ["inko"]),
-            ("janetsimple", ["janet"]),
+            ("janet-simple", ["janet"]),
             ("java", ["java"]),
             ("javascript", ["js", "mjs", "cjs", "jsx"]),
             ("jinja2", ["j2", "jinja", "jinja2"]),
@@ -194,14 +194,14 @@ public final class LanguageRegistry: @unchecked Sendable {
             ("lean", ["lean"]),
             ("ledger", ["ledger", "journal"]),
             ("llvm", ["ll"]),
-            ("llvmmir", ["mir"]),
+            ("llvm-mir", ["mir"]),
             ("log", ["log"]),
             ("lpf", ["lpf"]),
             ("luap", ["lua"]),
             ("make", ["mk", "Makefile", "makefile", "GNUmakefile"]),
             ("markdoc", ["markdoc"]),
             ("markdown", ["md", "markdown", "mkd"]),
-            ("markdowninline", []),
+            ("markdown-inline", []),
             ("matlab", ["m", "mat"]),
             ("mermaid", ["mmd", "mermaid"]),
             ("meson", ["meson.build"]),
@@ -243,7 +243,7 @@ public final class LanguageRegistry: @unchecked Sendable {
             ("rpmspec", ["spec"]),
             ("rshtml", ["rshtml"]),
             ("rust", ["rs"]),
-            ("rustformatargs", []),
+            ("rust-format-args", []),
             ("scfg", ["scfg"]),
             ("scheme", ["scm", "ss", "rkt"]),
             ("scss", ["scss"]),
@@ -307,21 +307,22 @@ public final class LanguageRegistry: @unchecked Sendable {
 
     /// Lazily load and cache a language configuration
     private func loadConfiguration(for identifier: String) -> LanguageConfiguration? {
+        let canonicalIdentifier = HighlightingLanguageIdentifiers.canonicalIdentifier(for: identifier)
         // Check cache first (already under lock)
-        if let cached = loadedConfigs[identifier] {
+        if let cached = loadedConfigs[canonicalIdentifier] {
             return cached
         }
 
         // Load the configuration
         let config: LanguageConfiguration?
-        if identifier == "swift" {
+        if canonicalIdentifier == "swift" {
             config = try? SwiftLanguage.configuration()
         } else {
-            config = Self.configuration(for: identifier)
+            config = Self.configuration(for: canonicalIdentifier)
         }
 
         if let config = config {
-            loadedConfigs[identifier] = config
+            loadedConfigs[canonicalIdentifier] = config
         }
         return config
     }
@@ -331,10 +332,11 @@ public final class LanguageRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        loadedConfigs[config.identifier] = config
-        knownLanguages.append((config.identifier, extensions))
+        let canonicalIdentifier = HighlightingLanguageIdentifiers.canonicalIdentifier(for: config.identifier)
+        loadedConfigs[canonicalIdentifier] = config
+        knownLanguages.append((canonicalIdentifier, extensions))
         for ext in extensions {
-            extensionToId[ext.lowercased()] = config.identifier
+            extensionToId[ext.lowercased()] = canonicalIdentifier
         }
     }
 
@@ -348,7 +350,7 @@ public final class LanguageRegistry: @unchecked Sendable {
     public func language(for identifier: String) -> LanguageConfiguration? {
         lock.lock()
         defer { lock.unlock() }
-        return loadConfiguration(for: identifier)
+        return loadConfiguration(for: HighlightingLanguageIdentifiers.canonicalIdentifier(for: identifier))
     }
 
     /// Get language by file extension (lazy loading)

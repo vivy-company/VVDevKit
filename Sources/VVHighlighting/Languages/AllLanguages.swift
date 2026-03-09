@@ -1,6 +1,31 @@
 import Foundation
 import SwiftTreeSitter
 
+enum HighlightingLanguageIdentifiers {
+    private static let legacyAliases: [String: String] = [
+        "embeddedtemplate": "embedded-template",
+        "gitconfig": "git-config",
+        "gitrebase": "git-rebase",
+        "godotresource": "godot-resource",
+        "haskellliterate": "haskell-literate",
+        "haskellpersistent": "haskell-persistent",
+        "janetsimple": "janet-simple",
+        "llvmmir": "llvm-mir",
+        "markdowninline": "markdown-inline",
+        "rustformatargs": "rust-format-args",
+    ]
+
+    static func canonicalIdentifier(for identifier: String) -> String {
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return normalized }
+        return legacyAliases[normalized] ?? normalized
+    }
+
+    static func highlightsQueryResourceName(for identifier: String) -> String {
+        "\(canonicalIdentifier(for: identifier))-highlights"
+    }
+}
+
 // MARK: - Dynamic Grammar Loader
 // Loads tree-sitter grammars on-demand using dlopen/dlsym
 // This avoids loading all 200+ grammars into memory at startup
@@ -25,22 +50,23 @@ public final class DynamicGrammarLoader {
     /// - Parameter identifier: Language identifier (e.g., "swift", "python")
     /// - Returns: The Language if successfully loaded, nil otherwise
     public func loadLanguage(_ identifier: String) -> Language? {
+        let canonicalIdentifier = HighlightingLanguageIdentifiers.canonicalIdentifier(for: identifier)
         lock.lock()
         defer { lock.unlock() }
 
         // Return cached if already loaded
-        if let cached = loadedLanguages[identifier] {
+        if let cached = loadedLanguages[canonicalIdentifier] {
             return cached
         }
 
         // Get the C function name for this language
-        guard let functionName = grammarFunctionName(for: identifier) else {
+        guard let functionName = grammarFunctionName(for: canonicalIdentifier) else {
             return nil
         }
 
         // Build the dylib name from identifier
         // SPM names them: libTreeSitterSwift.dylib, libTreeSitterPython.dylib, etc.
-        let dylibName = dylibNameForIdentifier(identifier)
+        let dylibName = dylibNameForIdentifier(canonicalIdentifier)
 
         // Search paths for grammar dylibs
         var searchPaths: [String] = []
@@ -90,15 +116,16 @@ public final class DynamicGrammarLoader {
         // Try each path
         for path in searchPaths {
             if let handle = dlopen(path, RTLD_LAZY) {
-                loadedHandles[identifier] = handle
+                loadedHandles[canonicalIdentifier] = handle
 
                 if let ptr = dlsym(handle, functionName) {
                     let langFunc = unsafeBitCast(ptr, to: (@convention(c) () -> OpaquePointer).self)
                     let language = Language(language: langFunc())
-                    loadedLanguages[identifier] = language
+                    loadedLanguages[canonicalIdentifier] = language
                     return language
                 }
                 dlclose(handle)
+                loadedHandles.removeValue(forKey: canonicalIdentifier)
             }
         }
 
@@ -107,6 +134,7 @@ public final class DynamicGrammarLoader {
 
     /// Get the dylib filename for a language identifier
     private func dylibNameForIdentifier(_ identifier: String) -> String {
+        let identifier = HighlightingLanguageIdentifiers.canonicalIdentifier(for: identifier)
         // Map identifier to SPM product name - all 220+ grammars
         let productNames: [String: String] = [
             "ada": "TreeSitterAda",
@@ -346,6 +374,7 @@ public final class DynamicGrammarLoader {
 
     /// Get the C function name for a language
     private func grammarFunctionName(for identifier: String) -> String? {
+        let identifier = HighlightingLanguageIdentifiers.canonicalIdentifier(for: identifier)
         // Map identifier to tree_sitter_xxx function name
         let functionNames: [String: String] = [
             "ada": "tree_sitter_ada",
@@ -589,13 +618,14 @@ public final class DynamicGrammarLoader {
 public extension LanguageRegistry {
     /// Get or create configuration for a language by identifier (lazy loading)
     static func configuration(for identifier: String) -> LanguageConfiguration? {
+        let canonicalIdentifier = HighlightingLanguageIdentifiers.canonicalIdentifier(for: identifier)
         // Use dynamic loader to get the language
-        guard let language = DynamicGrammarLoader.shared.loadLanguage(identifier) else {
+        guard let language = DynamicGrammarLoader.shared.loadLanguage(canonicalIdentifier) else {
             return nil
         }
 
         // Load the highlight query
-        let queryName = "\(identifier)-highlights"
+        let queryName = HighlightingLanguageIdentifiers.highlightsQueryResourceName(for: canonicalIdentifier)
         guard let queryURL = Bundle.module.url(forResource: queryName, withExtension: "scm", subdirectory: "queries"),
               let queryString = try? String(contentsOf: queryURL, encoding: .utf8) else {
             return nil
@@ -603,8 +633,8 @@ public extension LanguageRegistry {
 
         do {
             let config = try LanguageConfiguration(
-                identifier: identifier,
-                displayName: identifier.capitalized,
+                identifier: canonicalIdentifier,
+                displayName: canonicalIdentifier.capitalized,
                 language: language,
                 highlightQuery: queryString
             )
