@@ -26,14 +26,24 @@ public struct MarkdownSceneRenderingBehavior {
 }
 
 public final class MarkdownScenePrimitiveRenderer {
+    private struct PreparedTextRun {
+        var glyphBatches: [[MarkdownGlyphInstance]]
+        var colorGlyphBatches: [[MarkdownGlyphInstance]]
+    }
+
     private let baseFont: VVFont
     private let baseFontAscent: CGFloat
     private let baseFontDescent: CGFloat
     private var behavior: MarkdownSceneRenderingBehavior
     private var glyphInstances: [[MarkdownGlyphInstance]] = []
     private var colorGlyphInstances: [[MarkdownGlyphInstance]] = []
+    private var quadInstances: [QuadInstance] = []
+    private var roundedQuadInstances: [QuadInstance] = []
     private var underlines: [LineInstance] = []
     private var strikethroughs: [LineInstance] = []
+    private var preparedTextRunCache: [VVTextRunPrimitive: PreparedTextRun] = [:]
+    private var preparedTextRunOrder: [VVTextRunPrimitive] = []
+    private static let maxPreparedTextRuns = 2048
 
     public init(baseFont: VVFont, behavior: MarkdownSceneRenderingBehavior = MarkdownSceneRenderingBehavior()) {
         self.baseFont = baseFont
@@ -50,6 +60,7 @@ public final class MarkdownScenePrimitiveRenderer {
         _ scene: VVScene,
         orderedPrimitives: [VVPrimitive],
         visibleRect: CGRect? = nil,
+        visibilityIndex: VVPrimitiveVisibilityIndex? = nil,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
         itemOffset: CGPoint = .zero,
@@ -71,13 +82,25 @@ public final class MarkdownScenePrimitiveRenderer {
             if !strikethroughs.isEmpty, let buffer = renderer.makeBuffer(for: strikethroughs) {
                 renderer.renderStrikethroughs(encoder: encoder, instances: buffer, instanceCount: strikethroughs.count)
             }
-            resetScratchBatches()
+            clearTextScratchBatches()
+        }
+
+        func flushQuadBatches() {
+            if !quadInstances.isEmpty, let buffer = renderer.makeBuffer(for: quadInstances) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: quadInstances.count, rounded: false)
+            }
+            if !roundedQuadInstances.isEmpty, let buffer = renderer.makeBuffer(for: roundedQuadInstances) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: roundedQuadInstances.count, rounded: true)
+            }
+            quadInstances.removeAll(keepingCapacity: true)
+            roundedQuadInstances.removeAll(keepingCapacity: true)
         }
 
         func updateClip(_ clip: CGRect?) {
             guard scissorRectForClip != nil || fullScissorRect != nil else { return }
             let offsetClip = clip.map { $0.offsetBy(dx: itemOffset.x, dy: itemOffset.y) }
             guard offsetClip != currentClip else { return }
+            flushQuadBatches()
             flushTextBatches()
             if let offsetClip, let scissorRectForClip {
                 encoder.setScissorRect(scissorRectForClip(offsetClip))
@@ -87,15 +110,23 @@ public final class MarkdownScenePrimitiveRenderer {
             currentClip = offsetClip
         }
 
-        for primitive in orderedPrimitives {
+        let visiblePositions = visibleRect.flatMap { rect in
+            visibilityIndex?.visiblePositions(in: rect)
+        }
+        let primitivePositions = visiblePositions ?? Array(orderedPrimitives.indices)
+
+        for position in primitivePositions {
+            guard position >= orderedPrimitives.startIndex && position < orderedPrimitives.endIndex else { continue }
+            let primitive = orderedPrimitives[position]
             if let visibleRect,
-               let bounds = primitiveVisibilityBounds(primitive),
+               let bounds = vvPrimitiveVisibilityBounds(primitive),
                !bounds.intersects(visibleRect) {
                 continue
             }
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):
+                flushQuadBatches()
                 appendTextPrimitive(
                     run,
                     offset: offset,
@@ -105,12 +136,17 @@ public final class MarkdownScenePrimitiveRenderer {
                     underlines: &underlines,
                     strikethroughs: &strikethroughs
                 )
+            case .quad(let quad):
+                flushTextBatches()
+                appendQuadPrimitive(quad, transform: primitive.transform, offset: offset)
             default:
+                flushQuadBatches()
                 flushTextBatches()
                 renderPrimitive(primitive, offset: offset, encoder: encoder, renderer: renderer)
             }
         }
 
+        flushQuadBatches()
         flushTextBatches()
         updateClip(nil)
     }
@@ -119,6 +155,7 @@ public final class MarkdownScenePrimitiveRenderer {
         _ scene: VVScene,
         orderedPrimitiveIndices: [Int],
         visibleRect: CGRect? = nil,
+        visibilityIndex: VVPrimitiveVisibilityIndex? = nil,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
         itemOffset: CGPoint = .zero,
@@ -140,13 +177,25 @@ public final class MarkdownScenePrimitiveRenderer {
             if !strikethroughs.isEmpty, let buffer = renderer.makeBuffer(for: strikethroughs) {
                 renderer.renderStrikethroughs(encoder: encoder, instances: buffer, instanceCount: strikethroughs.count)
             }
-            resetScratchBatches()
+            clearTextScratchBatches()
+        }
+
+        func flushQuadBatches() {
+            if !quadInstances.isEmpty, let buffer = renderer.makeBuffer(for: quadInstances) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: quadInstances.count, rounded: false)
+            }
+            if !roundedQuadInstances.isEmpty, let buffer = renderer.makeBuffer(for: roundedQuadInstances) {
+                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: roundedQuadInstances.count, rounded: true)
+            }
+            quadInstances.removeAll(keepingCapacity: true)
+            roundedQuadInstances.removeAll(keepingCapacity: true)
         }
 
         func updateClip(_ clip: CGRect?) {
             guard scissorRectForClip != nil || fullScissorRect != nil else { return }
             let offsetClip = clip.map { $0.offsetBy(dx: itemOffset.x, dy: itemOffset.y) }
             guard offsetClip != currentClip else { return }
+            flushQuadBatches()
             flushTextBatches()
             if let offsetClip, let scissorRectForClip {
                 encoder.setScissorRect(scissorRectForClip(offsetClip))
@@ -156,18 +205,26 @@ public final class MarkdownScenePrimitiveRenderer {
             currentClip = offsetClip
         }
 
+        let visiblePositions = visibleRect.flatMap { rect in
+            visibilityIndex?.visiblePositions(in: rect)
+        }
+        let primitivePositions = visiblePositions ?? Array(orderedPrimitiveIndices.indices)
+
         let primitives = scene.primitives
-        for index in orderedPrimitiveIndices {
+        for position in primitivePositions {
+            guard position >= orderedPrimitiveIndices.startIndex && position < orderedPrimitiveIndices.endIndex else { continue }
+            let index = orderedPrimitiveIndices[position]
             guard index >= primitives.startIndex && index < primitives.endIndex else { continue }
             let primitive = primitives[index]
             if let visibleRect,
-               let bounds = primitiveVisibilityBounds(primitive),
+               let bounds = vvPrimitiveVisibilityBounds(primitive),
                !bounds.intersects(visibleRect) {
                 continue
             }
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):
+                flushQuadBatches()
                 appendTextPrimitive(
                     run,
                     offset: offset,
@@ -177,86 +234,19 @@ public final class MarkdownScenePrimitiveRenderer {
                     underlines: &underlines,
                     strikethroughs: &strikethroughs
                 )
+            case .quad(let quad):
+                flushTextBatches()
+                appendQuadPrimitive(quad, transform: primitive.transform, offset: offset)
             default:
+                flushQuadBatches()
                 flushTextBatches()
                 renderPrimitive(primitive, offset: offset, encoder: encoder, renderer: renderer)
             }
         }
 
+        flushQuadBatches()
         flushTextBatches()
         updateClip(nil)
-    }
-
-    public func primitiveVisibilityBounds(_ primitive: VVPrimitive) -> CGRect? {
-        if let clipRect = primitive.clipRect, !clipRect.isNull, !clipRect.isEmpty {
-            return clipRect
-        }
-
-        switch primitive.kind {
-        case .textRun(let run):
-            let baseBounds = run.lineBounds ?? run.runBounds ?? glyphBounds(for: run.glyphs)
-            return baseBounds.map { transformed(rect: $0, by: primitive.transform) }
-        case .quad(let quad):
-            return transformed(rect: quad.frame, by: primitive.transform)
-        case .gradientQuad(let quad):
-            return transformed(rect: quad.frame, by: primitive.transform)
-        case .line(let line):
-            let minX = min(line.start.x, line.end.x)
-            let minY = min(line.start.y, line.end.y)
-            return transformed(
-                rect: CGRect(
-                    x: minX - line.thickness * 0.5,
-                    y: minY - line.thickness * 0.5,
-                    width: abs(line.end.x - line.start.x) + line.thickness,
-                    height: abs(line.end.y - line.start.y) + line.thickness
-                ),
-                by: primitive.transform
-            )
-        case .underline(let underline):
-            return transformed(
-                rect: CGRect(
-                    x: underline.origin.x,
-                    y: underline.origin.y,
-                    width: underline.width,
-                    height: max(underline.thickness, 1)
-                ),
-                by: primitive.transform
-            )
-        case .bullet(let bullet):
-            return transformed(
-                rect: CGRect(x: bullet.position.x, y: bullet.position.y, width: bullet.size, height: bullet.size),
-                by: primitive.transform
-            )
-        case .image(let image):
-            return transformed(rect: image.frame, by: primitive.transform)
-        case .blockQuoteBorder(let border):
-            return transformed(rect: border.frame, by: primitive.transform)
-        case .tableLine(let line):
-            let minX = min(line.start.x, line.end.x)
-            let minY = min(line.start.y, line.end.y)
-            return transformed(
-                rect: CGRect(
-                    x: minX - line.lineWidth * 0.5,
-                    y: minY - line.lineWidth * 0.5,
-                    width: abs(line.end.x - line.start.x) + line.lineWidth,
-                    height: abs(line.end.y - line.start.y) + line.lineWidth
-                ),
-                by: primitive.transform
-            )
-        case .pieSlice(let slice):
-            return transformed(
-                rect: CGRect(
-                    x: slice.center.x - slice.radius,
-                    y: slice.center.y - slice.radius,
-                    width: slice.radius * 2,
-                    height: slice.radius * 2
-                ),
-                by: primitive.transform
-            )
-        case .path(let path):
-            let pathBounds = transformed(rect: path.bounds, by: path.transform)
-            return transformed(rect: pathBounds, by: primitive.transform)
-        }
     }
 
     private func renderPrimitive(
@@ -404,36 +394,21 @@ public final class MarkdownScenePrimitiveRenderer {
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer
     ) {
-        let frame = transformed(rect: quad.frame, by: transform)
-        guard frame.width > 0, frame.height > 0 else { return }
+        let previousQuadCount = quadInstances.count
+        let previousRoundedCount = roundedQuadInstances.count
+        appendQuadPrimitive(quad, transform: transform, offset: offset)
 
-        let instance = QuadInstance(
-            position: SIMD2<Float>(Float(frame.origin.x) + offset.x, Float(frame.origin.y) + offset.y),
-            size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
-            color: SIMD4<Float>(quad.color.x, quad.color.y, quad.color.z, quad.color.w * quad.opacity),
-            cornerRadius: Float(quad.cornerRadius)
-        )
-        if let buffer = renderer.makeBuffer(for: [instance]) {
-            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: quad.cornerRadius > 0)
+        let newQuads = Array(quadInstances[previousQuadCount...])
+        if !newQuads.isEmpty, let buffer = renderer.makeBuffer(for: newQuads) {
+            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: newQuads.count, rounded: false)
         }
+        quadInstances.removeLast(quadInstances.count - previousQuadCount)
 
-        guard let border = quad.border else { return }
-        if canRenderBorderAsSingleRing(border) {
-            let borderInstance = QuadInstance(
-                position: SIMD2<Float>(Float(frame.origin.x) + offset.x, Float(frame.origin.y) + offset.y),
-                size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
-                color: border.color,
-                cornerRadius: Float(quad.cornerRadius),
-                borderWidth: Float(border.widths.top)
-            )
-            if let buffer = renderer.makeBuffer(for: [borderInstance]) {
-                renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: 1, rounded: true)
-            }
-            return
+        let newRounded = Array(roundedQuadInstances[previousRoundedCount...])
+        if !newRounded.isEmpty, let buffer = renderer.makeBuffer(for: newRounded) {
+            renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: newRounded.count, rounded: true)
         }
-        let segments = borderSegments(for: frame, border: border, offset: offset)
-        guard !segments.isEmpty, let buffer = renderer.makeBuffer(for: segments) else { return }
-        renderer.renderQuads(encoder: encoder, instances: buffer, instanceCount: segments.count, rounded: false)
+        roundedQuadInstances.removeLast(roundedQuadInstances.count - previousRoundedCount)
     }
 
     private func renderLinePrimitive(
@@ -565,19 +540,16 @@ public final class MarkdownScenePrimitiveRenderer {
         underlines: inout [LineInstance],
         strikethroughs: inout [LineInstance]
     ) {
+        let prepared = preparedTextRun(for: run, renderer: renderer)
+        appendPreparedBatches(prepared.glyphBatches, to: &glyphInstances, offset: offset)
+        appendPreparedBatches(prepared.colorGlyphBatches, to: &colorGlyphInstances, offset: offset)
+
         var glyphMinX = CGFloat.greatestFiniteMagnitude
         var glyphMaxX = -CGFloat.greatestFiniteMagnitude
 
         for glyph in run.glyphs {
             glyphMinX = min(glyphMinX, glyph.position.x)
             glyphMaxX = max(glyphMaxX, glyph.position.x + glyph.size.width)
-            appendGlyphInstance(
-                glyph,
-                offset: offset,
-                renderer: renderer,
-                glyphInstances: &glyphInstances,
-                colorGlyphInstances: &colorGlyphInstances
-            )
         }
 
         let baseSize = baseFont.pointSize
@@ -619,7 +591,6 @@ public final class MarkdownScenePrimitiveRenderer {
 
     private func appendGlyphInstance(
         _ glyph: VVTextGlyph,
-        offset: SIMD2<Float>,
         renderer: MarkdownMetalRenderer,
         glyphInstances: inout [[MarkdownGlyphInstance]],
         colorGlyphInstances: inout [[MarkdownGlyphInstance]]
@@ -628,8 +599,8 @@ public final class MarkdownScenePrimitiveRenderer {
         let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
         let instance = MarkdownGlyphInstance(
             position: SIMD2<Float>(
-                Float(glyph.position.x + cached.bearing.x) + offset.x,
-                Float(glyph.position.y + cached.bearing.y) + offset.y
+                Float(glyph.position.x + cached.bearing.x),
+                Float(glyph.position.y + cached.bearing.y)
             ),
             size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
             uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
@@ -702,6 +673,12 @@ public final class MarkdownScenePrimitiveRenderer {
     }
 
     private func resetScratchBatches() {
+        quadInstances.removeAll(keepingCapacity: true)
+        roundedQuadInstances.removeAll(keepingCapacity: true)
+        clearTextScratchBatches()
+    }
+
+    private func clearTextScratchBatches() {
         clearGlyphBatches(&glyphInstances)
         clearGlyphBatches(&colorGlyphInstances)
         underlines.removeAll(keepingCapacity: true)
@@ -726,21 +703,114 @@ public final class MarkdownScenePrimitiveRenderer {
         batches[atlasIndex].append(instance)
     }
 
-    private func glyphBounds(for glyphs: [VVTextGlyph]) -> CGRect? {
-        guard let first = glyphs.first else { return nil }
-        var minX = first.position.x
-        var minY = first.position.y
-        var maxX = first.position.x + first.size.width
-        var maxY = first.position.y + first.size.height
-
-        for glyph in glyphs.dropFirst() {
-            minX = min(minX, glyph.position.x)
-            minY = min(minY, glyph.position.y)
-            maxX = max(maxX, glyph.position.x + glyph.size.width)
-            maxY = max(maxY, glyph.position.y + glyph.size.height)
+    private func appendPreparedBatches(
+        _ prepared: [[MarkdownGlyphInstance]],
+        to batches: inout [[MarkdownGlyphInstance]],
+        offset: SIMD2<Float>
+    ) {
+        guard !prepared.isEmpty else { return }
+        if batches.count < prepared.count {
+            batches.append(contentsOf: repeatElement([], count: prepared.count - batches.count))
         }
 
-        return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+        if offset == .zero {
+            for index in prepared.indices where !prepared[index].isEmpty {
+                batches[index].append(contentsOf: prepared[index])
+            }
+            return
+        }
+
+        for index in prepared.indices where !prepared[index].isEmpty {
+            for instance in prepared[index] {
+                batches[index].append(
+                    MarkdownGlyphInstance(
+                        position: SIMD2<Float>(instance.position.x + offset.x, instance.position.y + offset.y),
+                        size: instance.size,
+                        uvOrigin: instance.uvOrigin,
+                        uvSize: instance.uvSize,
+                        color: instance.color,
+                        atlasIndex: instance.atlasIndex
+                    )
+                )
+            }
+        }
+    }
+
+    private func preparedTextRun(
+        for run: VVTextRunPrimitive,
+        renderer: MarkdownMetalRenderer
+    ) -> PreparedTextRun {
+        if let cached = preparedTextRunCache[run] {
+            touchPreparedTextRun(run)
+            return cached
+        }
+
+        var glyphBatches: [[MarkdownGlyphInstance]] = []
+        var colorGlyphBatches: [[MarkdownGlyphInstance]] = []
+        glyphBatches.reserveCapacity(2)
+        colorGlyphBatches.reserveCapacity(1)
+
+        for glyph in run.glyphs {
+            appendGlyphInstance(
+                glyph,
+                renderer: renderer,
+                glyphInstances: &glyphBatches,
+                colorGlyphInstances: &colorGlyphBatches
+            )
+        }
+
+        let prepared = PreparedTextRun(
+            glyphBatches: glyphBatches,
+            colorGlyphBatches: colorGlyphBatches
+        )
+        preparedTextRunCache[run] = prepared
+        touchPreparedTextRun(run)
+        while preparedTextRunOrder.count > Self.maxPreparedTextRuns {
+            let evicted = preparedTextRunOrder.removeFirst()
+            preparedTextRunCache.removeValue(forKey: evicted)
+        }
+        return prepared
+    }
+
+    private func touchPreparedTextRun(_ run: VVTextRunPrimitive) {
+        preparedTextRunOrder.removeAll { $0 == run }
+        preparedTextRunOrder.append(run)
+    }
+
+    private func appendQuadPrimitive(
+        _ quad: VVQuadPrimitive,
+        transform: VVTransform2D?,
+        offset: SIMD2<Float>
+    ) {
+        let frame = transformed(rect: quad.frame, by: transform)
+        guard frame.width > 0, frame.height > 0 else { return }
+
+        let instance = QuadInstance(
+            position: SIMD2<Float>(Float(frame.origin.x) + offset.x, Float(frame.origin.y) + offset.y),
+            size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
+            color: SIMD4<Float>(quad.color.x, quad.color.y, quad.color.z, quad.color.w * quad.opacity),
+            cornerRadius: Float(quad.cornerRadius)
+        )
+        if quad.cornerRadius > 0 {
+            roundedQuadInstances.append(instance)
+        } else {
+            quadInstances.append(instance)
+        }
+
+        guard let border = quad.border else { return }
+        if canRenderBorderAsSingleRing(border) {
+            roundedQuadInstances.append(
+                QuadInstance(
+                    position: SIMD2<Float>(Float(frame.origin.x) + offset.x, Float(frame.origin.y) + offset.y),
+                    size: SIMD2<Float>(Float(frame.width), Float(frame.height)),
+                    color: border.color,
+                    cornerRadius: Float(quad.cornerRadius),
+                    borderWidth: Float(border.widths.top)
+                )
+            )
+            return
+        }
+        quadInstances.append(contentsOf: borderSegments(for: frame, border: border, offset: offset))
     }
 
     private func transformed(rect: CGRect, by transform: VVTransform2D?) -> CGRect {

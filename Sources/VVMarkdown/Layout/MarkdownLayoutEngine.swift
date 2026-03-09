@@ -395,6 +395,10 @@ public struct LayoutTableCell {
 
 /// Engine for laying out markdown documents
 public final class MarkdownLayoutEngine {
+    private struct FontAdvanceKey: Hashable {
+        let name: String
+        let size: Int
+    }
 
     // MARK: - Properties
 
@@ -408,6 +412,7 @@ public final class MarkdownLayoutEngine {
     private let mathRenderer = MarkdownMathRenderer()
 
     private var fonts: [FontVariant: CTFont] = [:]
+    private var monospaceAdvanceCache: [FontAdvanceKey: CGFloat] = [:]
     private var lineHeight: CGFloat = 20
     private var ascent: CGFloat = 14
     private var descent: CGFloat = 4
@@ -564,6 +569,17 @@ public final class MarkdownLayoutEngine {
     ) -> [LayoutGlyph] {
         guard !text.isEmpty else { return [] }
         guard let baseFont = fonts[baseVariant] else { return [] }
+        if canUseFastMonospaceASCIIPath(text, variant: baseVariant),
+           let fast = layoutFastMonospaceASCIIGlyphs(
+                text,
+                font: baseFont,
+                variant: baseVariant,
+                color: color,
+                startX: position.x,
+                startY: position.y
+           ) {
+            return fast.glyphs
+        }
         let segments = splitFontSegments(text, baseFont: baseFont)
         var glyphs: [LayoutGlyph] = []
         var currentX = position.x
@@ -577,6 +593,9 @@ public final class MarkdownLayoutEngine {
 
     public func measureTextWidth(_ text: String, variant: FontVariant) -> CGFloat {
         guard let font = fonts[variant] else { return 0 }
+        if canUseFastMonospaceASCIIPath(text, variant: variant) {
+            return monospaceAdvance(for: font) * CGFloat(text.utf16.count)
+        }
         return measureTextWidth(text, font: font)
     }
 
@@ -3340,6 +3359,17 @@ public final class MarkdownLayoutEngine {
         startY: CGFloat
     ) -> (glyphs: [LayoutGlyph], advance: CGFloat) {
         guard !text.isEmpty else { return ([], 0) }
+        if canUseFastMonospaceASCIIPath(text, variant: variant),
+           let fast = layoutFastMonospaceASCIIGlyphs(
+                text,
+                font: font,
+                variant: variant,
+                color: color,
+                startX: startX,
+                startY: startY
+           ) {
+            return fast
+        }
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -3399,6 +3429,72 @@ public final class MarkdownLayoutEngine {
 
         let computedWidth = max(0, maxX - startX)
         return (glyphs, max(computedWidth, lineWidth))
+    }
+
+    private func canUseFastMonospaceASCIIPath(_ text: String, variant: FontVariant) -> Bool {
+        guard variant == .monospace, !text.isEmpty, !text.contains("\t") else { return false }
+        return text.unicodeScalars.allSatisfy(\.isASCII)
+    }
+
+    private func monospaceAdvance(for font: CTFont) -> CGFloat {
+        let name = CTFontCopyPostScriptName(font) as String
+        let key = FontAdvanceKey(name: name, size: Int(CTFontGetSize(font) * 100))
+        if let cached = monospaceAdvanceCache[key] {
+            return cached
+        }
+        let advance = measureTextWidth("8", font: font)
+        monospaceAdvanceCache[key] = advance
+        return advance
+    }
+
+    private func layoutFastMonospaceASCIIGlyphs(
+        _ text: String,
+        font: CTFont,
+        variant: FontVariant,
+        color: SIMD4<Float>,
+        startX: CGFloat,
+        startY: CGFloat
+    ) -> (glyphs: [LayoutGlyph], advance: CGFloat)? {
+        var unichars = Array(text.utf16)
+        guard !unichars.isEmpty else { return ([], 0) }
+
+        var glyphIDs = [CGGlyph](repeating: 0, count: unichars.count)
+        guard CTFontGetGlyphsForCharacters(font, &unichars, &glyphIDs, unichars.count) else {
+            return nil
+        }
+
+        let fontName = CTFontCopyPostScriptName(font) as String
+        let storedFontName: String? = isSystemUIFontName(fontName) ? nil : fontName
+        let advanceWidth = monospaceAdvance(for: font)
+        let runFontSize = CTFontGetSize(font)
+
+        var glyphs: [LayoutGlyph] = []
+        glyphs.reserveCapacity(glyphIDs.count)
+        var currentX = startX
+
+        for index in glyphIDs.indices {
+            let glyphID = glyphIDs[index]
+            guard glyphID != 0 else {
+                currentX += advanceWidth
+                continue
+            }
+
+            glyphs.append(
+                LayoutGlyph(
+                    glyphID: glyphID,
+                    position: CGPoint(x: currentX, y: startY),
+                    size: CGSize(width: advanceWidth, height: lineHeight),
+                    color: color,
+                    fontVariant: variant,
+                    fontSize: runFontSize,
+                    fontName: storedFontName,
+                    stringIndex: index
+                )
+            )
+            currentX += advanceWidth
+        }
+
+        return (glyphs, advanceWidth * CGFloat(unichars.count))
     }
 
     private func tokenize(text: String) -> [String] {

@@ -43,7 +43,7 @@ public struct VVUnifiedDiffRenderOptions: Sendable {
     )
 }
 
-public enum VVDiffSceneRenderStyle: Sendable {
+public enum VVDiffSceneRenderStyle: Hashable, Sendable {
     case unifiedTable
     case split
 }
@@ -86,6 +86,20 @@ public enum VVUnifiedDiffSceneRenderer {
         options: VVUnifiedDiffRenderOptions = .full,
         highlightedRangesOverride: [Int: [(NSRange, SIMD4<Float>)]]?
     ) -> VVUnifiedDiffRenderResult {
+        let renderCacheKey = highlightedRangesOverride == nil
+            ? makeRenderCacheKey(
+                unifiedDiff: unifiedDiff,
+                width: width,
+                theme: theme,
+                baseFont: baseFont,
+                style: style,
+                options: options
+            )
+            : nil
+        if let renderCacheKey, let cached = UnifiedDiffRenderCache.value(for: renderCacheKey) {
+            return cached
+        }
+
         let document = analyzedDocument(for: unifiedDiff)
         let renderer = UnifiedDiffRenderer(
             font: baseFont,
@@ -101,10 +115,14 @@ public enum VVUnifiedDiffSceneRenderer {
             wrapLines: true,
             options: options
         )
-        return VVUnifiedDiffRenderResult(
+        let renderResult = VVUnifiedDiffRenderResult(
             scene: result.scene,
             contentHeight: result.contentHeight
         )
+        if let renderCacheKey {
+            UnifiedDiffRenderCache.set(renderResult, for: renderCacheKey)
+        }
+        return renderResult
     }
 }
 
@@ -149,6 +167,37 @@ private enum UnifiedDiffDocumentCache {
     }
 
     static func set(_ value: VVUnifiedDiffDocument, for key: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        cache[key] = value
+        touch(key)
+        while order.count > maxEntries {
+            let evicted = order.removeFirst()
+            cache.removeValue(forKey: evicted)
+        }
+    }
+
+    private static func touch(_ key: Int) {
+        order.removeAll { $0 == key }
+        order.append(key)
+    }
+}
+
+private enum UnifiedDiffRenderCache {
+    private static let lock = NSLock()
+    private static var cache: [Int: VVUnifiedDiffRenderResult] = [:]
+    private static var order: [Int] = []
+    private static let maxEntries = 4
+
+    static func value(for key: Int) -> VVUnifiedDiffRenderResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let result = cache[key] else { return nil }
+        touch(key)
+        return result
+    }
+
+    static func set(_ value: VVUnifiedDiffRenderResult, for key: Int) {
         lock.lock()
         defer { lock.unlock() }
         cache[key] = value
@@ -309,6 +358,38 @@ private func analyzedDocument(for unifiedDiff: String) -> VVUnifiedDiffDocument 
     let document = VVUnifiedDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
     UnifiedDiffDocumentCache.set(document, for: cacheKey)
     return document
+}
+
+private func makeRenderCacheKey(
+    unifiedDiff: String,
+    width: CGFloat,
+    theme: MarkdownTheme,
+    baseFont: VVFont,
+    style: VVDiffSceneRenderStyle,
+    options: VVUnifiedDiffRenderOptions
+) -> Int {
+    var hasher = Hasher()
+    hasher.combine(unifiedDiff)
+    hasher.combine(Int(width.rounded(.toNearestOrEven)))
+    hasher.combine(baseFont.pointSize)
+    hasher.combine(baseFont.fontName)
+    hasher.combine(style == .split ? 1 : 0)
+    hasher.combine(options.showsFileHeaders)
+    hasher.combine(options.showsMetadata)
+    hasher.combine(options.showsHunkHeaders)
+    hasher.combine(theme.codeColor.x)
+    hasher.combine(theme.codeColor.y)
+    hasher.combine(theme.codeColor.z)
+    hasher.combine(theme.codeBackgroundColor.x)
+    hasher.combine(theme.codeBackgroundColor.y)
+    hasher.combine(theme.codeBackgroundColor.z)
+    hasher.combine(theme.codeHeaderBackgroundColor.x)
+    hasher.combine(theme.codeHeaderBackgroundColor.y)
+    hasher.combine(theme.codeHeaderBackgroundColor.z)
+    hasher.combine(theme.codeGutterTextColor.x)
+    hasher.combine(theme.codeGutterTextColor.y)
+    hasher.combine(theme.codeGutterTextColor.z)
+    return hasher.finalize()
 }
 
 private func parseRows(unifiedDiff: String) -> [UnifiedDiffRow] {
@@ -1248,23 +1329,46 @@ private final class UnifiedDiffRenderer {
         builder: inout VVSceneBuilder
     ) {
         guard !glyphs.isEmpty else { return }
-        let vvGlyphs = glyphs.map { glyph in
-            VVTextGlyph(
-                glyphID: UInt16(glyph.glyphID),
-                position: CGPoint(x: glyph.position.x + offsetX, y: baselineY),
-                size: glyph.size,
-                color: glyph.color,
-                fontVariant: toVVFontVariant(glyph.fontVariant),
-                fontSize: glyph.fontSize,
-                fontName: glyph.fontName,
-                stringIndex: glyph.stringIndex
+        var vvGlyphs: [VVTextGlyph] = []
+        vvGlyphs.reserveCapacity(glyphs.count)
+        var minX = CGFloat.greatestFiniteMagnitude
+        var minY = CGFloat.greatestFiniteMagnitude
+        var maxX = -CGFloat.greatestFiniteMagnitude
+        var maxY = -CGFloat.greatestFiniteMagnitude
+
+        for glyph in glyphs {
+            let position = CGPoint(x: glyph.position.x + offsetX, y: baselineY)
+            vvGlyphs.append(
+                VVTextGlyph(
+                    glyphID: UInt16(glyph.glyphID),
+                    position: position,
+                    size: glyph.size,
+                    color: glyph.color,
+                    fontVariant: toVVFontVariant(glyph.fontVariant),
+                    fontSize: glyph.fontSize,
+                    fontName: glyph.fontName,
+                    stringIndex: glyph.stringIndex
+                )
             )
+            minX = min(minX, position.x)
+            minY = min(minY, position.y)
+            maxX = max(maxX, position.x + glyph.size.width)
+            maxY = max(maxY, position.y + glyph.size.height)
         }
+
+        let runBounds = CGRect(
+            x: minX,
+            y: minY,
+            width: max(1, maxX - minX),
+            height: max(1, maxY - minY)
+        )
         builder.add(
             kind: .textRun(
                 VVTextRunPrimitive(
                     glyphs: vvGlyphs,
                     style: VVTextRunStyle(color: vvGlyphs.first?.color ?? textColor),
+                    lineBounds: runBounds,
+                    runBounds: runBounds,
                     position: CGPoint(x: offsetX, y: baselineY),
                     fontSize: font.pointSize
                 )
@@ -1273,22 +1377,45 @@ private final class UnifiedDiffRenderer {
     }
 
     private func applyHighlightColors(_ glyphs: [MDLayoutGlyph], ranges: [(NSRange, SIMD4<Float>)]) -> [MDLayoutGlyph] {
-        glyphs.map { glyph in
-            guard let idx = glyph.stringIndex else { return glyph }
-            for (range, color) in ranges where idx >= range.location && idx < range.location + range.length {
-                return MDLayoutGlyph(
-                    glyphID: glyph.glyphID,
-                    position: glyph.position,
-                    size: glyph.size,
-                    color: color,
-                    fontVariant: glyph.fontVariant,
-                    fontSize: glyph.fontSize,
-                    fontName: glyph.fontName,
-                    stringIndex: glyph.stringIndex
-                )
+        guard !glyphs.isEmpty, !ranges.isEmpty else { return glyphs }
+
+        var colored: [MDLayoutGlyph] = []
+        colored.reserveCapacity(glyphs.count)
+        var rangeIndex = 0
+
+        for glyph in glyphs {
+            guard let idx = glyph.stringIndex else {
+                colored.append(glyph)
+                continue
             }
-            return glyph
+
+            while rangeIndex < ranges.count && NSMaxRange(ranges[rangeIndex].0) <= idx {
+                rangeIndex += 1
+            }
+
+            if rangeIndex < ranges.count {
+                let (range, color) = ranges[rangeIndex]
+                if idx >= range.location && idx < NSMaxRange(range) {
+                    colored.append(
+                        MDLayoutGlyph(
+                            glyphID: glyph.glyphID,
+                            position: glyph.position,
+                            size: glyph.size,
+                            color: color,
+                            fontVariant: glyph.fontVariant,
+                            fontSize: glyph.fontSize,
+                            fontName: glyph.fontName,
+                            stringIndex: glyph.stringIndex
+                        )
+                    )
+                    continue
+                }
+            }
+
+            colored.append(glyph)
         }
+
+        return colored
     }
 
     private func glyphXForCharIndex(_ charIndex: Int, in glyphs: [MDLayoutGlyph]) -> CGFloat {

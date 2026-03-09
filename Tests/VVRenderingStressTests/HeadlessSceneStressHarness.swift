@@ -9,6 +9,9 @@ final class HeadlessSceneStressHarness {
     private let renderer: MarkdownMetalRenderer
     private let sceneRenderer: MarkdownScenePrimitiveRenderer
     private let viewportSize: CGSize
+    private var cachedSceneKey: SceneCacheKey?
+    private var cachedOrderedPrimitiveIndices: [Int] = []
+    private var cachedVisibilityIndex: VVPrimitiveVisibilityIndex?
 
     init(baseFont: VVFont, viewportSize: CGSize) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -92,12 +95,27 @@ final class HeadlessSceneStressHarness {
     }
 
     private func render(scene: VVScene, visibleRect: CGRect, encoder: MTLRenderCommandEncoder) {
+        refreshSceneCachesIfNeeded(for: scene)
         sceneRenderer.renderScene(
             scene,
-            orderedPrimitiveIndices: scene.orderedPrimitiveIndices(),
+            orderedPrimitiveIndices: cachedOrderedPrimitiveIndices,
             visibleRect: visibleRect,
+            visibilityIndex: cachedVisibilityIndex,
             encoder: encoder,
             renderer: renderer
+        )
+    }
+
+    private func refreshSceneCachesIfNeeded(for scene: VVScene) {
+        let sceneKey = SceneCacheKey(scene: scene)
+        guard sceneKey != cachedSceneKey else { return }
+        let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
+        cachedSceneKey = sceneKey
+        cachedOrderedPrimitiveIndices = orderedPrimitiveIndices
+        cachedVisibilityIndex = VVPrimitiveVisibilityIndex(
+            scene: scene,
+            orderedPrimitiveIndices: orderedPrimitiveIndices,
+            bucketHeight: 320
         )
     }
 
@@ -627,5 +645,17 @@ final class HeadlessSceneStressHarness {
         }
 
         return segments
+    }
+}
+
+private struct SceneCacheKey: Equatable {
+    let primitiveCount: Int
+    let baseAddress: UInt
+
+    init(scene: VVScene) {
+        primitiveCount = scene.primitives.count
+        baseAddress = scene.primitives.withUnsafeBufferPointer { buffer in
+            buffer.baseAddress.map { UInt(bitPattern: UnsafeRawPointer($0)) } ?? 0
+        }
     }
 }

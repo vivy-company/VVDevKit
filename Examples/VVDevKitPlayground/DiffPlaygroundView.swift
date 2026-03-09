@@ -4,9 +4,10 @@ import SwiftUI
 import VVCode
 
 struct DiffPlaygroundView: View {
-    @State private var selectedSampleID: String = DiffSamples.all[0].id
+    @State private var selectedSampleID: String = DiffSamples.heavySwiftStress.id
     @State private var renderStyle: VVDiffRenderStyle = .split
     @State private var useDarkTheme = true
+    @State private var syntaxHighlightingEnabled = true
     @State private var fontSize: Double = 13
 
     private var theme: VVTheme {
@@ -42,6 +43,7 @@ struct DiffPlaygroundView: View {
                 .pickerStyle(.segmented)
 
                 Toggle("Dark Theme", isOn: $useDarkTheme)
+                Toggle("Syntax Highlighting", isOn: $syntaxHighlightingEnabled)
 
                 HStack {
                     Text("Font")
@@ -65,9 +67,19 @@ struct DiffPlaygroundView: View {
 
     private func sampleRow(_ sample: DiffSample) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(sample.title)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(sample.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                if sample.isStressSample {
+                    Text("Stress")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                }
+            }
             Text(sample.subtitle)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
@@ -77,11 +89,45 @@ struct DiffPlaygroundView: View {
     }
 
     private var diffPane: some View {
-        VVDiffView(unifiedDiff: selectedSample.diff)
-            .renderStyle(renderStyle)
-            .language(selectedSample.language)
-            .theme(theme)
-            .configuration(configuration)
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(selectedSample.title)
+                        .font(.headline)
+                    Text(selectedSample.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let metrics = selectedSample.metrics {
+                        Text(metrics)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(renderStyle == .split ? "Split diff" : "Unified diff")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(syntaxHighlightingEnabled ? "Highlighting on" : "Highlighting off")
+                        .font(.caption)
+                        .foregroundStyle(syntaxHighlightingEnabled ? .green : .secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color(nsColor: .windowBackgroundColor))
+
+            Divider()
+
+            VVDiffView(unifiedDiff: selectedSample.diff)
+                .renderStyle(renderStyle)
+                .language(selectedSample.language)
+                .syntaxHighlighting(syntaxHighlightingEnabled)
+                .theme(theme)
+                .configuration(configuration)
+        }
     }
 }
 
@@ -91,10 +137,31 @@ private struct DiffSample: Identifiable {
     let subtitle: String
     let language: VVLanguage?
     let diff: String
+    let metrics: String?
+    let isStressSample: Bool
+
+    init(
+        id: String,
+        title: String,
+        subtitle: String,
+        language: VVLanguage?,
+        diff: String,
+        metrics: String? = nil,
+        isStressSample: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.language = language
+        self.diff = diff
+        self.metrics = metrics
+        self.isStressSample = isStressSample
+    }
 }
 
 private enum DiffSamples {
     static let all: [DiffSample] = [
+        heavySwiftStress,
         swiftRefactor,
         multiFileChange,
         rustAddFunction,
@@ -104,6 +171,21 @@ private enum DiffSamples {
         deleteFile,
         largeHunk,
     ]
+
+    static let heavySwiftStress: DiffSample = {
+        let fileCount = 128
+        let linesPerHunk = 30
+        let totalRows = fileCount * (linesPerHunk * 3 + 5)
+        return DiffSample(
+            id: "heavy-swift-stress",
+            title: "Heavy Swift Stress",
+            subtitle: "128 files · \(totalRows.formatted()) diff rows",
+            language: nil,
+            diff: makeHeavySwiftStressDiff(fileCount: fileCount, linesPerHunk: linesPerHunk),
+            metrics: "Benchmark-scale unified diff with automatic Swift highlighting, large hunk bodies, and enough rows to test scroll/render behavior.",
+            isStressSample: true
+        )
+    }()
 
     static let swiftRefactor = DiffSample(
         id: "swift-refactor",
@@ -539,5 +621,27 @@ private enum DiffSamples {
         +// Migration: replace `tokenize(input)` with `Tokenizer(source: input).tokenize()`
         """
     )
+
+    private static func makeHeavySwiftStressDiff(fileCount: Int, linesPerHunk: Int) -> String {
+        var lines: [String] = []
+        lines.reserveCapacity(fileCount * (linesPerHunk * 3 + 8))
+
+        for fileIndex in 0..<fileCount {
+            let path = "Sources/Benchmark/File\(fileIndex).swift"
+            lines.append("diff --git a/\(path) b/\(path)")
+            lines.append("index 1111111..2222222 100644")
+            lines.append("--- a/\(path)")
+            lines.append("+++ b/\(path)")
+            lines.append("@@ -1,\(linesPerHunk) +1,\(linesPerHunk) @@")
+
+            for lineIndex in 0..<linesPerHunk {
+                lines.append("-let removed\(fileIndex)_\(lineIndex) = LegacyRenderer.render(id: \(fileIndex), line: \(lineIndex))")
+                lines.append("+let added\(fileIndex)_\(lineIndex) = DiffRenderer.render(id: \(fileIndex), line: \(lineIndex), theme: .dark, isEnabled: true)")
+                lines.append(" let context\(fileIndex)_\(lineIndex) = added\(fileIndex)_\(lineIndex).debugDescription")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
 }
 #endif

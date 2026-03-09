@@ -158,6 +158,7 @@ public class MetalMarkdownNSView: NSView {
     private var cachedLayout: MarkdownLayout?
     private var cachedScene = VVScene()
     private var cachedOrderedScenePrimitives: [VVPrimitive] = []
+    private var cachedOrderedSceneVisibilityIndex: VVPrimitiveVisibilityIndex?
     private var sceneDirty: Bool = true
 
     private var scrollOffset: CGPoint = .zero
@@ -1202,11 +1203,16 @@ public class MetalMarkdownNSView: NSView {
             if cachedLayout == nil {
                 cachedScene = VVScene()
                 cachedOrderedScenePrimitives = []
+                cachedOrderedSceneVisibilityIndex = nil
             }
             return
         }
         cachedScene = buildScene(from: layout)
         cachedOrderedScenePrimitives = cachedScene.orderedPrimitives()
+        cachedOrderedSceneVisibilityIndex = VVPrimitiveVisibilityIndex(
+            orderedPrimitives: cachedOrderedScenePrimitives,
+            bucketHeight: renderCullPadding
+        )
         sceneDirty = false
     }
 
@@ -1360,6 +1366,7 @@ public class MetalMarkdownNSView: NSView {
             scene,
             orderedPrimitives: orderedPrimitives,
             visibleRect: visibleRect,
+            visibilityIndex: cachedOrderedSceneVisibilityIndex,
             encoder: encoder,
             renderer: renderer,
             scissorRectForClip: { [weak self] in self?.scissorRect(for: $0) ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) },

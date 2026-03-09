@@ -443,6 +443,8 @@ private final class VVDiffMetalView: NSView {
     private var onFileHeaderActivate: ((String) -> Void)?
 
     private var cachedScene: VVScene?
+    private var cachedOrderedScenePrimitives: [VVPrimitive] = []
+    private var cachedSceneVisibilityIndex: VVPrimitiveVisibilityIndex?
     private var contentHeight: CGFloat = 0
     private var currentDrawableSize: CGSize = .zero
     private var currentScrollOffset: CGPoint = .zero
@@ -460,6 +462,7 @@ private final class VVDiffMetalView: NSView {
     private static let highlightPrefetchCodeRows: Int = 600
     private static let highlightViewportMargin: CGFloat = 220
     private static let highlightWarmupContextRows: Int = 192
+    private static let renderCullPadding: CGFloat = 512
 
     private var baseFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
     private var baseFontAscent: CGFloat = 0
@@ -1177,9 +1180,21 @@ extension VVDiffMetalView: MTKViewDelegate {
             )
             scene = sharedResult.scene
             cachedScene = scene
+            cachedOrderedScenePrimitives = scene.orderedPrimitives()
+            cachedSceneVisibilityIndex = VVPrimitiveVisibilityIndex(
+                orderedPrimitives: cachedOrderedScenePrimitives,
+                bucketHeight: Self.renderCullPadding
+            )
         }
 
-        renderScene(scene, encoder: encoder, renderer: renderer)
+        let visibleRect = scrollView.contentView.bounds.insetBy(dx: -Self.renderCullPadding, dy: -Self.renderCullPadding)
+        renderScene(
+            scene,
+            orderedPrimitives: cachedOrderedScenePrimitives,
+            visibleRect: visibleRect,
+            encoder: encoder,
+            renderer: renderer
+        )
 
         // Render selection quads on top of scene (so they're visible over opaque row backgrounds)
         if let selection = selectionController.selection {
@@ -1209,6 +1224,8 @@ extension VVDiffMetalView: MTKViewDelegate {
 
     private func renderScene(
         _ scene: VVScene,
+        orderedPrimitives: [VVPrimitive],
+        visibleRect: CGRect,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer
     ) {
@@ -1224,7 +1241,9 @@ extension VVDiffMetalView: MTKViewDelegate {
             colorGlyphInstances.removeAll(keepingCapacity: true)
         }
 
-        for primitive in scene.orderedPrimitives() {
+        let visiblePrimitives = cachedSceneVisibilityIndex?.visiblePrimitives(in: visibleRect, from: orderedPrimitives) ?? orderedPrimitives
+
+        for primitive in visiblePrimitives {
             switch primitive.kind {
             case .textRun(let run):
                 for glyph in run.glyphs {
