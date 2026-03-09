@@ -146,30 +146,24 @@ public struct VVPrimitiveVisibilityIndex {
 
     public func visiblePositions(in rect: CGRect) -> [Int] {
         guard !rect.isNull, !rect.isEmpty else { return [] }
+        guard let bucketRange = bucketRange(for: rect) else { return [] }
+        return visiblePositions(inBucketRange: bucketRange)
+    }
 
-        var positions: [Int] = []
-        positions.reserveCapacity(alwaysVisiblePositions.count + 256)
-        var seen: Set<Int> = []
-        seen.reserveCapacity(alwaysVisiblePositions.count + 256)
-
-        for position in alwaysVisiblePositions where seen.insert(position).inserted {
-            positions.append(position)
-        }
-
+    public func bucketRange(for rect: CGRect) -> ClosedRange<Int>? {
+        guard !rect.isNull, !rect.isEmpty else { return nil }
         let startBucket = bucketIndex(for: rect.minY, bucketHeight: bucketHeight)
         let endBucket = bucketIndex(for: rect.maxY, bucketHeight: bucketHeight)
-        guard startBucket <= endBucket else {
-            return positions.sorted()
-        }
+        guard startBucket <= endBucket else { return nil }
+        return startBucket...endBucket
+    }
 
-        for bucket in startBucket...endBucket {
-            guard let bucketPositions = buckets[bucket] else { continue }
-            for position in bucketPositions where seen.insert(position).inserted {
-                positions.append(position)
-            }
+    public func visiblePositions(inBucketRange bucketRange: ClosedRange<Int>) -> [Int] {
+        var positions = alwaysVisiblePositions
+        for bucket in bucketRange {
+            guard let bucketPositions = buckets[bucket], !bucketPositions.isEmpty else { continue }
+            positions = mergeSortedUniquePositions(positions, bucketPositions)
         }
-
-        positions.sort()
         return positions
     }
 
@@ -196,10 +190,65 @@ public struct VVPrimitiveVisibilityIndex {
         }
         return visible
     }
+
+    public func visiblePrimitiveIndices(inBucketRange bucketRange: ClosedRange<Int>, from orderedPrimitiveIndices: [Int]) -> [Int] {
+        let positions = visiblePositions(inBucketRange: bucketRange)
+        guard !positions.isEmpty else { return [] }
+
+        var visible: [Int] = []
+        visible.reserveCapacity(positions.count)
+        for position in positions where position >= orderedPrimitiveIndices.startIndex && position < orderedPrimitiveIndices.endIndex {
+            visible.append(orderedPrimitiveIndices[position])
+        }
+        return visible
+    }
 }
 
 private func bucketIndex(for y: CGFloat, bucketHeight: CGFloat) -> Int {
     Int(floor(y / bucketHeight))
+}
+
+private func mergeSortedUniquePositions(_ lhs: [Int], _ rhs: [Int]) -> [Int] {
+    guard !lhs.isEmpty else { return rhs }
+    guard !rhs.isEmpty else { return lhs }
+
+    var merged: [Int] = []
+    merged.reserveCapacity(lhs.count + rhs.count)
+
+    var lhsIndex = 0
+    var rhsIndex = 0
+    var lastValue: Int?
+
+    while lhsIndex < lhs.count || rhsIndex < rhs.count {
+        let nextValue: Int
+        if rhsIndex >= rhs.count {
+            nextValue = lhs[lhsIndex]
+            lhsIndex += 1
+        } else if lhsIndex >= lhs.count {
+            nextValue = rhs[rhsIndex]
+            rhsIndex += 1
+        } else {
+            let lhsValue = lhs[lhsIndex]
+            let rhsValue = rhs[rhsIndex]
+            if lhsValue <= rhsValue {
+                nextValue = lhsValue
+                lhsIndex += 1
+                if lhsValue == rhsValue {
+                    rhsIndex += 1
+                }
+            } else {
+                nextValue = rhsValue
+                rhsIndex += 1
+            }
+        }
+
+        if lastValue != nextValue {
+            merged.append(nextValue)
+            lastValue = nextValue
+        }
+    }
+
+    return merged
 }
 
 private func vvTransform(rect: CGRect, by transform: VVTransform2D?) -> CGRect {

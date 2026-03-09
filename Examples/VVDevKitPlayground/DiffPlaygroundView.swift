@@ -4,7 +4,7 @@ import SwiftUI
 import VVCode
 
 struct DiffPlaygroundView: View {
-    @State private var selectedSampleID: String = DiffSamples.heavySwiftStress.id
+    @State private var selectedSampleID: String = DiffSamples.swiftRefactor.id
     @State private var renderStyle: VVDiffRenderStyle = .sideBySide
     @State private var useDarkTheme = true
     @State private var syntaxHighlightingEnabled = true
@@ -136,16 +136,20 @@ private struct DiffSample: Identifiable {
     let title: String
     let subtitle: String
     let language: VVLanguage?
-    let diff: String
+    private let diffProvider: () -> String
     let metrics: String?
     let isStressSample: Bool
+
+    var diff: String {
+        diffProvider()
+    }
 
     init(
         id: String,
         title: String,
         subtitle: String,
         language: VVLanguage?,
-        diff: String,
+        diff: @escaping @autoclosure () -> String,
         metrics: String? = nil,
         isStressSample: Bool = false
     ) {
@@ -153,7 +157,7 @@ private struct DiffSample: Identifiable {
         self.title = title
         self.subtitle = subtitle
         self.language = language
-        self.diff = diff
+        self.diffProvider = diff
         self.metrics = metrics
         self.isStressSample = isStressSample
     }
@@ -181,7 +185,7 @@ private enum DiffSamples {
             title: "Heavy Swift Stress",
             subtitle: "128 files · \(totalRows.formatted()) diff rows",
             language: nil,
-            diff: makeHeavySwiftStressDiff(fileCount: fileCount, linesPerHunk: linesPerHunk),
+            diff: DiffStressFixtures.heavySwiftStressDiff,
             metrics: "Benchmark-scale unified diff with automatic Swift highlighting, large hunk bodies, and enough rows to test scroll/render behavior.",
             isStressSample: true
         )
@@ -622,7 +626,7 @@ private enum DiffSamples {
         """
     )
 
-    private static func makeHeavySwiftStressDiff(fileCount: Int, linesPerHunk: Int) -> String {
+    fileprivate static func makeHeavySwiftStressDiff(fileCount: Int, linesPerHunk: Int) -> String {
         var lines: [String] = []
         lines.reserveCapacity(fileCount * (linesPerHunk * 3 + 8))
 
@@ -643,5 +647,9 @@ private enum DiffSamples {
 
         return lines.joined(separator: "\n")
     }
+}
+
+private enum DiffStressFixtures {
+    static let heavySwiftStressDiff = DiffSamples.makeHeavySwiftStressDiff(fileCount: 128, linesPerHunk: 30)
 }
 #endif

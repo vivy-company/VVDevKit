@@ -1,6 +1,8 @@
 import AppKit
+import CoreVideo
 import CoreText
 import MetalKit
+import QuartzCore
 import SwiftUI
 import VVHighlighting
 import VVMarkdown
@@ -119,17 +121,24 @@ private struct RowGeometryCacheKey: Equatable {
 }
 
 private struct ViewportSceneCacheKey: Equatable {
-    let startIndex: Int
-    let endIndex: Int
+    let startBlockIndex: Int
+    let endBlockIndex: Int
     let renderWidthBucket: Int
     let highlightVersion: Int
 
-    func contains(visibleRange: Range<Int>, renderWidth: CGFloat, highlightVersion: Int) -> Bool {
+    func contains(renderWidth: CGFloat, highlightVersion: Int) -> Bool {
         renderWidthBucket == Int((renderWidth * 2).rounded()) &&
-        self.highlightVersion == highlightVersion &&
-        visibleRange.lowerBound >= startIndex &&
-        visibleRange.upperBound <= endIndex
+        self.highlightVersion == highlightVersion
     }
+}
+
+private struct DisplayBlock {
+    let blockIndex: Int
+    let geometryStartIndex: Int
+    let geometryEndIndex: Int
+    let rowIDs: Set<Int>
+    let y: CGFloat
+    let height: CGFloat
 }
 
 // MARK: - VVDiffRenderer
@@ -307,11 +316,19 @@ private final class VVDiffMetalView: NSView {
 
     private var cachedScene: VVScene?
     private var cachedSceneKey: ViewportSceneCacheKey?
-    private var cachedOrderedScenePrimitives: [VVPrimitive] = []
+    private var cachedOrderedPrimitiveIndices: [Int] = []
     private var cachedSceneVisibilityIndex: VVPrimitiveVisibilityIndex?
+    private var cachedSceneRowIDs: Set<Int> = []
+    private var cachedVisibleBucketRange: ClosedRange<Int>?
+    private var cachedVisiblePrimitiveIndices: [Int] = []
+    private var sceneBuildGeneration: Int = 0
+    private var sceneBuildInFlightKey: ViewportSceneCacheKey?
     private var contentHeight: CGFloat = 0
     private var currentDrawableSize: CGSize = .zero
     private var currentScrollOffset: CGPoint = .zero
+    private var displayLink: CVDisplayLink?
+    private var activeScrollDeadline: CFTimeInterval = 0
+    private var deferredHighlightSceneRefresh = false
 
     private var highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]] = [:]
     private var staleHighlightedRowIDs: Set<Int> = []
@@ -323,13 +340,17 @@ private final class VVDiffMetalView: NSView {
     private var highlightedCodeRowCount: Int = 0
     private var pendingHighlightCodeRowCount: Int = 0
 
-    private static let initialHighlightCodeRows: Int = 3_000
-    private static let incrementalHighlightCodeRows: Int = 3_000
-    private static let highlightPrefetchCodeRows: Int = 600
+    private static let minimumVisibleHighlightCodeRows: Int = 96
+    private static let initialHighlightCodeRows: Int = 128
+    private static let incrementalHighlightCodeRows: Int = 192
+    private static let highlightPrefetchCodeRows: Int = 160
+    private static let scrollHighlightPrefetchCodeRows: Int = 48
     private static let highlightViewportMargin: CGFloat = 220
-    private static let highlightWarmupContextRows: Int = 192
-    private static let renderCullPadding: CGFloat = 512
+    private static let highlightWarmupContextRows: Int = 32
+    private static let renderCullPadding: CGFloat = 256
     private static let sceneCacheViewportPaddingMultiplier: CGFloat = 1.25
+    private static let scrollActivityGrace: CFTimeInterval = 0.16
+    private static let sceneBuildQueue = DispatchQueue(label: "vvdevkit.diff.scene-build", qos: .userInitiated)
 
     private var baseFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
 
@@ -337,6 +358,7 @@ private final class VVDiffMetalView: NSView {
     private let selectionController = VVTextSelectionController<DiffTextPosition>()
     private let selectionColor: SIMD4<Float> = .rgba(0.24, 0.40, 0.65, 0.55)
     private var rowGeometries: [RowGeometry] = []
+    private var displayBlocks: [DisplayBlock] = []
     private var filePathByHeaderRowID: [Int: String] = [:]
     private var rowGeometryCacheKey: RowGeometryCacheKey?
     private var rowGeometriesContentHeight: CGFloat = 0
@@ -358,6 +380,9 @@ private final class VVDiffMetalView: NSView {
 
     deinit {
         highlightTask?.cancel()
+        if let displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
         NotificationCenter.default.removeObserver(
             self,
             name: NSView.boundsDidChangeNotification,
@@ -403,6 +428,8 @@ private final class VVDiffMetalView: NSView {
             renderer = nil
         }
 
+        setupDisplayLink()
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(scrollViewBoundsChanged),
@@ -413,12 +440,88 @@ private final class VVDiffMetalView: NSView {
 
     @objc private func scrollViewBoundsChanged(_ notification: Notification) {
         updateMetalViewport()
+        noteScrollActivity()
         requestViewportHighlightingIfNeeded()
-        if shouldRedrawForHighlightedRowIDs(staleHighlightedRowIDs) {
-            cachedScene = nil
-            cachedSceneKey = nil
+        if displayLink == nil {
+            metalView.setNeedsDisplay(metalView.bounds)
         }
-        metalView.setNeedsDisplay(metalView.bounds)
+    }
+
+    private func setupDisplayLink() {
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let link else { return }
+
+        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
+            guard let userInfo else { return kCVReturnSuccess }
+            let view = Unmanaged<VVDiffMetalView>.fromOpaque(userInfo).takeUnretainedValue()
+            DispatchQueue.main.async {
+                view.handleDisplayLinkTick()
+            }
+            return kCVReturnSuccess
+        }
+
+        CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+        displayLink = link
+    }
+
+    private func startDisplayLink() {
+        guard let displayLink, !CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStart(displayLink)
+    }
+
+    private func stopDisplayLink() {
+        guard let displayLink, CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStop(displayLink)
+    }
+
+    private func noteScrollActivity() {
+        activeScrollDeadline = CACurrentMediaTime() + Self.scrollActivityGrace
+        startDisplayLink()
+    }
+
+    private var isActivelyScrolling: Bool {
+        CACurrentMediaTime() < activeScrollDeadline
+    }
+
+    private func handleDisplayLinkTick() {
+        guard window != nil, superview != nil, !isHidden else {
+            stopDisplayLink()
+            return
+        }
+
+        if isActivelyScrolling {
+            metalView.setNeedsDisplay(metalView.bounds)
+            return
+        }
+
+        var needsAnotherTick = false
+        var shouldRedraw = false
+
+        if deferredHighlightSceneRefresh {
+            applyDeferredHighlightSceneRefresh(redraw: false)
+            shouldRedraw = true
+            needsAnotherTick = true
+        }
+
+        if syntaxHighlightingEnabled,
+           effectiveHighlightLanguageConfiguration() != nil,
+           pendingHighlightCodeRowCount < codeRows.count {
+            scheduleHighlightingIfNeeded(targetCodeRowCount: codeRows.count)
+            needsAnotherTick = true
+        }
+
+        if highlightTask != nil {
+            needsAnotherTick = true
+        }
+
+        if shouldRedraw {
+            metalView.setNeedsDisplay(metalView.bounds)
+        }
+
+        if !needsAnotherTick {
+            stopDisplayLink()
+        }
     }
 
     override func layout() {
@@ -426,6 +529,7 @@ private final class VVDiffMetalView: NSView {
         scrollView.frame = bounds
         updateContentSize()
         requestViewportHighlightingIfNeeded()
+        prewarmSceneBuildIfNeeded()
     }
 
     /// Keep MTKView pinned to the visible viewport (same as VVMetalEditorContainerView).
@@ -434,6 +538,35 @@ private final class VVDiffMetalView: NSView {
         let viewportOrigin = scrollView.contentView.frame.origin
         currentScrollOffset = scrollView.contentView.bounds.origin
         metalView.frame = CGRect(origin: viewportOrigin, size: viewportSize)
+    }
+
+    private func invalidateSceneCache(clearScene: Bool) {
+        sceneBuildGeneration &+= 1
+        sceneBuildInFlightKey = nil
+        cachedSceneKey = nil
+        cachedVisibleBucketRange = nil
+        cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+
+        if clearScene {
+            cachedScene = nil
+            cachedOrderedPrimitiveIndices.removeAll(keepingCapacity: true)
+            cachedSceneVisibilityIndex = nil
+            cachedSceneRowIDs.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func currentRenderWidth() -> CGFloat {
+        let viewportWidth = scrollView?.bounds.width ?? bounds.width
+        return (wrapsUnified || fastPlainModeEnabled)
+            ? viewportWidth
+            : max(viewportWidth, documentView.frame.width)
+    }
+
+    private func prewarmSceneBuildIfNeeded() {
+        guard metalView != nil else { return }
+        let renderWidth = currentRenderWidth()
+        let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
+        scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
     }
 
     private var wrapsUnified: Bool {
@@ -566,10 +699,10 @@ private final class VVDiffMetalView: NSView {
             resetHighlightingState()
         }
 
-        cachedScene = nil
-        cachedSceneKey = nil
+        invalidateSceneCache(clearScene: true)
         updateContentSize()
         requestViewportHighlightingIfNeeded()
+        prewarmSceneBuildIfNeeded()
         metalView?.setNeedsDisplay(metalView.bounds)
     }
 
@@ -587,8 +720,7 @@ private final class VVDiffMetalView: NSView {
         dr.updateContentWidth(width)
         buildRowGeometries(width: width)
         contentHeight = rowGeometriesContentHeight
-        cachedScene = nil
-        cachedSceneKey = nil
+        invalidateSceneCache(clearScene: false)
 
         let wrapsUnified = self.wrapsUnified
 
@@ -621,6 +753,7 @@ private final class VVDiffMetalView: NSView {
         let docHeight = max(contentHeight, scrollView.bounds.height)
         documentView.frame = CGRect(x: 0, y: 0, width: docWidth, height: docHeight)
         updateMetalViewport()
+        prewarmSceneBuildIfNeeded()
     }
 
     private func buildRowGeometries(width: CGFloat) {
@@ -637,6 +770,7 @@ private final class VVDiffMetalView: NSView {
         }
 
         rowGeometries.removeAll(keepingCapacity: true)
+        displayBlocks.removeAll(keepingCapacity: true)
         let dr = ensureDiffRenderer()
 
         switch renderStyle {
@@ -649,6 +783,27 @@ private final class VVDiffMetalView: NSView {
         rowGeometriesContentHeight = rowGeometries.last.map { $0.y + $0.height } ?? 0
         assertRowGeometriesAreSorted()
         rowGeometryCacheKey = cacheKey
+    }
+
+    private func appendDisplayBlock(
+        geometryStartIndex: Int,
+        rowIDs: Set<Int>,
+        y: CGFloat,
+        height: CGFloat
+    ) {
+        guard height > 0 else { return }
+        let geometryEndIndex = rowGeometries.count
+        guard geometryEndIndex > geometryStartIndex else { return }
+        displayBlocks.append(
+            DisplayBlock(
+                blockIndex: displayBlocks.count,
+                geometryStartIndex: geometryStartIndex,
+                geometryEndIndex: geometryEndIndex,
+                rowIDs: rowIDs,
+                y: y,
+                height: height
+            )
+        )
     }
 
     private func buildRowGeometriesUnified(width: CGFloat, renderer: VVDiffRenderer, wrapLines: Bool) {
@@ -667,6 +822,7 @@ private final class VVDiffMetalView: NSView {
             // File header
             if let header = section.headerRow {
                 let rowH = renderer.headerHeight
+                let geometryStartIndex = rowGeometries.count
                 rowGeometries.append(RowGeometry(
                     rowIndex: rowIndex,
                     rowID: header.id,
@@ -680,6 +836,12 @@ private final class VVDiffMetalView: NSView {
                 ))
                 y += rowH
                 rowIndex += 1
+                appendDisplayBlock(
+                    geometryStartIndex: geometryStartIndex,
+                    rowIDs: [header.id],
+                    y: y - rowH,
+                    height: rowH
+                )
             }
 
             // Section rows (skip metadata)
@@ -692,6 +854,9 @@ private final class VVDiffMetalView: NSView {
                 } else {
                     wrappedLines = [displayText]
                 }
+                let blockY = y
+                let blockHeight = renderer.lineHeight * CGFloat(max(1, wrappedLines.count))
+                let geometryStartIndex = rowGeometries.count
 
                 for line in wrappedLines {
                     let rowH = renderer.lineHeight
@@ -709,6 +874,12 @@ private final class VVDiffMetalView: NSView {
                     y += rowH
                     rowIndex += 1
                 }
+                appendDisplayBlock(
+                    geometryStartIndex: geometryStartIndex,
+                    rowIDs: [row.id],
+                    y: blockY,
+                    height: blockHeight
+                )
             }
         }
     }
@@ -764,6 +935,8 @@ private final class VVDiffMetalView: NSView {
                 let rowH = header.kind == .fileHeader
                     ? renderer.headerHeight
                     : renderer.lineHeight * CGFloat(max(1, wrappedLines.count))
+                let geometryStartIndex = rowGeometries.count
+                let blockY = y
                 if header.kind == .fileHeader {
                     rowGeometries.append(RowGeometry(
                         rowIndex: rowIndex,
@@ -793,8 +966,20 @@ private final class VVDiffMetalView: NSView {
                         y += renderer.lineHeight
                         rowIndex += 1
                     }
+                    appendDisplayBlock(
+                        geometryStartIndex: geometryStartIndex,
+                        rowIDs: [header.id],
+                        y: blockY,
+                        height: rowH
+                    )
                     continue
                 }
+                appendDisplayBlock(
+                    geometryStartIndex: geometryStartIndex,
+                    rowIDs: [header.id],
+                    y: blockY,
+                    height: rowH
+                )
                 y += rowH
             } else {
                 let leftWrappedLines = splitRow.left.map { cell in
@@ -809,6 +994,7 @@ private final class VVDiffMetalView: NSView {
                 } ?? []
                 let visualLineCount = max(1, max(leftWrappedLines.count, rightWrappedLines.count))
                 let rowH = renderer.lineHeight * CGFloat(visualLineCount)
+                let geometryStartIndex = rowGeometries.count
                 for lineIndex in 0..<visualLineCount {
                     if let left = splitRow.left, lineIndex < leftWrappedLines.count {
                         let line = leftWrappedLines[lineIndex]
@@ -867,6 +1053,19 @@ private final class VVDiffMetalView: NSView {
                         rowIndex += 1
                     }
                 }
+                var rowIDs: Set<Int> = []
+                if let left = splitRow.left {
+                    rowIDs.insert(left.rowID)
+                }
+                if let right = splitRow.right {
+                    rowIDs.insert(right.rowID)
+                }
+                appendDisplayBlock(
+                    geometryStartIndex: geometryStartIndex,
+                    rowIDs: rowIDs,
+                    y: y,
+                    height: rowH
+                )
                 y += rowH
             }
         }
@@ -909,25 +1108,32 @@ private final class VVDiffMetalView: NSView {
         highlightTask = nil
         highlightedRanges = [:]
         staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+        deferredHighlightSceneRefresh = false
         highlightSceneVersion &+= 1
         highlightedCodeRowCount = 0
         pendingHighlightCodeRowCount = 0
 
         guard syntaxHighlightingEnabled else { return }
         guard !codeRows.isEmpty else { return }
+        guard effectiveHighlightLanguageConfiguration() != nil else { return }
 
         scheduleHighlightingIfNeeded(targetCodeRowCount: desiredHighlightedCodeRowCountForVisibleViewport())
+        startDisplayLink()
     }
 
     private func requestViewportHighlightingIfNeeded() {
         guard syntaxHighlightingEnabled else { return }
         guard !codeRows.isEmpty else { return }
+        guard effectiveHighlightLanguageConfiguration() != nil else { return }
         let targetCount = desiredHighlightedCodeRowCountForVisibleViewport()
         scheduleHighlightingIfNeeded(targetCodeRowCount: targetCount)
     }
 
     private func desiredHighlightedCodeRowCountForVisibleViewport() -> Int {
-        let minimumTarget = min(codeRows.count, max(256, Self.highlightWarmupContextRows * 2))
+        let viewportPrefetch = isActivelyScrolling
+            ? Self.scrollHighlightPrefetchCodeRows
+            : Self.highlightPrefetchCodeRows
+        let minimumTarget = min(codeRows.count, Self.minimumVisibleHighlightCodeRows)
         guard let scrollView else { return minimumTarget }
 
         let visibleRect = scrollView.contentView.bounds
@@ -937,7 +1143,7 @@ private final class VVDiffMetalView: NSView {
 
         let desiredByViewport = min(
             codeRows.count,
-            maxVisibleCodeIndex + 1 + Self.highlightPrefetchCodeRows
+            maxVisibleCodeIndex + 1 + viewportPrefetch
         )
         return max(minimumTarget, desiredByViewport)
     }
@@ -1009,7 +1215,7 @@ private final class VVDiffMetalView: NSView {
         let parseStart = startIndex - warmupRows
         let batchRows = Array(codeRows[parseStart..<endIndex])
         let targetRowIDs = Set(codeRows[startIndex..<endIndex].map(\.id))
-        let currentLanguage = language
+        let currentLanguage = effectiveHighlightLanguageConfiguration()
         let currentTheme = theme
         let currentFont = configuration.font
 
@@ -1032,18 +1238,31 @@ private final class VVDiffMetalView: NSView {
                 if self.cachedSceneIntersectsRowIDs(targetRowIDs) {
                     self.staleHighlightedRowIDs.formUnion(targetRowIDs)
                 }
-                self.highlightSceneVersion &+= 1
                 self.highlightedCodeRowCount = max(self.highlightedCodeRowCount, endIndex)
                 self.highlightTask = nil
-                if self.cachedSceneIntersectsRowIDs(targetRowIDs) {
-                    self.cachedScene = nil
-                    self.cachedSceneKey = nil
-                }
-                if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
-                    self.metalView?.setNeedsDisplay(self.metalView.bounds)
+                if self.isActivelyScrolling {
+                    self.deferredHighlightSceneRefresh = true
+                    self.startDisplayLink()
+                } else if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
+                    self.deferredHighlightSceneRefresh = true
+                    self.applyDeferredHighlightSceneRefresh(redraw: true)
+                } else if !targetRowIDs.isEmpty {
+                    self.deferredHighlightSceneRefresh = true
                 }
                 self.startNextHighlightBatchIfNeeded()
             }
+        }
+    }
+
+    private func applyDeferredHighlightSceneRefresh(redraw: Bool) {
+        guard deferredHighlightSceneRefresh || !staleHighlightedRowIDs.isEmpty else { return }
+        deferredHighlightSceneRefresh = false
+        staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+        highlightSceneVersion &+= 1
+        invalidateSceneCache(clearScene: false)
+        prewarmSceneBuildIfNeeded()
+        if redraw {
+            metalView?.setNeedsDisplay(metalView.bounds)
         }
     }
 
@@ -1055,8 +1274,61 @@ private final class VVDiffMetalView: NSView {
     }
 
     private func cachedSceneIntersectsRowIDs(_ rowIDs: Set<Int>) -> Bool {
-        guard !rowIDs.isEmpty, let cachedSceneKey else { return false }
-        return geometryRange(cachedSceneKey.startIndex..<cachedSceneKey.endIndex, intersects: rowIDs)
+        guard !rowIDs.isEmpty, !cachedSceneRowIDs.isEmpty else { return false }
+        return !cachedSceneRowIDs.isDisjoint(with: rowIDs)
+    }
+
+    private func scheduleSceneBuildIfNeeded(renderWidth: CGFloat, sceneKey: ViewportSceneCacheKey) {
+        guard let analyzedDocument else { return }
+        guard cachedSceneKey != sceneKey else { return }
+        guard sceneBuildInFlightKey != sceneKey else { return }
+
+        let generation = sceneBuildGeneration
+        let theme = markdownTheme(from: theme)
+        let baseFont = configuration.font
+        let style: VVMarkdown.VVDiffRenderStyle = renderStyle == .sideBySide ? .sideBySide : .inline
+        let highlightedRanges = highlightedRanges
+        let rowIDs = sceneKey.startBlockIndex == 0 && sceneKey.endBlockIndex == displayBlocks.count
+            ? nil
+            : rowIDs(inDisplayBlockRange: sceneKey.startBlockIndex..<sceneKey.endBlockIndex)
+
+        sceneBuildInFlightKey = sceneKey
+        Self.sceneBuildQueue.async { [weak self] in
+            let result = VVDiffSceneRenderer.render(
+                document: analyzedDocument,
+                width: renderWidth,
+                theme: theme,
+                baseFont: baseFont,
+                style: style,
+                options: .full,
+                highlightedRangesOverride: highlightedRanges,
+                includedRowIDs: rowIDs
+            )
+            let scene = result.scene
+            let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
+            let visibilityIndex = VVPrimitiveVisibilityIndex(
+                scene: scene,
+                orderedPrimitiveIndices: orderedPrimitiveIndices,
+                bucketHeight: 192
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard self.sceneBuildGeneration == generation else { return }
+                guard self.sceneBuildInFlightKey == sceneKey else { return }
+
+                self.cachedScene = scene
+                self.cachedSceneKey = sceneKey
+                self.cachedOrderedPrimitiveIndices = orderedPrimitiveIndices
+                self.cachedSceneVisibilityIndex = visibilityIndex
+                self.cachedSceneRowIDs = rowIDs ?? Set(self.rows.map(\.id))
+                self.cachedVisibleBucketRange = nil
+                self.cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+                self.staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+                self.sceneBuildInFlightKey = nil
+                self.metalView?.setNeedsDisplay(self.metalView.bounds)
+            }
+        }
     }
 
     private func geometryRange(_ range: Range<Int>, intersects rowIDs: Set<Int>) -> Bool {
@@ -1067,19 +1339,33 @@ private final class VVDiffMetalView: NSView {
         return false
     }
 
+    private func effectiveHighlightLanguageConfiguration() -> LanguageConfiguration? {
+        if let language,
+           let configuration = LanguageRegistry.shared.language(for: language.identifier) {
+            return configuration
+        }
+
+        for section in sections {
+            if let configuration = LanguageRegistry.shared.language(forPath: section.filePath) {
+                return configuration
+            }
+        }
+
+        return nil
+    }
+
     private static func computeHighlightRanges(
         rows: [VVDiffRow],
-        language: VVLanguage?,
+        language: LanguageConfiguration?,
         theme: VVTheme,
         font: NSFont
     ) async -> [Int: [(NSRange, SIMD4<Float>)]] {
-        guard let language,
-              let languageConfig = LanguageRegistry.shared.language(for: language.identifier) else {
+        guard let language else {
             return [:]
         }
         return await VVDiffHighlighting.computeHighlightedRanges(
             rows: rows,
-            language: languageConfig,
+            language: language,
             highlightTheme: VVDiffHighlighting.highlightTheme(
                 isDarkBackground: theme.backgroundColor.brightnessComponent < 0.5
             ),
@@ -1093,17 +1379,22 @@ private final class VVDiffMetalView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
+            stopDisplayLink()
             metalView?.releaseDrawables()
         }
     }
 
     override func viewDidHide() {
         super.viewDidHide()
+        stopDisplayLink()
         metalView?.releaseDrawables()
     }
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        if isActivelyScrolling || deferredHighlightSceneRefresh || highlightTask != nil {
+            startDisplayLink()
+        }
         metalView?.setNeedsDisplay(metalView.bounds)
     }
 }
@@ -1142,49 +1433,66 @@ extension VVDiffMetalView: MTKViewDelegate {
         currentScrollOffset = scrollOffset
         renderer.beginFrame(viewportSize: view.bounds.size, scrollOffset: scrollOffset)
 
-        let visibleRect = scrollView.contentView.bounds.insetBy(dx: -Self.renderCullPadding, dy: -Self.renderCullPadding)
-        let wrapsUnified = self.wrapsUnified
-        let renderWidth = (wrapsUnified || fastPlainModeEnabled)
-            ? scrollView.bounds.width
-            : max(scrollView.bounds.width, documentView.frame.width)
-        let visibleRange = visibleGeometryRange(in: visibleRect)
-        let sceneKey = makeViewportSceneCacheKey(visibleRange: visibleRange, renderWidth: renderWidth)
+        let renderCullPadding = isActivelyScrolling ? max(64, Self.renderCullPadding / 2) : Self.renderCullPadding
+        let visibleRect = scrollView.contentView.bounds.insetBy(dx: -renderCullPadding, dy: -renderCullPadding)
+        let renderWidth = currentRenderWidth()
+        let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
 
-        // Build or reuse scene
-        let scene: VVScene
-        if let cached = cachedScene, let cachedSceneKey, cachedSceneKey.contains(visibleRange: visibleRange, renderWidth: renderWidth, highlightVersion: highlightSceneVersion) {
+        let scene: VVScene?
+        let orderedPrimitiveIndices: [Int]
+        let visibilityIndex: VVPrimitiveVisibilityIndex?
+        if let cached = cachedScene,
+           let cachedSceneKey,
+           cachedSceneKey.contains(renderWidth: renderWidth, highlightVersion: highlightSceneVersion) {
             scene = cached
+            orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
+            visibilityIndex = cachedSceneVisibilityIndex
         } else {
-            scene = buildViewportScene(visibleRect: visibleRect, renderWidth: renderWidth, cacheKey: sceneKey)
-            cachedScene = scene
-            cachedSceneKey = sceneKey
-            staleHighlightedRowIDs.removeAll(keepingCapacity: true)
-            cachedOrderedScenePrimitives = scene.orderedPrimitives()
-            cachedSceneVisibilityIndex = VVPrimitiveVisibilityIndex(
-                orderedPrimitives: cachedOrderedScenePrimitives,
-                bucketHeight: Self.renderCullPadding
-            )
+            scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
+            scene = cachedScene
+            orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
+            visibilityIndex = cachedSceneVisibilityIndex
         }
 
-        let sceneRenderer = self.sceneRenderer ?? MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
-        self.sceneRenderer = sceneRenderer
-        sceneRenderer.updateBehavior(
-            MarkdownSceneRenderingBehavior(
-                imageTextureProvider: nil,
-                shouldUnderlineLinkRun: { _ in false },
-                missingImageBehavior: .skip
+        let visiblePrimitiveIndicesForDraw: [Int]
+        if let visibilityIndex,
+           let bucketRange = visibilityIndex.bucketRange(for: visibleRect) {
+            if cachedVisibleBucketRange == bucketRange {
+                visiblePrimitiveIndicesForDraw = cachedVisiblePrimitiveIndices
+            } else {
+                let visiblePrimitiveIndices = visibilityIndex.visiblePrimitiveIndices(
+                    inBucketRange: bucketRange,
+                    from: orderedPrimitiveIndices
+                )
+                cachedVisibleBucketRange = bucketRange
+                cachedVisiblePrimitiveIndices = visiblePrimitiveIndices
+                visiblePrimitiveIndicesForDraw = visiblePrimitiveIndices
+            }
+        } else {
+            visiblePrimitiveIndicesForDraw = orderedPrimitiveIndices
+        }
+
+        if let scene {
+            let sceneRenderer = self.sceneRenderer ?? MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
+            self.sceneRenderer = sceneRenderer
+            sceneRenderer.updateBehavior(
+                MarkdownSceneRenderingBehavior(
+                    imageTextureProvider: nil,
+                    shouldUnderlineLinkRun: { _ in false },
+                    missingImageBehavior: .skip
+                )
             )
-        )
-        sceneRenderer.renderScene(
-            scene,
-            orderedPrimitives: cachedOrderedScenePrimitives,
-            visibleRect: visibleRect,
-            visibilityIndex: cachedSceneVisibilityIndex,
-            encoder: encoder,
-            renderer: renderer,
-            scissorRectForClip: { [weak self] in self?.scissorRect(for: $0) ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) },
-            fullScissorRect: { [weak self] in self?.fullScissorRect() ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) }
-        )
+            sceneRenderer.renderScene(
+                scene,
+                orderedPrimitiveIndices: visiblePrimitiveIndicesForDraw,
+                visibleRect: nil,
+                visibilityIndex: nil,
+                encoder: encoder,
+                renderer: renderer,
+                scissorRectForClip: { [weak self] in self?.scissorRect(for: $0) ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) },
+                fullScissorRect: { [weak self] in self?.fullScissorRect() ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) }
+            )
+        }
 
         // Render selection quads on top of scene (so they're visible over opaque row backgrounds)
         if let selection = selectionController.selection {
@@ -1212,28 +1520,11 @@ extension VVDiffMetalView: MTKViewDelegate {
         commandBuffer?.commit()
     }
 
-    private func buildViewportScene(visibleRect: CGRect, renderWidth: CGFloat, cacheKey: ViewportSceneCacheKey) -> VVScene {
-        guard let analyzedDocument else { return VVScene() }
-        let visibleRowIDs = rowIDs(inGeometryRange: cacheKey.startIndex..<cacheKey.endIndex)
-        let result = VVDiffSceneRenderer.render(
-            document: analyzedDocument,
-            width: renderWidth,
-            theme: markdownTheme(from: theme),
-            baseFont: configuration.font,
-            style: renderStyle == .sideBySide ? .sideBySide : .inline,
-            options: .full,
-            highlightedRangesOverride: highlightedRanges,
-            includedRowIDs: visibleRowIDs
-        )
-        return result.scene
-    }
-
-    private func rowIDs(inGeometryRange range: Range<Int>) -> Set<Int> {
+    private func rowIDs(inDisplayBlockRange range: Range<Int>) -> Set<Int> {
         guard range.lowerBound < range.upperBound else { return [] }
         var rowIDs: Set<Int> = []
-        rowIDs.reserveCapacity(range.count)
-        for index in range {
-            rowIDs.insert(rowGeometries[index].rowID)
+        for index in range where index >= 0 && index < displayBlocks.count {
+            rowIDs.formUnion(displayBlocks[index].rowIDs)
         }
         return rowIDs
     }
@@ -1253,16 +1544,30 @@ extension VVDiffMetalView: MTKViewDelegate {
         return startIndex..<endIndex
     }
 
-    private func makeViewportSceneCacheKey(visibleRange: Range<Int>, renderWidth: CGFloat) -> ViewportSceneCacheKey {
-        let paddingRows = max(
-            48,
-            Int(ceil(Double(max(1, visibleRange.count)) * Double(Self.sceneCacheViewportPaddingMultiplier)))
-        )
-        let startIndex = max(0, visibleRange.lowerBound - paddingRows)
-        let endIndex = min(rowGeometries.count, visibleRange.upperBound + paddingRows)
+    private func visibleDisplayBlockRange(in visibleGeometryRange: Range<Int>) -> Range<Int> {
+        guard !displayBlocks.isEmpty,
+              visibleGeometryRange.lowerBound < visibleGeometryRange.upperBound else { return 0..<0 }
+
+        let startGeometryIndex = visibleGeometryRange.lowerBound
+        let endGeometryIndex = max(visibleGeometryRange.lowerBound, visibleGeometryRange.upperBound - 1)
+
+        guard let startBlock = displayBlocks.first(where: {
+            startGeometryIndex >= $0.geometryStartIndex && startGeometryIndex < $0.geometryEndIndex
+        })?.blockIndex else {
+            return 0..<0
+        }
+        guard let endBlock = displayBlocks.first(where: {
+            endGeometryIndex >= $0.geometryStartIndex && endGeometryIndex < $0.geometryEndIndex
+        })?.blockIndex else {
+            return startBlock..<(startBlock + 1)
+        }
+        return startBlock..<(endBlock + 1)
+    }
+
+    private func makeViewportSceneCacheKey(renderWidth: CGFloat) -> ViewportSceneCacheKey {
         return ViewportSceneCacheKey(
-            startIndex: startIndex,
-            endIndex: endIndex,
+            startBlockIndex: 0,
+            endBlockIndex: displayBlocks.count,
             renderWidthBucket: Int((renderWidth * 2).rounded()),
             highlightVersion: highlightSceneVersion
         )
@@ -1353,6 +1658,15 @@ extension VVDiffMetalView: MTKViewDelegate {
         metalView.setNeedsDisplay(metalView.bounds)
     }
 
+    private func inputModifiers(from flags: NSEvent.ModifierFlags) -> VVInputModifiers {
+        var modifiers: VVInputModifiers = []
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.command) { modifiers.insert(.command) }
+        return modifiers
+    }
+
     // MARK: - Mouse Events
 
     override func mouseDown(with event: NSEvent) {
@@ -1368,7 +1682,7 @@ extension VVDiffMetalView: MTKViewDelegate {
         selectionController.handleMouseDown(
             at: point,
             clickCount: event.clickCount,
-            modifiers: event.modifierFlags,
+            modifiers: inputModifiers(from: event.modifierFlags),
             hitTester: self
         )
         invalidateAndRedraw()
@@ -1588,27 +1902,53 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
         Coordinator()
     }
 
+    @MainActor
     final class Coordinator {
         private var lastUnifiedDiff: String?
         private var cachedAnalysis: VVDiffDocument?
+        private var analysisRequestID: Int = 0
+        private var analysisTask: Task<Void, Never>?
 
-        func analysis(for unifiedDiff: String) -> VVDiffDocument {
+        func cachedAnalysis(for unifiedDiff: String) -> VVDiffDocument? {
             if let lastUnifiedDiff, lastUnifiedDiff == unifiedDiff, let cachedAnalysis {
                 return cachedAnalysis
             }
-            let analysis = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
-            lastUnifiedDiff = unifiedDiff
-            cachedAnalysis = analysis
-            return analysis
+            return nil
+        }
+
+        func requestAnalysis(
+            for unifiedDiff: String,
+            apply: @escaping @MainActor (VVDiffDocument) -> Void
+        ) {
+            if let cached = cachedAnalysis(for: unifiedDiff) {
+                apply(cached)
+                return
+            }
+
+            analysisRequestID &+= 1
+            let requestID = analysisRequestID
+            analysisTask?.cancel()
+            analysisTask = Task.detached(priority: .userInitiated) {
+                let analysis = VVDiffSceneRenderer.analyze(unifiedDiff: unifiedDiff)
+                await MainActor.run {
+                    guard requestID == self.analysisRequestID else { return }
+                    self.lastUnifiedDiff = unifiedDiff
+                    self.cachedAnalysis = analysis
+                    apply(analysis)
+                }
+            }
+        }
+
+        deinit {
+            analysisTask?.cancel()
         }
     }
 
     func makeNSView(context: Context) -> VVDiffMetalView {
         let view = VVDiffMetalView(frame: .zero)
-        let analysis = context.coordinator.analysis(for: unifiedDiff)
         view.update(
             unifiedDiff: unifiedDiff,
-            analysis: analysis,
+            analysis: context.coordinator.cachedAnalysis(for: unifiedDiff) ?? VVDiffDocument(rows: [], sections: [], splitRows: []),
             style: renderStyle,
             theme: theme,
             configuration: configuration,
@@ -1616,21 +1956,59 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
             syntaxHighlightingEnabled: syntaxHighlightingEnabled,
             onFileHeaderActivate: onFileHeaderActivate
         )
+        context.coordinator.requestAnalysis(for: unifiedDiff) { [weak view] analysis in
+            guard let view else { return }
+            view.update(
+                unifiedDiff: unifiedDiff,
+                analysis: analysis,
+                style: renderStyle,
+                theme: theme,
+                configuration: configuration,
+                language: language,
+                syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+                onFileHeaderActivate: onFileHeaderActivate
+            )
+        }
         return view
     }
 
     func updateNSView(_ nsView: VVDiffMetalView, context: Context) {
-        let analysis = context.coordinator.analysis(for: unifiedDiff)
-        nsView.update(
-            unifiedDiff: unifiedDiff,
-            analysis: analysis,
-            style: renderStyle,
-            theme: theme,
-            configuration: configuration,
-            language: language,
-            syntaxHighlightingEnabled: syntaxHighlightingEnabled,
-            onFileHeaderActivate: onFileHeaderActivate
-        )
+        if let analysis = context.coordinator.cachedAnalysis(for: unifiedDiff) {
+            nsView.update(
+                unifiedDiff: unifiedDiff,
+                analysis: analysis,
+                style: renderStyle,
+                theme: theme,
+                configuration: configuration,
+                language: language,
+                syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+                onFileHeaderActivate: onFileHeaderActivate
+            )
+        } else {
+            nsView.update(
+                unifiedDiff: unifiedDiff,
+                analysis: VVDiffDocument(rows: [], sections: [], splitRows: []),
+                style: renderStyle,
+                theme: theme,
+                configuration: configuration,
+                language: language,
+                syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+                onFileHeaderActivate: onFileHeaderActivate
+            )
+            context.coordinator.requestAnalysis(for: unifiedDiff) { [weak nsView] analysis in
+                guard let nsView else { return }
+                nsView.update(
+                    unifiedDiff: unifiedDiff,
+                    analysis: analysis,
+                    style: renderStyle,
+                    theme: theme,
+                    configuration: configuration,
+                    language: language,
+                    syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+                    onFileHeaderActivate: onFileHeaderActivate
+                )
+            }
+        }
     }
 }
 
@@ -1659,36 +2037,13 @@ public struct VVDiffView: View {
     public var body: some View {
         VVDiffViewRepresentable(
             unifiedDiff: unifiedDiff,
-            language: effectiveLanguage,
+            language: language,
             theme: theme,
             configuration: configuration,
             renderStyle: renderStyle,
             syntaxHighlightingEnabled: syntaxHighlightingEnabled,
             onFileHeaderActivate: onFileHeaderActivate
         )
-    }
-
-    private var effectiveLanguage: VVLanguage? {
-        if let language {
-            return language
-        }
-
-        for line in unifiedDiff.components(separatedBy: .newlines) where line.hasPrefix("+++ ") {
-            let path = line
-                .replacingOccurrences(of: "+++ b/", with: "")
-                .replacingOccurrences(of: "+++ ", with: "")
-
-            if path == "/dev/null" {
-                continue
-            }
-
-            let url = URL(fileURLWithPath: path)
-            if let detected = VVLanguage.detect(from: url) {
-                return detected
-            }
-        }
-
-        return nil
     }
 }
 

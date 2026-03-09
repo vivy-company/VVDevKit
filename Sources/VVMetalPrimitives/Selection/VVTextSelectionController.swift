@@ -1,6 +1,18 @@
 import Foundation
 import CoreGraphics
-import AppKit
+
+public struct VVInputModifiers: OptionSet, Sendable {
+    public let rawValue: Int
+
+    public static let shift = VVInputModifiers(rawValue: 1 << 0)
+    public static let control = VVInputModifiers(rawValue: 1 << 1)
+    public static let option = VVInputModifiers(rawValue: 1 << 2)
+    public static let command = VVInputModifiers(rawValue: 1 << 3)
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+}
 
 /// Reusable mouse event handler for text selection.
 public final class VVTextSelectionController<Position>: @unchecked Sendable where Position: VVTextPosition & Comparable {
@@ -20,10 +32,11 @@ public final class VVTextSelectionController<Position>: @unchecked Sendable wher
     public func handleMouseDown<T: VVTextHitTestable>(
         at point: CGPoint,
         clickCount: Int,
-        modifiers: NSEvent.ModifierFlags,
+        modifiers: VVInputModifiers,
         hitTester: T
     ) where T.Position == Position {
         guard let position = hitTester.hitTest(at: point) else { return }
+        _ = modifiers
 
         switch clickCount {
         case 1:

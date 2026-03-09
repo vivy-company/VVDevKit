@@ -39,7 +39,7 @@ public extension VVChatTimelineRenderDataSource {
 }
 
 public protocol VVChatTimelineSelectionDelegate: AnyObject {
-    func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags)
+    func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: VVInputModifiers)
     func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDraggedTo point: CGPoint, event: NSEvent)
     func chatTimelineMetalViewMouseUp(_ view: VVChatTimelineMetalView)
     func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseMovedTo point: CGPoint)
@@ -71,7 +71,12 @@ public final class VVChatTimelineMetalView: MTKView {
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        selectionDelegate?.chatTimelineMetalView(self, mouseDownAt: point, clickCount: event.clickCount, modifiers: event.modifierFlags)
+        selectionDelegate?.chatTimelineMetalView(
+            self,
+            mouseDownAt: point,
+            clickCount: event.clickCount,
+            modifiers: inputModifiers(from: event.modifierFlags)
+        )
     }
 
     public override func mouseDragged(with event: NSEvent) {
@@ -147,6 +152,15 @@ public final class VVChatTimelineMetalView: MTKView {
             renderer = nil
             sceneRenderer = nil
         }
+    }
+
+    private func inputModifiers(from flags: NSEvent.ModifierFlags) -> VVInputModifiers {
+        var modifiers: VVInputModifiers = []
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.command) { modifiers.insert(.command) }
+        return modifiers
     }
 
     public func updateFont(_ font: VVFont) {

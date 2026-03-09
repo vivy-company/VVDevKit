@@ -164,6 +164,21 @@ public final class VVChatMessageRenderer {
         let imageURLs: [String]
     }
 
+    private struct FixedResources {
+        let final: ContentResources
+        let draft: ContentResources
+        let header: ContentResources
+        let timestamp: ContentResources
+        let loading: ContentResources
+    }
+
+    private struct StyledTextResourceKey: Hashable {
+        let fontName: String
+        let fontSizeKey: Int
+        let widthKey: Int
+        let colorKey: SIMD4<Int>
+    }
+
     private typealias ContentResources = (layoutEngine: MarkdownLayoutEngine, pipeline: VVMarkdownRenderPipeline)
 
     private let parser = MarkdownParser()
@@ -179,6 +194,7 @@ public final class VVChatMessageRenderer {
     private var loadingPipeline: VVMarkdownRenderPipeline
     private var scaledFinalResources: [Int: ContentResources] = [:]
     private var scaledDraftResources: [Int: ContentResources] = [:]
+    private var styledTextResourceCache: [StyledTextResourceKey: ContentResources] = [:]
     private var cache: LRUCache<CacheKey, VVChatRenderedMessage>
     private var contentWidth: CGFloat
     private var style: VVChatTimelineStyle
@@ -191,41 +207,36 @@ public final class VVChatMessageRenderer {
     }()
 
     public init(style: VVChatTimelineStyle, contentWidth: CGFloat) {
+        let fixedResources = Self.makeFixedResources(style: style, contentWidth: contentWidth)
         self.style = style
         self.contentWidth = contentWidth
-        self.finalLayoutEngine = MarkdownLayoutEngine(baseFont: style.baseFont, theme: style.theme, contentWidth: contentWidth)
-        self.draftLayoutEngine = MarkdownLayoutEngine(baseFont: style.draftFont, theme: style.draftTheme, contentWidth: contentWidth)
-        self.finalPipeline = VVMarkdownRenderPipeline(theme: style.theme, layoutEngine: finalLayoutEngine)
-        self.draftPipeline = VVMarkdownRenderPipeline(theme: style.draftTheme, layoutEngine: draftLayoutEngine)
-        let headerTheme = Self.makeMetaTheme(base: style.theme, textColor: style.headerTextColor)
-        let timestampTheme = Self.makeMetaTheme(base: style.theme, textColor: style.timestampTextColor)
-        let loadingTheme = Self.makeMetaTheme(base: style.theme, textColor: style.loadingIndicatorTextColor)
-        self.headerLayoutEngine = MarkdownLayoutEngine(baseFont: style.headerFont, theme: headerTheme, contentWidth: contentWidth)
-        self.timestampLayoutEngine = MarkdownLayoutEngine(baseFont: style.timestampFont, theme: timestampTheme, contentWidth: contentWidth)
-        self.headerPipeline = VVMarkdownRenderPipeline(theme: headerTheme, layoutEngine: headerLayoutEngine)
-        self.timestampPipeline = VVMarkdownRenderPipeline(theme: timestampTheme, layoutEngine: timestampLayoutEngine)
-        self.loadingLayoutEngine = MarkdownLayoutEngine(baseFont: style.loadingIndicatorFont, theme: loadingTheme, contentWidth: contentWidth)
-        self.loadingPipeline = VVMarkdownRenderPipeline(theme: loadingTheme, layoutEngine: loadingLayoutEngine)
+        self.finalLayoutEngine = fixedResources.final.layoutEngine
+        self.draftLayoutEngine = fixedResources.draft.layoutEngine
+        self.finalPipeline = fixedResources.final.pipeline
+        self.draftPipeline = fixedResources.draft.pipeline
+        self.headerLayoutEngine = fixedResources.header.layoutEngine
+        self.timestampLayoutEngine = fixedResources.timestamp.layoutEngine
+        self.headerPipeline = fixedResources.header.pipeline
+        self.timestampPipeline = fixedResources.timestamp.pipeline
+        self.loadingLayoutEngine = fixedResources.loading.layoutEngine
+        self.loadingPipeline = fixedResources.loading.pipeline
         self.cache = LRUCache(limit: style.renderedCacheLimit)
     }
 
     public func updateStyle(_ style: VVChatTimelineStyle) {
+        let fixedResources = Self.makeFixedResources(style: style, contentWidth: contentWidth)
         self.style = style
-        finalLayoutEngine = MarkdownLayoutEngine(baseFont: style.baseFont, theme: style.theme, contentWidth: contentWidth)
-        draftLayoutEngine = MarkdownLayoutEngine(baseFont: style.draftFont, theme: style.draftTheme, contentWidth: contentWidth)
-        finalPipeline = VVMarkdownRenderPipeline(theme: style.theme, layoutEngine: finalLayoutEngine)
-        draftPipeline = VVMarkdownRenderPipeline(theme: style.draftTheme, layoutEngine: draftLayoutEngine)
-        let headerTheme = Self.makeMetaTheme(base: style.theme, textColor: style.headerTextColor)
-        let timestampTheme = Self.makeMetaTheme(base: style.theme, textColor: style.timestampTextColor)
-        let loadingTheme = Self.makeMetaTheme(base: style.theme, textColor: style.loadingIndicatorTextColor)
-        headerLayoutEngine = MarkdownLayoutEngine(baseFont: style.headerFont, theme: headerTheme, contentWidth: contentWidth)
-        timestampLayoutEngine = MarkdownLayoutEngine(baseFont: style.timestampFont, theme: timestampTheme, contentWidth: contentWidth)
-        headerPipeline = VVMarkdownRenderPipeline(theme: headerTheme, layoutEngine: headerLayoutEngine)
-        timestampPipeline = VVMarkdownRenderPipeline(theme: timestampTheme, layoutEngine: timestampLayoutEngine)
-        loadingLayoutEngine = MarkdownLayoutEngine(baseFont: style.loadingIndicatorFont, theme: loadingTheme, contentWidth: contentWidth)
-        loadingPipeline = VVMarkdownRenderPipeline(theme: loadingTheme, layoutEngine: loadingLayoutEngine)
-        scaledFinalResources.removeAll(keepingCapacity: true)
-        scaledDraftResources.removeAll(keepingCapacity: true)
+        finalLayoutEngine = fixedResources.final.layoutEngine
+        draftLayoutEngine = fixedResources.draft.layoutEngine
+        finalPipeline = fixedResources.final.pipeline
+        draftPipeline = fixedResources.draft.pipeline
+        headerLayoutEngine = fixedResources.header.layoutEngine
+        timestampLayoutEngine = fixedResources.timestamp.layoutEngine
+        headerPipeline = fixedResources.header.pipeline
+        timestampPipeline = fixedResources.timestamp.pipeline
+        loadingLayoutEngine = fixedResources.loading.layoutEngine
+        loadingPipeline = fixedResources.loading.pipeline
+        clearResourceCaches()
         cache.updateLimit(style.renderedCacheLimit)
         cache.removeAll()
     }
@@ -241,8 +252,7 @@ public final class VVChatMessageRenderer {
         headerLayoutEngine.updateContentWidth(width)
         timestampLayoutEngine.updateContentWidth(width)
         loadingLayoutEngine.updateContentWidth(width)
-        scaledFinalResources.removeAll(keepingCapacity: true)
-        scaledDraftResources.removeAll(keepingCapacity: true)
+        clearResourceCaches()
         cache.removeAll()
     }
 
@@ -314,7 +324,11 @@ public final class VVChatMessageRenderer {
 
         if let customContent {
             layout = layoutEngine.layout(parser.parse(""))
-            let customRender = renderCustomContent(customContent, width: messageContentWidth)
+            let customRender = renderCustomContent(
+                customContent,
+                width: messageContentWidth,
+                contentScale: contentScale
+            )
             contentScene = customRender.scene
             contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
             contentMinX = max(0, contentBounds?.minX ?? 0)
@@ -767,22 +781,33 @@ public final class VVChatMessageRenderer {
         return VVScene(primitives: primitives)
     }
 
-    private func renderCustomContent(_ content: VVChatCustomContent, width: CGFloat) -> CustomContentRender {
+    private func renderCustomContent(
+        _ content: VVChatCustomContent,
+        width: CGFloat,
+        contentScale: CGFloat
+    ) -> CustomContentRender {
         switch content {
         case .summaryCard(let card):
             return renderSummaryCard(card, width: width)
         case .inlineDiff(let diff):
-            return renderInlineDiff(diff, width: width)
+            return renderInlineDiff(diff, width: width, contentScale: contentScale)
         }
     }
 
-    private func renderInlineDiff(_ diff: VVChatInlineDiffContent, width: CGFloat) -> CustomContentRender {
+    private func renderInlineDiff(
+        _ diff: VVChatInlineDiffContent,
+        width: CGFloat,
+        contentScale: CGFloat
+    ) -> CustomContentRender {
+        let scale = normalizedContentScale(contentScale)
+        let scaledSize = max(8, style.baseFont.pointSize * scale)
+        let scaledFont = CTFontCreateCopyWithAttributes(style.baseFont, scaledSize, nil, nil) as VVFont
         let result = VVDiffSceneRenderer.render(
             unifiedDiff: diff.unifiedDiff,
             width: max(1, width),
             theme: style.theme,
-            baseFont: style.baseFont,
-            options: .compactInline
+            baseFont: scaledFont,
+            options: diff.renderOptions
         )
         return CustomContentRender(
             scene: result.scene,
@@ -985,11 +1010,14 @@ public final class VVChatMessageRenderer {
         color: SIMD4<Float>,
         width: CGFloat
     ) -> (scene: VVScene, width: CGFloat, height: CGFloat, minY: CGFloat) {
-        let theme = Self.makeMetaTheme(base: style.theme, textColor: color)
-        let layoutEngine = MarkdownLayoutEngine(baseFont: font, theme: theme, contentWidth: width)
-        let pipeline = VVMarkdownRenderPipeline(theme: theme, layoutEngine: layoutEngine)
-        let rendered = renderMeta(text: text, layoutEngine: layoutEngine, pipeline: pipeline, width: width)
-        let bounds = sceneBounds(for: rendered.scene, layoutEngine: layoutEngine)
+        let resources = styledTextResources(font: font, color: color, width: width)
+        let rendered = renderMeta(
+            text: text,
+            layoutEngine: resources.layoutEngine,
+            pipeline: resources.pipeline,
+            width: width
+        )
+        let bounds = sceneBounds(for: rendered.scene, layoutEngine: resources.layoutEngine)
         return (
             scene: rendered.scene,
             width: max(1, bounds?.width ?? Self.singleLineMetaWidth(text, font: font)),
@@ -1195,6 +1223,30 @@ public final class VVChatMessageRenderer {
         return created
     }
 
+    private func styledTextResources(
+        font: VVFont,
+        color: SIMD4<Float>,
+        width: CGFloat
+    ) -> ContentResources {
+        let key = StyledTextResourceKey(
+            fontName: font.fontName,
+            fontSizeKey: Self.fontSizeKey(for: font.pointSize),
+            widthKey: Self.widthKey(for: width),
+            colorKey: Self.colorKey(for: color)
+        )
+        if let cached = styledTextResourceCache[key] {
+            return cached
+        }
+
+        let resources = Self.makeResources(
+            baseFont: font,
+            theme: Self.makeMetaTheme(base: style.theme, textColor: color),
+            contentWidth: width
+        )
+        styledTextResourceCache[key] = resources
+        return resources
+    }
+
     private func makeScaledContentResources(
         baseFont: VVFont,
         theme: MarkdownTheme,
@@ -1202,9 +1254,13 @@ public final class VVChatMessageRenderer {
     ) -> ContentResources {
         let scaledSize = max(8, baseFont.pointSize * scale)
         let scaledFont = CTFontCreateCopyWithAttributes(baseFont, scaledSize, nil, nil) as VVFont
-        let layoutEngine = MarkdownLayoutEngine(baseFont: scaledFont, theme: theme, contentWidth: contentWidth)
-        let pipeline = VVMarkdownRenderPipeline(theme: theme, layoutEngine: layoutEngine)
-        return (layoutEngine, pipeline)
+        return Self.makeResources(baseFont: scaledFont, theme: theme, contentWidth: contentWidth)
+    }
+
+    private func clearResourceCaches() {
+        scaledFinalResources.removeAll(keepingCapacity: true)
+        scaledDraftResources.removeAll(keepingCapacity: true)
+        styledTextResourceCache.removeAll(keepingCapacity: true)
     }
 
     private func timestampCoreLabel(for message: VVChatMessage) -> String {
@@ -1238,6 +1294,45 @@ public final class VVChatMessageRenderer {
         theme.contentPadding = 0
         theme.paragraphSpacing = 2
         return theme
+    }
+
+    private static func makeResources(
+        baseFont: VVFont,
+        theme: MarkdownTheme,
+        contentWidth: CGFloat
+    ) -> ContentResources {
+        let layoutEngine = MarkdownLayoutEngine(baseFont: baseFont, theme: theme, contentWidth: contentWidth)
+        let pipeline = VVMarkdownRenderPipeline(theme: theme, layoutEngine: layoutEngine)
+        return (layoutEngine, pipeline)
+    }
+
+    private static func makeFixedResources(
+        style: VVChatTimelineStyle,
+        contentWidth: CGFloat
+    ) -> FixedResources {
+        let headerTheme = makeMetaTheme(base: style.theme, textColor: style.headerTextColor)
+        let timestampTheme = makeMetaTheme(base: style.theme, textColor: style.timestampTextColor)
+        let loadingTheme = makeMetaTheme(base: style.theme, textColor: style.loadingIndicatorTextColor)
+        return FixedResources(
+            final: makeResources(baseFont: style.baseFont, theme: style.theme, contentWidth: contentWidth),
+            draft: makeResources(baseFont: style.draftFont, theme: style.draftTheme, contentWidth: contentWidth),
+            header: makeResources(baseFont: style.headerFont, theme: headerTheme, contentWidth: contentWidth),
+            timestamp: makeResources(baseFont: style.timestampFont, theme: timestampTheme, contentWidth: contentWidth),
+            loading: makeResources(baseFont: style.loadingIndicatorFont, theme: loadingTheme, contentWidth: contentWidth)
+        )
+    }
+
+    private static func fontSizeKey(for size: CGFloat) -> Int {
+        Int((size * 100).rounded())
+    }
+
+    private static func colorKey(for color: SIMD4<Float>) -> SIMD4<Int> {
+        SIMD4<Int>(
+            Int((color.x * 255).rounded()),
+            Int((color.y * 255).rounded()),
+            Int((color.z * 255).rounded()),
+            Int((color.w * 255).rounded())
+        )
     }
 
     private func sceneBounds(for scene: VVScene, layoutEngine: MarkdownLayoutEngine) -> CGRect? {

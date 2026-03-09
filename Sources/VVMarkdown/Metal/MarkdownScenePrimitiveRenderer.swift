@@ -205,21 +205,16 @@ public final class MarkdownScenePrimitiveRenderer {
             currentClip = offsetClip
         }
 
-        let visiblePositions = visibleRect.flatMap { rect in
-            visibilityIndex?.visiblePositions(in: rect)
-        }
-        let primitivePositions = visiblePositions ?? Array(orderedPrimitiveIndices.indices)
-
         let primitives = scene.primitives
-        for position in primitivePositions {
-            guard position >= orderedPrimitiveIndices.startIndex && position < orderedPrimitiveIndices.endIndex else { continue }
+        func renderPrimitiveAtPosition(_ position: Int) {
+            guard position >= orderedPrimitiveIndices.startIndex && position < orderedPrimitiveIndices.endIndex else { return }
             let index = orderedPrimitiveIndices[position]
-            guard index >= primitives.startIndex && index < primitives.endIndex else { continue }
+            guard index >= primitives.startIndex && index < primitives.endIndex else { return }
             let primitive = primitives[index]
             if let visibleRect,
                let bounds = vvPrimitiveVisibilityBounds(primitive),
                !bounds.intersects(visibleRect) {
-                continue
+                return
             }
             updateClip(primitive.clipRect)
             switch primitive.kind {
@@ -241,6 +236,16 @@ public final class MarkdownScenePrimitiveRenderer {
                 flushQuadBatches()
                 flushTextBatches()
                 renderPrimitive(primitive, offset: offset, encoder: encoder, renderer: renderer)
+            }
+        }
+
+        if let visibleRect, let visibilityIndex, let visiblePositions = Optional(visibilityIndex.visiblePositions(in: visibleRect)) {
+            for position in visiblePositions {
+                renderPrimitiveAtPosition(position)
+            }
+        } else {
+            for position in orderedPrimitiveIndices.indices {
+                renderPrimitiveAtPosition(position)
             }
         }
 

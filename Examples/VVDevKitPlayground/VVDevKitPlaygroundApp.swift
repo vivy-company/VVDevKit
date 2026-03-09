@@ -1109,7 +1109,6 @@ struct ChatPlaygroundView: View {
     @State private var expandedToolGroupIDs: Set<String> = []
     @State private var nextScriptedTurn = 0
     @State private var chatState = VVChatTimelineState()
-    @State private var jumpToLatestRequestID = 0
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 12) {
@@ -1171,41 +1170,13 @@ struct ChatPlaygroundView: View {
             .padding(16)
             .frame(minWidth: 240, idealWidth: 280, maxWidth: 340)
 
-            ZStack(alignment: .bottomTrailing) {
-                PlaygroundChatTimelineHost(
-                    controller: controller,
-                    jumpToLatestRequestID: jumpToLatestRequestID,
-                    onStateChange: handleStateChange,
-                    onEntryActivate: handleEntryActivate,
-                    onLinkActivate: handleLinkActivate
-                )
-
-                if showJumpToLatestButton {
-                    Button(action: jumpToLatest) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("Latest")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(jumpButtonBackground)
-                        .overlay(
-                            Capsule()
-                                .stroke(jumpButtonBorder, lineWidth: 1)
-                        )
-                        .clipShape(Capsule())
-                        .shadow(color: Color.black.opacity(useLightTheme ? 0.08 : 0.22), radius: 14, y: 8)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 22)
-                    .padding(.bottom, 18)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
+            PlaygroundChatTimelineHost(
+                controller: controller,
+                onStateChange: handleStateChange,
+                onEntryActivate: handleEntryActivate,
+                onLinkActivate: handleLinkActivate
+            )
         }
-        .animation(.easeOut(duration: 0.2), value: showJumpToLatestButton)
         .onAppear {
             if !didSeed {
                 seedTranscript()
@@ -1224,27 +1195,6 @@ struct ChatPlaygroundView: View {
         .onChange(of: includeInterrupts) { _ in
             seedTranscript()
         }
-    }
-
-    private var showJumpToLatestButton: Bool {
-        !chatState.isPinnedToBottom || chatState.hasUnreadNewContent
-    }
-
-    private var jumpButtonBackground: some View {
-        Group {
-            if useLightTheme {
-                Color.white.opacity(0.96)
-            } else {
-                Color(nsColor: NSColor(calibratedWhite: 0.10, alpha: 0.96))
-            }
-        }
-    }
-
-    private var jumpButtonBorder: Color {
-        if useLightTheme {
-            return Color.black.opacity(0.08)
-        }
-        return Color.white.opacity(0.08)
     }
 
     private func updateChatStyle() {
@@ -1903,13 +1853,6 @@ struct ChatPlaygroundView: View {
         guard let parsed = URL(string: url), parsed.scheme == "playground-file" else { return }
     }
 
-    private func jumpToLatest() {
-        withAnimation(.easeOut(duration: 0.2)) {
-            chatState.hasUnreadNewContent = false
-        }
-        jumpToLatestRequestID &+= 1
-    }
-
     private func uniquedTurn(_ turn: PlaygroundScriptedTurn, sequence: Int) -> PlaygroundScriptedTurn {
         let suffix = "-loop-\(sequence + 1)"
         let offset = TimeInterval(sequence * 60)
@@ -2060,14 +2003,9 @@ struct ChatTimelineRepresentable: NSViewRepresentable {
 
 private struct PlaygroundChatTimelineHost: NSViewRepresentable {
     let controller: VVChatTimelineController
-    let jumpToLatestRequestID: Int
     let onStateChange: (VVChatTimelineState) -> Void
     let onEntryActivate: (String) -> Void
     let onLinkActivate: (String) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
 
     func makeNSView(context: Context) -> VVChatTimelineView {
         let view = VVChatTimelineView(frame: .zero)
@@ -2075,7 +2013,6 @@ private struct PlaygroundChatTimelineHost: NSViewRepresentable {
         view.onStateChange = onStateChange
         view.onEntryActivate = onEntryActivate
         view.onLinkActivate = onLinkActivate
-        context.coordinator.lastJumpRequestID = jumpToLatestRequestID
         return view
     }
 
@@ -2086,21 +2023,6 @@ private struct PlaygroundChatTimelineHost: NSViewRepresentable {
         nsView.onStateChange = onStateChange
         nsView.onEntryActivate = onEntryActivate
         nsView.onLinkActivate = onLinkActivate
-
-        if context.coordinator.lastJumpRequestID != jumpToLatestRequestID {
-            context.coordinator.lastJumpRequestID = jumpToLatestRequestID
-            context.coordinator.animateToBottom(in: nsView, controller: controller)
-        }
-    }
-
-    @MainActor
-    final class Coordinator {
-        var lastJumpRequestID = 0
-
-        func animateToBottom(in view: VVChatTimelineView, controller: VVChatTimelineController) {
-            _ = controller
-            view.jumpToLatestAnimated()
-        }
     }
 }
 

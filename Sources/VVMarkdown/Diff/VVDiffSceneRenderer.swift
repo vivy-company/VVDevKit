@@ -21,7 +21,7 @@ public struct VVDiffRenderResult: Sendable {
     }
 }
 
-public struct VVDiffRenderOptions: Sendable {
+public struct VVDiffRenderOptions: Hashable, Sendable {
     public var showsFileHeaders: Bool
     public var showsMetadata: Bool
     public var showsHunkHeaders: Bool
@@ -642,16 +642,32 @@ private func makeSplitRows(from rows: [ParsedDiffRow]) -> [ParsedDiffSplitRow] {
             for index in 0..<count {
                 let deleted = index < deletedRows.count ? deletedRows[index] : nil
                 let added = index < addedRows.count ? addedRows[index] : nil
+                let inlineChanges = {
+                    guard let deleted, let added else {
+                        return (old: [ParsedDiffSplitRow.InlineRange](), new: [ParsedDiffSplitRow.InlineRange]())
+                    }
+                    return computeInlineChanges(oldText: deleted.text, newText: added.text)
+                }()
 
                 var leftCell: ParsedDiffSplitRow.Cell?
                 var rightCell: ParsedDiffSplitRow.Cell?
                 if let deleted {
-                    let inline = added.map { computeInlineChanges(oldText: deleted.text, newText: $0.text).old } ?? []
-                    leftCell = .init(rowID: deleted.id, lineNumber: deleted.oldLineNumber, text: deleted.text, kind: .deleted, inlineChanges: inline)
+                    leftCell = .init(
+                        rowID: deleted.id,
+                        lineNumber: deleted.oldLineNumber,
+                        text: deleted.text,
+                        kind: .deleted,
+                        inlineChanges: inlineChanges.old
+                    )
                 }
                 if let added {
-                    let inline = deleted.map { computeInlineChanges(oldText: $0.text, newText: added.text).new } ?? []
-                    rightCell = .init(rowID: added.id, lineNumber: added.newLineNumber, text: added.text, kind: .added, inlineChanges: inline)
+                    rightCell = .init(
+                        rowID: added.id,
+                        lineNumber: added.newLineNumber,
+                        text: added.text,
+                        kind: .added,
+                        inlineChanges: inlineChanges.new
+                    )
                 }
 
                 result.append(ParsedDiffSplitRow(id: result.count, header: nil, left: leftCell, right: rightCell))
@@ -833,6 +849,11 @@ private typealias MDLayoutGlyph = LayoutGlyph
 private typealias MDFontVariant = FontVariant
 
 private final class DiffSceneBuilder {
+    private struct LineNumberGlyphCacheKey: Hashable {
+        let text: String
+        let color: SIMD4<Float>
+    }
+
     private struct WrappedTextSegment {
         let text: String
         let start: Int
@@ -847,6 +868,7 @@ private final class DiffSceneBuilder {
     let layoutEngine: MarkdownLayoutEngine
     let codeInsetX: CGFloat = 10
     let highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
+    private var lineNumberGlyphCache: [LineNumberGlyphCacheKey: [MDLayoutGlyph]] = [:]
 
     var textColor: SIMD4<Float>
     var backgroundColor: SIMD4<Float>
@@ -1108,13 +1130,13 @@ private final class DiffSceneBuilder {
         let lineNumberColor = lineNumberColor(for: row.kind)
 
         if let oldNum = row.oldLineNumber {
-            let glyphs = layoutEngine.layoutTextGlyphs(String(oldNum), variant: .monospace, at: .zero, color: lineNumberColor)
+            let glyphs = lineNumberGlyphs(text: String(oldNum), color: lineNumberColor)
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             addTextGlyphs(glyphs, offsetX: gutterColWidth - width - 4, baselineY: firstBaselineY, builder: &builder)
         }
 
         if let newNum = row.newLineNumber {
-            let glyphs = layoutEngine.layoutTextGlyphs(String(newNum), variant: .monospace, at: .zero, color: lineNumberColor)
+            let glyphs = lineNumberGlyphs(text: String(newNum), color: lineNumberColor)
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             addTextGlyphs(glyphs, offsetX: gutterColWidth * 2 - width - 4, baselineY: firstBaselineY, builder: &builder)
         }
@@ -1342,7 +1364,7 @@ private final class DiffSceneBuilder {
         buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
 
         if let lineNumber = cell.lineNumber {
-            let glyphs = layoutEngine.layoutTextGlyphs(String(lineNumber), variant: .monospace, at: .zero, color: lineNumberColor(for: cell.kind))
+            let glyphs = lineNumberGlyphs(text: String(lineNumber), color: lineNumberColor(for: cell.kind))
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let numX = paneX + markerWidth + gutterColWidth - width - 8
             addTextGlyphs(glyphs, offsetX: numX, baselineY: firstBaselineY, builder: &builder)
@@ -1557,6 +1579,16 @@ private final class DiffSceneBuilder {
 
     private func measureCharWidth() -> CGFloat {
         layoutEngine.measureTextWidth("8", variant: .monospace)
+    }
+
+    private func lineNumberGlyphs(text: String, color: SIMD4<Float>) -> [MDLayoutGlyph] {
+        let key = LineNumberGlyphCacheKey(text: text, color: color)
+        if let cached = lineNumberGlyphCache[key] {
+            return cached
+        }
+        let glyphs = layoutEngine.layoutTextGlyphs(text, variant: .monospace, at: .zero, color: color)
+        lineNumberGlyphCache[key] = glyphs
+        return glyphs
     }
 
     private func rowBackgroundColor(for kind: ParsedDiffRow.Kind) -> SIMD4<Float> {

@@ -36,7 +36,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private let scrollView: VVChatTimelineScrollView
     private let documentView: ChatTimelineDocumentView
     private let metalView: VVChatTimelineMetalView
-    private let jumpButton: NSButton
     private var didInitialScroll: Bool = false
     private var controllerObservation: NSObjectProtocol?
     private var currentFont: VVFont?
@@ -114,7 +113,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollView = VVChatTimelineScrollView(frame: frameRect)
         documentView = ChatTimelineDocumentView(frame: frameRect)
         metalView = VVChatTimelineMetalView(frame: frameRect, font: .systemFont(ofSize: 14), metalContext: self.metalContext)
-        jumpButton = NSButton(title: "Jump to latest", target: nil, action: nil)
         super.init(frame: frameRect)
         setup()
     }
@@ -124,7 +122,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollView = VVChatTimelineScrollView(frame: .zero)
         documentView = ChatTimelineDocumentView(frame: .zero)
         metalView = VVChatTimelineMetalView(frame: .zero, font: .systemFont(ofSize: 14), metalContext: VVMetalContext.shared)
-        jumpButton = NSButton(title: "Jump to latest", target: nil, action: nil)
         super.init(coder: coder)
         setup()
     }
@@ -170,13 +167,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             imageStore = store
         }
 
-        jumpButton.target = self
-        jumpButton.action = #selector(handleJumpToLatest)
-        jumpButton.isHidden = true
-        jumpButton.bezelStyle = .rounded
-        jumpButton.controlSize = .regular
-        addSubview(jumpButton)
-
         controllerObservation = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification,
             object: scrollView.contentView,
@@ -191,7 +181,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollView.frame = bounds
         updateMetalViewport()
         updateContentWidth()
-        layoutJumpButton()
         updateVisibleRenderRange()
     }
 
@@ -203,17 +192,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         } else {
             stopDisplayLink()
         }
-    }
-
-    private func layoutJumpButton() {
-        let buttonSize = jumpButton.intrinsicContentSize
-        let padding: CGFloat = 12
-        jumpButton.frame = CGRect(
-            x: bounds.maxX - buttonSize.width - padding,
-            y: bounds.maxY - buttonSize.height - padding,
-            width: buttonSize.width,
-            height: buttonSize.height
-        )
     }
 
     private func bindController(oldValue: VVChatTimelineController?) {
@@ -294,7 +272,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         updateDocumentHeight(controller.totalHeight)
         clampScrollIfNeeded()
         updateVisibleRenderRange()
-        jumpButton.isHidden = !update.hasUnreadNewContent
 
         if update.heightDelta != 0,
            let changedIndex = update.changedIndex,
@@ -446,7 +423,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         let maxOffset = max(0, contentHeight - visibleRect.height)
         let distanceFromBottom = maxOffset - visibleRect.origin.y
         controller.updatePinnedState(distanceFromBottom: distanceFromBottom)
-        jumpButton.isHidden = !controller.state.hasUnreadNewContent
         onStateChange?(controller.state)
     }
 
@@ -472,10 +448,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     // prepareLayoutTransition is now on the controller — no view-side capture needed
-
-    @objc private func handleJumpToLatest() {
-        jumpToLatestAnimated()
-    }
 
     public func jumpToLatestAnimated() {
         isAnimatingJump = true
@@ -1105,7 +1077,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 // MARK: - VVChatTimelineSelectionDelegate
 
 extension VVChatTimelineView: VVChatTimelineSelectionDelegate {
-    public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags) {
+    public func chatTimelineMetalView(_ view: VVChatTimelineMetalView, mouseDownAt point: CGPoint, clickCount: Int, modifiers: VVInputModifiers) {
         pendingEntryActivationID = nil
         suppressEntryActivationForCurrentClick = false
         didDragDuringCurrentClick = false

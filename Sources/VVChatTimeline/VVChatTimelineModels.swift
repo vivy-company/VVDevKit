@@ -1,4 +1,5 @@
 import Foundation
+import VVMarkdown
 
 public enum VVChatMessageRole: String, Sendable {
     case user
@@ -97,9 +98,14 @@ public struct VVChatSummaryCard: Hashable, Sendable {
 
 public struct VVChatInlineDiffContent: Hashable, Sendable {
     public var unifiedDiff: String
+    public var renderOptions: VVDiffRenderOptions
 
-    public init(unifiedDiff: String) {
+    public init(
+        unifiedDiff: String,
+        renderOptions: VVDiffRenderOptions = .compactInline
+    ) {
         self.unifiedDiff = unifiedDiff
+        self.renderOptions = renderOptions
     }
 }
 
