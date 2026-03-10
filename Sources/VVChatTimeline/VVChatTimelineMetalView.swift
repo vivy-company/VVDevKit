@@ -11,13 +11,22 @@ public struct VVChatTimelineRenderItem {
     public let contentOffset: CGPoint
     public let scene: VVScene
     public let orderedPrimitiveIndices: [Int]
+    public let visibilityIndex: VVPrimitiveVisibilityIndex
 
-    public init(id: String, frame: CGRect, contentOffset: CGPoint, scene: VVScene, orderedPrimitiveIndices: [Int]) {
+    public init(
+        id: String,
+        frame: CGRect,
+        contentOffset: CGPoint,
+        scene: VVScene,
+        orderedPrimitiveIndices: [Int],
+        visibilityIndex: VVPrimitiveVisibilityIndex
+    ) {
         self.id = id
         self.frame = frame
         self.contentOffset = contentOffset
         self.scene = scene
         self.orderedPrimitiveIndices = orderedPrimitiveIndices
+        self.visibilityIndex = visibilityIndex
     }
 }
 
@@ -223,10 +232,14 @@ public final class VVChatTimelineMetalView: MTKView {
             // correctly under the single global projection + scroll offset.
             let itemOffset = CGPoint(x: item.frame.origin.x + item.contentOffset.x,
                                      y: item.frame.origin.y + item.contentOffset.y)
+            let itemVisibleRect = visibleRect.offsetBy(dx: -itemOffset.x, dy: -itemOffset.y)
+                .insetBy(dx: -visibilityPadding, dy: -visibilityPadding)
 
             renderScene(
                 item.scene,
                 orderedPrimitiveIndices: item.orderedPrimitiveIndices,
+                visibilityIndex: item.visibilityIndex,
+                visibleRect: itemVisibleRect,
                 encoder: encoder,
                 renderer: renderer,
                 imageProvider: renderDataSource,
@@ -278,6 +291,8 @@ public final class VVChatTimelineMetalView: MTKView {
     private func renderScene(
         _ scene: VVScene,
         orderedPrimitiveIndices: [Int],
+        visibilityIndex: VVPrimitiveVisibilityIndex,
+        visibleRect: CGRect,
         encoder: MTLRenderCommandEncoder,
         renderer: MarkdownMetalRenderer,
         imageProvider: VVChatTimelineRenderDataSource,
@@ -295,6 +310,8 @@ public final class VVChatTimelineMetalView: MTKView {
         sceneRenderer.renderScene(
             scene,
             orderedPrimitiveIndices: orderedPrimitiveIndices,
+            visibleRect: visibleRect,
+            visibilityIndex: visibilityIndex,
             encoder: encoder,
             renderer: renderer,
             itemOffset: itemOffset,

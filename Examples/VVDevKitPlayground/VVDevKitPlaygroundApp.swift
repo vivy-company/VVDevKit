@@ -1014,12 +1014,18 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
             }
             return lhs.element.zIndex < rhs.element.zIndex
         }.map(\.offset)
+        let visibilityIndex = VVPrimitiveVisibilityIndex(
+            scene: scene,
+            orderedPrimitiveIndices: orderedPrimitiveIndices,
+            bucketHeight: 192
+        )
         return VVChatTimelineRenderItem(
             id: "primitives",
             frame: bounds,
             contentOffset: .zero,
             scene: scene,
-            orderedPrimitiveIndices: orderedPrimitiveIndices
+            orderedPrimitiveIndices: orderedPrimitiveIndices,
+            visibilityIndex: visibilityIndex
         )
     }
 

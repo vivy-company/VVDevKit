@@ -10,6 +10,7 @@ public struct VVChatRenderedMessage {
     public let layoutEngine: MarkdownLayoutEngine
     public let scene: VVScene
     public let orderedPrimitiveIndices: [Int]
+    public let visibilityIndex: VVPrimitiveVisibilityIndex
     public let height: CGFloat
     public let contentOffset: CGPoint
     public let selectionContentOffset: CGPoint
@@ -676,13 +677,19 @@ public final class VVChatMessageRenderer {
         } else {
             bubbleOffsetX = 0
         }
+        let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
         let rendered = VVChatRenderedMessage(
             id: message.id,
             revision: message.revision,
             layout: layout,
             layoutEngine: layoutEngine,
             scene: scene,
-            orderedPrimitiveIndices: scene.orderedPrimitiveIndices(),
+            orderedPrimitiveIndices: orderedPrimitiveIndices,
+            visibilityIndex: VVPrimitiveVisibilityIndex(
+                scene: scene,
+                orderedPrimitiveIndices: orderedPrimitiveIndices,
+                bucketHeight: 192
+            ),
             height: height,
             contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
             selectionContentOffset: selectionContentOffset,

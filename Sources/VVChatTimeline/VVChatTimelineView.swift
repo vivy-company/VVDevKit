@@ -854,7 +854,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             frame: snapshot?.frame ?? layout.frame,
             contentOffset: snapshot?.contentOffset ?? layout.contentOffset,
             scene: rendered.scene,
-            orderedPrimitiveIndices: rendered.orderedPrimitiveIndices
+            orderedPrimitiveIndices: rendered.orderedPrimitiveIndices,
+            visibilityIndex: rendered.visibilityIndex
         )
     }
 

@@ -21,6 +21,30 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         }
     }
 
+    func testLongRenderedMessageProvidesVisiblePrimitiveSubset() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        controller.appendMessage(
+            VVChatMessage(
+                id: "long-message",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 220)
+            )
+        )
+
+        guard let rendered = controller.renderedMessage(at: 0) else {
+            XCTFail("Expected rendered message")
+            return
+        }
+
+        let localVisibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        let visiblePositions = rendered.visibilityIndex.visiblePositions(in: localVisibleRect)
+
+        XCTAssertGreaterThan(rendered.height, localVisibleRect.height)
+        XCTAssertGreaterThan(rendered.orderedPrimitiveIndices.count, visiblePositions.count)
+        XCTAssertGreaterThan(visiblePositions.count, 0)
+    }
+
     func testRepeatedStreamingMemoryStabilizesAfterWarmCaches() {
         let style = VVChatTimelineStyle()
         let second = profileStreamingCycle(style: style, messageCount: 180, steps: 180, label: "second")
@@ -260,6 +284,29 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
             if row.isMultiple(of: 16) {
                 text += "\n```swift\nlet row\(row) = \(row)\nprint(row\(row))\n```\n\n"
             }
+        }
+
+        return text
+    }
+
+    private func longMessageContent(paragraphCount: Int) -> String {
+        var text = """
+        ## Long Message
+
+        This message is intentionally large so the timeline renderer has to deal with many markdown blocks, text runs, and code rows in a single item.
+
+        """
+
+        for index in 0..<paragraphCount {
+            text += """
+            Paragraph \(index): the renderer should only draw the primitives that intersect the local viewport instead of traversing the entire message scene every frame.
+
+            ```swift
+            let value\(index) = BenchmarkRenderer.render(row: \(index), width: 480, theme: .dark)
+            print(value\(index))
+            ```
+
+            """
         }
 
         return text
