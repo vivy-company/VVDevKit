@@ -1154,7 +1154,9 @@ public final class VVMarkdownSelectionHelper {
         let sortedSegments = segments.sorted { $0.rect.minY < $1.rect.minY }
         for segment in sortedSegments {
             if let index = grouped.firstIndex(where: {
-                segment.rect.maxY >= $0.rect.minY - 4 && segment.rect.minY <= $0.rect.maxY + 4
+                segment.lineKey == $0.lineKey &&
+                segment.rect.maxY >= $0.rect.minY - 4 &&
+                segment.rect.minY <= $0.rect.maxY + 4
             }) {
                 let existing = grouped[index].rect
                 let mergedRect = existing.union(segment.rect)

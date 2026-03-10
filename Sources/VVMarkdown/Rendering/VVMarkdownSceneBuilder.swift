@@ -36,6 +36,14 @@ struct VVMarkdownSceneBuilder {
     let runFont: (LayoutTextRun) -> CTFont?
 
     func buildScene(from layout: MarkdownLayout) -> VVScene {
+        buildScene(from: layout, blockRange: layout.blocks.indices)
+    }
+
+    func buildScene(from layout: MarkdownLayout, blockRange: Range<Int>) -> VVScene {
+        buildScene(from: layout, blocks: layout.blocks[blockRange])
+    }
+
+    private func buildScene(from layout: MarkdownLayout, blocks: ArraySlice<LayoutBlock>) -> VVScene {
         var builder = VVSceneBuilder()
         let env = VVLayoutEnvironment(
             scale: scale,
@@ -52,7 +60,7 @@ struct VVMarkdownSceneBuilder {
             viewFactory.view(for: block)
         }
 
-        for block in layout.blocks {
+        for block in blocks {
             autoreleasepool {
                 let view = viewProvider?(block, context, defaultViewFactory) ?? defaultViewFactory(block)
                 let styledView = viewFactory.applyStyleRegistryView(to: view, for: block)

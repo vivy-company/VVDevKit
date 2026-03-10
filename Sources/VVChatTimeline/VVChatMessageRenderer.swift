@@ -6,11 +6,9 @@ import VVMetalPrimitives
 public struct VVChatRenderedMessage {
     public let id: String
     public let revision: Int
-    public let layout: MarkdownLayout
-    public let layoutEngine: MarkdownLayoutEngine
-    public let scene: VVScene
-    public let orderedPrimitiveIndices: [Int]
-    public let visibilityIndex: VVPrimitiveVisibilityIndex
+    public let chromeScene: VVScene
+    public let chromeOrderedPrimitiveIndices: [Int]
+    public let chromeVisibilityIndex: VVPrimitiveVisibilityIndex
     public let height: CGFloat
     public let contentOffset: CGPoint
     public let selectionContentOffset: CGPoint
@@ -18,6 +16,7 @@ public struct VVChatRenderedMessage {
     public let imageURLs: [String]
     public let footerTrailingActionFrame: CGRect?
     public let interactiveRegions: [VVChatInteractiveRegion]
+    fileprivate let contentSceneSource: VVChatMessageRenderer.ContentSceneSource
 }
 
 public enum VVChatInteractiveAction: Hashable, Sendable {
@@ -46,27 +45,48 @@ public struct VVChatInteractiveRegion: Hashable, Sendable {
     }
 }
 
+struct VVChatSceneArtifacts {
+    let scene: VVScene
+    let orderedPrimitiveIndices: [Int]
+    let visibilityIndex: VVPrimitiveVisibilityIndex
+}
+
 public final class VVChatMessageRenderer {
     private final class LRUCache<Key: Hashable, Value> {
         private final class Node {
             let key: Key
             var value: Value
+            var cost: Int
             var prev: Node?
             var next: Node?
-            init(key: Key, value: Value) { self.key = key; self.value = value }
+            init(key: Key, value: Value, cost: Int) {
+                self.key = key
+                self.value = value
+                self.cost = cost
+            }
         }
 
         private var map: [Key: Node] = [:]
         private var head: Node?  // most recent
         private var tail: Node?  // least recent
         private var limit: Int
+        private var costLimit: Int?
+        private let cost: (Value) -> Int
+        private var totalCost = 0
 
-        init(limit: Int) {
+        init(limit: Int, costLimit: Int? = nil, cost: @escaping (Value) -> Int = { _ in 1 }) {
             self.limit = max(0, limit)
+            self.costLimit = costLimit.map { max(0, $0) }
+            self.cost = cost
         }
 
         func updateLimit(_ limit: Int) {
             self.limit = max(0, limit)
+            evictIfNeeded()
+        }
+
+        func updateCostLimit(_ costLimit: Int?) {
+            self.costLimit = costLimit.map { max(0, $0) }
             evictIfNeeded()
         }
 
@@ -81,14 +101,20 @@ public final class VVChatMessageRenderer {
                 map.removeAll(keepingCapacity: true)
                 head = nil
                 tail = nil
+                totalCost = 0
                 return
             }
+            let valueCost = max(1, cost(value))
             if let existing = map[key] {
+                totalCost -= existing.cost
                 existing.value = value
+                existing.cost = valueCost
+                totalCost += valueCost
                 moveToTail(existing)
             } else {
-                let node = Node(key: key, value: value)
+                let node = Node(key: key, value: value, cost: valueCost)
                 map[key] = node
+                totalCost += valueCost
                 appendToTail(node)
             }
             evictIfNeeded()
@@ -99,6 +125,7 @@ public final class VVChatMessageRenderer {
             while let current = node {
                 node = current.next
                 if predicate(current.key) {
+                    totalCost -= current.cost
                     unlink(current)
                     map.removeValue(forKey: current.key)
                 }
@@ -109,6 +136,46 @@ public final class VVChatMessageRenderer {
             map.removeAll(keepingCapacity: true)
             head = nil
             tail = nil
+            totalCost = 0
+        }
+
+        var count: Int {
+            map.count
+        }
+
+        var currentCost: Int {
+            totalCost
+        }
+
+        func keysFromLeastRecent() -> [Key] {
+            var keys: [Key] = []
+            keys.reserveCapacity(map.count)
+            var node = head
+            while let current = node {
+                keys.append(current.key)
+                node = current.next
+            }
+            return keys
+        }
+
+        func valuesFromLeastRecent() -> [Value] {
+            var values: [Value] = []
+            values.reserveCapacity(map.count)
+            var node = head
+            while let current = node {
+                values.append(current.value)
+                node = current.next
+            }
+            return values
+        }
+
+        func updateValue(for key: Key, _ update: (inout Value) -> Void) {
+            guard let node = map[key] else { return }
+            totalCost -= node.cost
+            update(&node.value)
+            node.cost = max(1, cost(node.value))
+            totalCost += node.cost
+            evictIfNeeded()
         }
 
         private func moveToTail(_ node: Node) {
@@ -136,19 +203,74 @@ public final class VVChatMessageRenderer {
 
         private func evictIfNeeded() {
             guard limit > 0 else { return }
-            while map.count > limit, let oldest = head {
+            while (map.count > limit || (costLimit != nil && totalCost > costLimit!)), let oldest = head {
+                totalCost -= oldest.cost
                 unlink(oldest)
                 map.removeValue(forKey: oldest.key)
             }
         }
     }
 
-    private struct CacheKey: Hashable {
+    fileprivate struct CacheKey: Hashable {
         let id: String
         let revision: Int
         let widthKey: Int
         let isDraft: Bool
         let contentScaleKey: Int
+    }
+
+    struct DebugSnapshot {
+        let renderedMessageCacheCount: Int
+        let renderedMessageCacheEstimatedCost: Int
+        let renderedMessageCacheCostLimit: Int
+        let preparedMarkdownCacheCount: Int
+        let materializedPreparedLayoutCount: Int
+        let materializedPreparedLayoutEstimatedCost: Int
+        let materializedPreparedLayoutCostLimit: Int
+        let preparedMarkdownCacheHits: Int
+        let preparedMarkdownCacheMisses: Int
+        let preparedMarkdownCacheEstimatedCost: Int
+        let preparedMarkdownCacheCostLimit: Int
+        let markdownParseCount: Int
+        let markdownLayoutCount: Int
+        let markdownWindowLayoutCount: Int
+        let markdownSceneBuildCount: Int
+        let incrementalImageLayoutPassCount: Int
+        let sceneWindowCacheEstimatedCost: Int
+        let sceneWindowCacheCostLimit: Int
+    }
+
+    private struct PreparedMarkdownLayoutAnalysis {
+        let imageURLs: Set<String>
+        let measuredWidth: CGFloat?
+        let contentBounds: CGRect?
+        let estimatedCost: Int
+        let totalHeight: CGFloat
+        let blockFrameMinY: [CGFloat]
+        let blockMinY: [CGFloat]
+        let blockMaxY: [CGFloat]
+        let sourceBlockIndexes: [Int]
+        let directImageBlockIDsByURL: [String: [String]]
+        let imageRowBlockIDsByURL: [String: [String]]
+    }
+
+    private struct PreparedMarkdownContent {
+        let document: ParsedMarkdownDocument
+        var layout: MarkdownLayout?
+        var analysis: PreparedMarkdownLayoutAnalysis
+        var appliedImageSizes: [String: CGSize]
+    }
+
+    fileprivate enum ContentSceneSource {
+        case none
+        case markdown(CacheKey)
+        case staticScene(VVChatSceneArtifacts)
+    }
+
+    private struct SceneWindowCacheKey: Hashable {
+        let key: CacheKey
+        let startBlock: Int
+        let endBlock: Int
     }
 
     private struct HeaderRender {
@@ -197,9 +319,22 @@ public final class VVChatMessageRenderer {
     private var scaledDraftResources: [Int: ContentResources] = [:]
     private var styledTextResourceCache: [StyledTextResourceKey: ContentResources] = [:]
     private var cache: LRUCache<CacheKey, VVChatRenderedMessage>
+    private var preparedMarkdownCache: LRUCache<CacheKey, PreparedMarkdownContent>
+    private var sceneWindowCache: LRUCache<SceneWindowCacheKey, VVChatSceneArtifacts>
     private var contentWidth: CGFloat
     private var style: VVChatTimelineStyle
     private var imageSizes: [String: CGSize] = [:]
+    private var preparedMarkdownCacheHits = 0
+    private var preparedMarkdownCacheMisses = 0
+    private var markdownParseCount = 0
+    private var markdownLayoutCount = 0
+    private var markdownWindowLayoutCount = 0
+    private var markdownSceneBuildCount = 0
+    private var incrementalImageLayoutPassCount = 0
+    private static let renderedMessageCacheCostLimit = 12 * 1024 * 1024
+    private static let materializedPreparedLayoutCostLimit = 24 * 1024 * 1024
+    private static let preparedMarkdownCacheCostLimit = 64 * 1024 * 1024
+    private static let sceneWindowCacheCostLimit = 24 * 1024 * 1024
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
@@ -221,7 +356,21 @@ public final class VVChatMessageRenderer {
         self.timestampPipeline = fixedResources.timestamp.pipeline
         self.loadingLayoutEngine = fixedResources.loading.layoutEngine
         self.loadingPipeline = fixedResources.loading.pipeline
-        self.cache = LRUCache(limit: style.renderedCacheLimit)
+        self.cache = LRUCache(
+            limit: style.renderedCacheLimit,
+            costLimit: Self.renderedMessageCacheCostLimit,
+            cost: Self.estimatedRenderedMessageCost
+        )
+        self.preparedMarkdownCache = LRUCache(
+            limit: style.renderedCacheLimit,
+            costLimit: Self.preparedMarkdownCacheCostLimit,
+            cost: Self.estimatedPreparedMarkdownCost
+        )
+        self.sceneWindowCache = LRUCache(
+            limit: max(8, style.renderedCacheLimit * 4),
+            costLimit: Self.sceneWindowCacheCostLimit,
+            cost: Self.estimatedSceneArtifactsCost
+        )
     }
 
     public func updateStyle(_ style: VVChatTimelineStyle) {
@@ -239,7 +388,14 @@ public final class VVChatMessageRenderer {
         loadingPipeline = fixedResources.loading.pipeline
         clearResourceCaches()
         cache.updateLimit(style.renderedCacheLimit)
+        cache.updateCostLimit(Self.renderedMessageCacheCostLimit)
+        preparedMarkdownCache.updateLimit(style.renderedCacheLimit)
+        preparedMarkdownCache.updateCostLimit(Self.preparedMarkdownCacheCostLimit)
+        sceneWindowCache.updateLimit(max(8, style.renderedCacheLimit * 4))
+        sceneWindowCache.updateCostLimit(Self.sceneWindowCacheCostLimit)
         cache.removeAll()
+        preparedMarkdownCache.removeAll()
+        sceneWindowCache.removeAll()
     }
 
     public func updateContentWidth(_ width: CGFloat) {
@@ -255,6 +411,8 @@ public final class VVChatMessageRenderer {
         loadingLayoutEngine.updateContentWidth(width)
         clearResourceCaches()
         cache.removeAll()
+        preparedMarkdownCache.removeAll()
+        sceneWindowCache.removeAll()
     }
 
     public func updateImageSize(url: String, size: CGSize) -> Bool {
@@ -267,10 +425,47 @@ public final class VVChatMessageRenderer {
 
     public func invalidate(messageID: String) {
         cache.remove(where: { $0.id == messageID })
+        preparedMarkdownCache.remove(where: { $0.id == messageID })
+        sceneWindowCache.remove(where: { $0.key.id == messageID })
+    }
+
+    func invalidateRendered(messageID: String) {
+        cache.remove(where: { $0.id == messageID })
+        sceneWindowCache.remove(where: { $0.key.id == messageID })
     }
 
     public func invalidateAll() {
         cache.removeAll()
+        preparedMarkdownCache.removeAll()
+        sceneWindowCache.removeAll()
+    }
+
+    func debugSnapshot() -> DebugSnapshot {
+        let preparedValues = preparedMarkdownCache.valuesFromLeastRecent()
+        return DebugSnapshot(
+            renderedMessageCacheCount: cache.count,
+            renderedMessageCacheEstimatedCost: cache.currentCost,
+            renderedMessageCacheCostLimit: Self.renderedMessageCacheCostLimit,
+            preparedMarkdownCacheCount: preparedMarkdownCache.count,
+            materializedPreparedLayoutCount: preparedValues.reduce(into: 0) { count, value in
+                if value.layout != nil { count += 1 }
+            },
+            materializedPreparedLayoutEstimatedCost: preparedValues.reduce(into: 0) { total, value in
+                total += Self.estimatedResidentPreparedLayoutCost(value)
+            },
+            materializedPreparedLayoutCostLimit: Self.materializedPreparedLayoutCostLimit,
+            preparedMarkdownCacheHits: preparedMarkdownCacheHits,
+            preparedMarkdownCacheMisses: preparedMarkdownCacheMisses,
+            preparedMarkdownCacheEstimatedCost: preparedMarkdownCache.currentCost,
+            preparedMarkdownCacheCostLimit: Self.preparedMarkdownCacheCostLimit,
+            markdownParseCount: markdownParseCount,
+            markdownLayoutCount: markdownLayoutCount,
+            markdownWindowLayoutCount: markdownWindowLayoutCount,
+            markdownSceneBuildCount: markdownSceneBuildCount,
+            incrementalImageLayoutPassCount: incrementalImageLayoutPassCount,
+            sceneWindowCacheEstimatedCost: sceneWindowCache.currentCost,
+            sceneWindowCacheCostLimit: Self.sceneWindowCacheCostLimit
+        )
     }
 
     public func renderedMessage(for message: VVChatMessage) -> VVChatRenderedMessage {
@@ -305,8 +500,7 @@ public final class VVChatMessageRenderer {
             return cached
         }
 
-        let (layoutEngine, pipeline) = contentResources(isDraft: isDraft, scale: contentScale)
-        let document = parser.parse(message.content)
+        let (layoutEngine, _) = contentResources(isDraft: isDraft, scale: contentScale)
         let customContent = message.customContent
 
         layoutEngine.updateImageSizeProvider { [weak self] url in
@@ -314,63 +508,47 @@ public final class VVChatMessageRenderer {
         }
         layoutEngine.updateContentWidth(messageContentWidth)
 
-        let layout: MarkdownLayout
-        var contentScene: VVScene
+        let contentLayoutTotalHeight: CGFloat?
         let contentBounds: CGRect?
         let contentMinX: CGFloat
         let contentMinY: CGFloat
         var imageURLs = Set<String>()
         let measuredWidth: CGFloat?
         let interactiveRegions: [VVChatInteractiveRegion]
+        let contentSceneSource: ContentSceneSource
 
         if let customContent {
-            layout = layoutEngine.layout(parser.parse(""))
+            markdownParseCount += 1
+            markdownLayoutCount += 1
             let customRender = renderCustomContent(
                 customContent,
                 width: messageContentWidth,
                 contentScale: contentScale
             )
-            contentScene = customRender.scene
-            contentBounds = sceneBounds(for: contentScene, layoutEngine: layoutEngine)
+            let contentSceneArtifacts = makeSceneArtifacts(customRender.scene)
+            contentBounds = sceneBounds(for: customRender.scene, layoutEngine: layoutEngine)
             contentMinX = max(0, contentBounds?.minX ?? 0)
             contentMinY = min(0, contentBounds?.minY ?? 0)
             imageURLs = Set(customRender.imageURLs)
             measuredWidth = customRender.visualWidth
             interactiveRegions = customRender.interactiveRegions
+            contentSceneSource = .staticScene(contentSceneArtifacts)
+            contentLayoutTotalHeight = nil
         } else {
-            var computedLayout = layoutEngine.layout(document)
-            layoutEngine.adjustParagraphImageSpacing(in: &computedLayout)
-            layout = computedLayout
-
-            var computedScene = pipeline.buildScene(from: layout)
-            if let opacityMultiplier = presentation?.textOpacityMultiplier {
-                computedScene = applyingTextOpacity(
-                    to: computedScene,
-                    multiplier: opacityMultiplier
-                )
-            }
-            if let prefixColor = presentation?.prefixGlyphColor {
-                let glyphCount = max(0, presentation?.prefixGlyphCount ?? 0)
-                if glyphCount > 0 {
-                    computedScene = applyingPrefixGlyphColor(
-                        to: computedScene,
-                        color: prefixColor,
-                        glyphCount: glyphCount
-                    )
-                }
-            }
-
-            contentScene = computedScene
-            let computedBounds = sceneBounds(for: computedScene, layoutEngine: layoutEngine)
-            contentBounds = computedBounds
-            // Only compensate positive scene offsets. Negative minX can be produced by
-            // markdown sub-primitives (e.g. list markers/row adorners) and should not
-            // shift the whole message body to the right.
-            contentMinX = max(0, computedBounds?.minX ?? 0)
-            contentMinY = min(0, computedBounds?.minY ?? 0)
-            imageURLs = Set(collectImageURLs(from: layout))
-            measuredWidth = usesBubble ? measuredContentWidth(for: layout) : nil
+            let prepared = preparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: false
+            )
+            contentBounds = prepared.analysis.contentBounds
+            contentMinX = max(0, prepared.analysis.contentBounds?.minX ?? 0)
+            contentMinY = min(0, prepared.analysis.contentBounds?.minY ?? 0)
+            imageURLs = prepared.analysis.imageURLs
+            measuredWidth = usesBubble ? prepared.analysis.measuredWidth : nil
             interactiveRegions = []
+            contentSceneSource = .markdown(key)
+            contentLayoutTotalHeight = prepared.layout?.totalHeight
         }
 
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
@@ -476,7 +654,7 @@ public final class VVChatMessageRenderer {
         }
 
         let headerHeight = headerRender?.height ?? 0
-        let contentHeight = max(1, contentBounds?.height ?? layout.totalHeight)
+        let contentHeight = max(1, contentBounds?.height ?? contentLayoutTotalHeight ?? 1)
         let footerTextHeight = footerRender?.layout.totalHeight ?? 0
         let footerHeight = max(footerTextHeight, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
         let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
@@ -520,16 +698,10 @@ public final class VVChatMessageRenderer {
             let contentOffsetX = bubbleInsets.left - contentMinX
             let contentOffsetY = currentY + bubbleInsets.top - contentMinY
             selectionContentOffset = CGPoint(x: contentOffsetX, y: contentOffsetY)
-            builder.withOffset(CGPoint(x: contentOffsetX, y: contentOffsetY)) { builder in
-                builder.add(node: VVNode.fromScene(contentScene))
-            }
         } else {
             let contentOffsetX = -contentMinX
             let contentOffsetY = currentY - contentMinY
             selectionContentOffset = CGPoint(x: contentOffsetX, y: contentOffsetY)
-            builder.withOffset(CGPoint(x: contentOffsetX, y: contentOffsetY)) { builder in
-                builder.add(node: VVNode.fromScene(contentScene))
-            }
         }
 
         currentY += contentBlockHeight
@@ -615,7 +787,8 @@ public final class VVChatMessageRenderer {
             }
         }
 
-        var scene = builder.scene
+        let baseChromeScene = builder.scene
+        let chromeScene: VVScene
         var adjustedInteractiveRegions = interactiveRegions.map { region in
             VVChatInteractiveRegion(
                 id: region.id,
@@ -639,9 +812,8 @@ public final class VVChatMessageRenderer {
                 laneBuilder.add(kind: .image(icon), zIndex: 0)
             }
             laneBuilder.withOffset(CGPoint(x: leadingLaneWidth, y: 0)) { builder in
-                builder.add(node: VVNode.fromScene(scene))
+                builder.add(node: VVNode.fromScene(baseChromeScene))
             }
-            scene = laneBuilder.scene
             selectionContentOffset.x += leadingLaneWidth
             if var actionFrame = footerTrailingActionFrame {
                 actionFrame.origin.x += leadingLaneWidth
@@ -656,13 +828,13 @@ public final class VVChatMessageRenderer {
                     cornerRadius: region.cornerRadius
                 )
             }
+            chromeScene = laneBuilder.scene
+        } else {
+            chromeScene = builder.scene
         }
 
-        let messageBounds = sceneBounds(for: scene, layoutEngine: layoutEngine)
-        let topOverflow = max(0, -(messageBounds?.minY ?? 0))
-        let sceneMaxY = max(0, messageBounds?.maxY ?? messageHeight)
-        let measuredMessageHeight = max(messageHeight + topOverflow, sceneMaxY + topOverflow)
-        let height = measuredMessageHeight + insets.top + insets.bottom
+        let topOverflow = max(0, -(contentBounds?.minY ?? 0))
+        let height = messageHeight + topOverflow + insets.top + insets.bottom
 
         let bubbleOffsetX: CGFloat
         if let bubbleStyle {
@@ -677,17 +849,15 @@ public final class VVChatMessageRenderer {
         } else {
             bubbleOffsetX = 0
         }
-        let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
+        let chromeOrderedPrimitiveIndices = chromeScene.orderedPrimitiveIndices()
         let rendered = VVChatRenderedMessage(
             id: message.id,
             revision: message.revision,
-            layout: layout,
-            layoutEngine: layoutEngine,
-            scene: scene,
-            orderedPrimitiveIndices: orderedPrimitiveIndices,
-            visibilityIndex: VVPrimitiveVisibilityIndex(
-                scene: scene,
-                orderedPrimitiveIndices: orderedPrimitiveIndices,
+            chromeScene: chromeScene,
+            chromeOrderedPrimitiveIndices: chromeOrderedPrimitiveIndices,
+            chromeVisibilityIndex: VVPrimitiveVisibilityIndex(
+                scene: chromeScene,
+                orderedPrimitiveIndices: chromeOrderedPrimitiveIndices,
                 bucketHeight: 192
             ),
             height: height,
@@ -696,10 +866,811 @@ public final class VVChatMessageRenderer {
             isDraft: isDraft,
             imageURLs: Array(imageURLs),
             footerTrailingActionFrame: footerTrailingActionFrame,
-            interactiveRegions: adjustedInteractiveRegions
+            interactiveRegions: adjustedInteractiveRegions,
+            contentSceneSource: contentSceneSource
         )
         cache.set(rendered, for: key)
         return rendered
+    }
+
+    func selectionHelper(
+        for message: VVChatMessage,
+        rendered: VVChatRenderedMessage
+    ) -> VVMarkdownSelectionHelper? {
+        switch rendered.contentSceneSource {
+        case .none, .staticScene:
+            return nil
+        case .markdown(let key):
+            let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
+            let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
+            let prepared = preparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: false
+            )
+            let layout = materializedPreparedMarkdownLayout(
+                from: prepared,
+                layoutEngine: layoutEngine
+            )
+            return VVMarkdownSelectionHelper(layout: layout, layoutEngine: layoutEngine)
+        }
+    }
+
+    private func preparedMarkdownContent(
+        for message: VVChatMessage,
+        key: CacheKey,
+        layoutEngine: MarkdownLayoutEngine,
+        requiresLayout: Bool
+    ) -> PreparedMarkdownContent {
+        if var cached = preparedMarkdownCache.value(for: key) {
+            preparedMarkdownCacheHits += 1
+            let didRefresh = refreshPreparedMarkdownContentIfNeeded(
+                &cached,
+                layoutEngine: layoutEngine,
+                keepMaterializedLayout: requiresLayout
+            )
+            let didMaterialize = ensurePreparedMarkdownLayoutIfNeeded(
+                &cached,
+                layoutEngine: layoutEngine,
+                requiresLayout: requiresLayout
+            )
+            if didRefresh || didMaterialize {
+                preparedMarkdownCache.set(cached, for: key)
+                dematerializePreparedLayoutsIfNeeded(excluding: requiresLayout ? key : nil)
+            }
+            return cached
+        }
+
+        preparedMarkdownCacheMisses += 1
+        markdownParseCount += 1
+        let document = parser.parse(message.content)
+        markdownLayoutCount += 1
+        var layout = layoutEngine.layout(document)
+        applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
+        layoutEngine.adjustParagraphImageSpacing(in: &layout)
+        let analysis = analyzePreparedMarkdownLayout(layout, document: document)
+
+        let prepared = PreparedMarkdownContent(
+            document: document,
+            layout: requiresLayout ? layout : nil,
+            analysis: analysis,
+            appliedImageSizes: currentAppliedImageSizes(for: analysis.imageURLs)
+        )
+        preparedMarkdownCache.set(prepared, for: key)
+        dematerializePreparedLayoutsIfNeeded(excluding: requiresLayout ? key : nil)
+        return prepared
+    }
+
+    private func refreshPreparedMarkdownContentIfNeeded(
+        _ prepared: inout PreparedMarkdownContent,
+        layoutEngine: MarkdownLayoutEngine,
+        keepMaterializedLayout: Bool
+    ) -> Bool {
+        guard prepared.layout != nil else {
+            return refreshPreparedMarkdownContentByRelayout(
+                &prepared,
+                layoutEngine: layoutEngine,
+                keepMaterializedLayout: keepMaterializedLayout
+            )
+        }
+        guard !prepared.analysis.directImageBlockIDsByURL.isEmpty || !prepared.analysis.imageRowBlockIDsByURL.isEmpty else {
+            return refreshPreparedMarkdownContentByRelayout(
+                &prepared,
+                layoutEngine: layoutEngine,
+                keepMaterializedLayout: keepMaterializedLayout
+            )
+        }
+
+        var directBlockIDs = Set<String>()
+        var imageRowBlockIDs = Set<String>()
+        var nextAppliedImageSizes = prepared.appliedImageSizes
+        var changedURLs = Set<String>()
+        var coveredURLs = Set<String>()
+
+        for url in prepared.analysis.imageURLs {
+            let currentSize = imageSizes[url]
+            if prepared.appliedImageSizes[url] == currentSize {
+                continue
+            }
+            changedURLs.insert(url)
+
+            if let currentSize {
+                nextAppliedImageSizes[url] = currentSize
+            } else {
+                nextAppliedImageSizes.removeValue(forKey: url)
+            }
+
+            if let blockIDs = prepared.analysis.directImageBlockIDsByURL[url] {
+                directBlockIDs.formUnion(blockIDs)
+                coveredURLs.insert(url)
+            }
+            if let blockIDs = prepared.analysis.imageRowBlockIDsByURL[url] {
+                imageRowBlockIDs.formUnion(blockIDs)
+                coveredURLs.insert(url)
+            }
+        }
+
+        guard !changedURLs.isEmpty else {
+            return false
+        }
+
+        if coveredURLs != changedURLs {
+            return refreshPreparedMarkdownContentByRelayout(
+                &prepared,
+                layoutEngine: layoutEngine,
+                keepMaterializedLayout: keepMaterializedLayout
+            )
+        }
+
+        guard !directBlockIDs.isEmpty || !imageRowBlockIDs.isEmpty else {
+            return refreshPreparedMarkdownContentByRelayout(
+                &prepared,
+                layoutEngine: layoutEngine,
+                keepMaterializedLayout: keepMaterializedLayout
+            )
+        }
+
+        incrementalImageLayoutPassCount += 1
+        guard var layout = prepared.layout else { return false }
+        applyImageSizeUpdates(
+            to: &layout,
+            directImageBlockIDs: directBlockIDs,
+            imageRowBlockIDs: imageRowBlockIDs,
+            layoutEngine: layoutEngine
+        )
+        layoutEngine.adjustParagraphImageSpacing(in: &layout)
+        let analysis = analyzePreparedMarkdownLayout(layout, document: prepared.document)
+
+        prepared.layout = keepMaterializedLayout ? layout : nil
+        prepared.analysis = analysis
+        prepared.appliedImageSizes = nextAppliedImageSizes
+        return true
+    }
+
+    private func refreshPreparedMarkdownContentByRelayout(
+        _ prepared: inout PreparedMarkdownContent,
+        layoutEngine: MarkdownLayoutEngine,
+        keepMaterializedLayout: Bool
+    ) -> Bool {
+        var hasChangedImageSize = false
+        for url in prepared.analysis.imageURLs {
+            let currentSize = imageSizes[url]
+            if prepared.appliedImageSizes[url] != currentSize {
+                hasChangedImageSize = true
+                break
+            }
+        }
+        guard hasChangedImageSize else { return false }
+
+        markdownLayoutCount += 1
+        var layout = layoutEngine.layout(prepared.document)
+        applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
+        layoutEngine.adjustParagraphImageSpacing(in: &layout)
+        let analysis = analyzePreparedMarkdownLayout(layout, document: prepared.document)
+
+        prepared.layout = keepMaterializedLayout ? layout : nil
+        prepared.analysis = analysis
+        prepared.appliedImageSizes = currentAppliedImageSizes(for: analysis.imageURLs)
+        return true
+    }
+
+    private func ensurePreparedMarkdownLayoutIfNeeded(
+        _ prepared: inout PreparedMarkdownContent,
+        layoutEngine: MarkdownLayoutEngine,
+        requiresLayout: Bool
+    ) -> Bool {
+        guard requiresLayout, prepared.layout == nil else { return false }
+        markdownLayoutCount += 1
+        var layout = layoutEngine.layout(prepared.document)
+        applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
+        layoutEngine.adjustParagraphImageSpacing(in: &layout)
+        let analysis = analyzePreparedMarkdownLayout(layout, document: prepared.document)
+        prepared.layout = layout
+        prepared.analysis = analysis
+        prepared.appliedImageSizes = currentAppliedImageSizes(for: analysis.imageURLs)
+        return true
+    }
+
+    private func partialPreparedMarkdownLayout(
+        from prepared: PreparedMarkdownContent,
+        blockRange: Range<Int>,
+        layoutEngine: MarkdownLayoutEngine
+    ) -> MarkdownLayout {
+        let sourceBlockIndexes = Array(prepared.analysis.sourceBlockIndexes[blockRange])
+        let blockYPositions = Array(prepared.analysis.blockFrameMinY[blockRange])
+        markdownWindowLayoutCount += 1
+        return layoutEngine.layout(
+            prepared.document,
+            sourceBlockIndexes: sourceBlockIndexes,
+            at: blockYPositions,
+            totalHeight: prepared.analysis.totalHeight
+        )
+    }
+
+    private func materializedPreparedMarkdownLayout(
+        from prepared: PreparedMarkdownContent,
+        layoutEngine: MarkdownLayoutEngine
+    ) -> MarkdownLayout {
+        if let layout = prepared.layout {
+            return layout
+        }
+        markdownLayoutCount += 1
+        var layout = layoutEngine.layout(prepared.document)
+        applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
+        layoutEngine.adjustParagraphImageSpacing(in: &layout)
+        return layout
+    }
+
+    private func applyKnownImageSizes(
+        to layout: inout MarkdownLayout,
+        layoutEngine: MarkdownLayoutEngine
+    ) {
+        guard !imageSizes.isEmpty else { return }
+
+        for block in layout.blocks {
+            switch block.content {
+            case .image(let url, _, _):
+                guard let size = imageSizes[url] else { continue }
+                layoutEngine.updateImageLayout(in: &layout, blockId: block.blockId, imageSize: size)
+            case .inline(let runs, let images) where runs.isEmpty && images.count == 1:
+                let image = images[0]
+                guard let size = imageSizes[image.url] else { continue }
+                layoutEngine.updateImageLayout(in: &layout, blockId: block.blockId, imageSize: size)
+            case .imageRow(let images):
+                let hasKnownImage = images.contains { imageSizes[$0.url] != nil }
+                guard hasKnownImage else { continue }
+                layoutEngine.updateInlineImageRowLayout(in: &layout, blockId: block.blockId, imageSizes: imageSizes)
+            default:
+                continue
+            }
+        }
+    }
+
+    private func applyImageSizeUpdates(
+        to layout: inout MarkdownLayout,
+        directImageBlockIDs: Set<String>,
+        imageRowBlockIDs: Set<String>,
+        layoutEngine: MarkdownLayoutEngine
+    ) {
+        guard !directImageBlockIDs.isEmpty || !imageRowBlockIDs.isEmpty else { return }
+
+        for block in layout.blocks {
+            if directImageBlockIDs.contains(block.blockId) {
+                switch block.content {
+                case .image(let url, _, _):
+                    guard let size = imageSizes[url] else { break }
+                    layoutEngine.updateImageLayout(in: &layout, blockId: block.blockId, imageSize: size)
+                case .inline(let runs, let images) where runs.isEmpty && images.count == 1:
+                    let image = images[0]
+                    guard let size = imageSizes[image.url] else { break }
+                    layoutEngine.updateImageLayout(in: &layout, blockId: block.blockId, imageSize: size)
+                default:
+                    break
+                }
+            }
+
+            if imageRowBlockIDs.contains(block.blockId) {
+                layoutEngine.updateInlineImageRowLayout(in: &layout, blockId: block.blockId, imageSizes: imageSizes)
+            }
+        }
+    }
+
+    private func buildPreparedMarkdownScene(
+        from layout: MarkdownLayout,
+        blockRange: Range<Int>,
+        for message: VVChatMessage,
+        pipeline: VVMarkdownRenderPipeline
+    ) -> VVScene {
+        markdownSceneBuildCount += 1
+        var scene = pipeline.buildScene(from: layout, blockRange: blockRange)
+        if let opacityMultiplier = message.presentation?.textOpacityMultiplier {
+            scene = applyingTextOpacity(to: scene, multiplier: opacityMultiplier)
+        }
+        if let prefixColor = message.presentation?.prefixGlyphColor {
+            let glyphCount = max(0, message.presentation?.prefixGlyphCount ?? 0)
+            if glyphCount > 0 {
+                scene = applyingPrefixGlyphColor(
+                    to: scene,
+                    color: prefixColor,
+                    glyphCount: glyphCount
+                )
+            }
+        }
+        return scene
+    }
+
+    private func currentAppliedImageSizes(for urls: Set<String>) -> [String: CGSize] {
+        var applied: [String: CGSize] = [:]
+        applied.reserveCapacity(urls.count)
+        for url in urls {
+            if let size = imageSizes[url] {
+                applied[url] = size
+            }
+        }
+        return applied
+    }
+
+    func contentSceneArtifacts(
+        for message: VVChatMessage,
+        rendered: VVChatRenderedMessage,
+        visibleRect: CGRect?
+    ) -> VVChatSceneArtifacts? {
+        switch rendered.contentSceneSource {
+        case .none:
+            return nil
+        case .staticScene(let contentArtifacts):
+            return contentArtifacts
+        case .markdown(let key):
+            let (layoutEngine, pipeline) = contentResources(
+                isDraft: message.state == .draft,
+                scale: normalizedContentScale(message.presentation?.contentFontScale)
+            )
+            let prepared = preparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: false
+            )
+            let blockRange = visibleMarkdownBlockRange(
+                in: visibleRect?.offsetBy(dx: -rendered.selectionContentOffset.x, dy: -rendered.selectionContentOffset.y),
+                analysis: prepared.analysis
+            )
+            let windowKey = SceneWindowCacheKey(
+                key: key,
+                startBlock: blockRange.lowerBound,
+                endBlock: blockRange.upperBound
+            )
+            if let cached = sceneWindowCache.value(for: windowKey) {
+                return cached
+            }
+
+            let contentScene: VVScene
+            if blockRange.isEmpty {
+                contentScene = VVScene()
+            } else if let layout = prepared.layout {
+                contentScene = buildPreparedMarkdownScene(
+                    from: layout,
+                    blockRange: blockRange,
+                    for: message,
+                    pipeline: pipeline
+                )
+            } else {
+                let partialLayout = partialPreparedMarkdownLayout(
+                    from: prepared,
+                    blockRange: blockRange,
+                    layoutEngine: layoutEngine
+                )
+                contentScene = buildPreparedMarkdownScene(
+                    from: partialLayout,
+                    blockRange: partialLayout.blocks.indices,
+                    for: message,
+                    pipeline: pipeline
+                )
+            }
+
+            let artifacts = makeSceneArtifacts(contentScene)
+            sceneWindowCache.set(artifacts, for: windowKey)
+            return artifacts
+        }
+    }
+
+    func sceneArtifacts(
+        for message: VVChatMessage,
+        rendered: VVChatRenderedMessage,
+        visibleRect: CGRect?
+    ) -> VVChatSceneArtifacts {
+        guard let contentArtifacts = contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect) else {
+            return makeSceneArtifacts(rendered.chromeScene)
+        }
+        return combineSceneArtifacts(
+            chromeScene: rendered.chromeScene,
+            contentScene: contentArtifacts.scene,
+            contentOffset: rendered.selectionContentOffset
+        )
+    }
+
+    private func analyzePreparedMarkdownLayout(
+        _ layout: MarkdownLayout,
+        document: ParsedMarkdownDocument
+    ) -> PreparedMarkdownLayoutAnalysis {
+        var imageURLs = Set<String>()
+        var maxX: CGFloat = 0
+        var hasMeasuredWidth = false
+        var blockFrameMinY: [CGFloat] = []
+        var blockMinY: [CGFloat] = []
+        var blockMaxY: [CGFloat] = []
+        var sourceBlockIndexes: [Int] = []
+        var directImageBlockIDsByURL: [String: [String]] = [:]
+        var imageRowBlockIDsByURL: [String: [String]] = [:]
+        var bounds = CGRect.null
+        var estimatedCost = 0
+        let sourceIndexByBlockID = Dictionary(uniqueKeysWithValues: document.blocks.enumerated().map { ($0.element.id, $0.offset) })
+
+        for block in layout.blocks {
+            let (blockMaxX, blockHasValue) = measuredMaxX(for: block)
+            if blockHasValue {
+                maxX = max(maxX, blockMaxX)
+                hasMeasuredWidth = true
+            }
+            let blockBounds = layoutBounds(for: block) ?? block.frame
+            blockFrameMinY.append(block.frame.minY)
+            blockMinY.append(blockBounds.minY)
+            blockMaxY.append(blockBounds.maxY)
+            sourceBlockIndexes.append(sourceIndexByBlockID[block.blockId] ?? sourceBlockIndexes.count)
+            bounds = bounds.union(blockBounds)
+            estimatedCost += estimatedLayoutCost(for: block)
+
+            switch block.content {
+            case .image(let url, _, _):
+                imageURLs.insert(url)
+                directImageBlockIDsByURL[url, default: []].append(block.blockId)
+            case .inline(let runs, let images):
+                for image in images {
+                    imageURLs.insert(image.url)
+                }
+                if runs.isEmpty, images.count == 1 {
+                    directImageBlockIDsByURL[images[0].url, default: []].append(block.blockId)
+                }
+            case .imageRow(let images):
+                for image in images {
+                    imageURLs.insert(image.url)
+                    imageRowBlockIDsByURL[image.url, default: []].append(block.blockId)
+                }
+            case .listItems(let items):
+                for item in items {
+                    collectImageURLs(from: item, into: &imageURLs)
+                }
+            case .quoteBlocks(let blocks):
+                for nested in blocks {
+                    collectImageURLs(from: nested, into: &imageURLs)
+                }
+            case .tableRows(let rows):
+                for row in rows {
+                    for cell in row.cells {
+                        for image in cell.inlineImages {
+                            imageURLs.insert(image.url)
+                        }
+                    }
+                }
+            case .definitionList(let items):
+                for item in items {
+                    for image in item.termImages {
+                        imageURLs.insert(image.url)
+                    }
+                    for definitionImages in item.definitionImages {
+                        for image in definitionImages {
+                            imageURLs.insert(image.url)
+                        }
+                    }
+                }
+            case .abbreviationList(let items):
+                for item in items {
+                    for image in item.images {
+                        imageURLs.insert(image.url)
+                    }
+                }
+            default:
+                break
+            }
+        }
+
+        return PreparedMarkdownLayoutAnalysis(
+            imageURLs: imageURLs,
+            measuredWidth: hasMeasuredWidth ? maxX : nil,
+            contentBounds: bounds.isNull ? nil : bounds,
+            estimatedCost: max(estimatedCost, 1),
+            totalHeight: layout.totalHeight,
+            blockFrameMinY: blockFrameMinY,
+            blockMinY: blockMinY,
+            blockMaxY: blockMaxY,
+            sourceBlockIndexes: sourceBlockIndexes,
+            directImageBlockIDsByURL: directImageBlockIDsByURL,
+            imageRowBlockIDsByURL: imageRowBlockIDsByURL
+        )
+    }
+
+    private func visibleMarkdownBlockRange(
+        in visibleRect: CGRect?,
+        analysis: PreparedMarkdownLayoutAnalysis
+    ) -> Range<Int> {
+        let count = analysis.blockMinY.count
+        guard count > 0 else { return 0..<0 }
+        guard let visibleRect else { return 0..<count }
+
+        let padding: CGFloat = 640
+        let minY = visibleRect.minY - padding
+        let maxY = visibleRect.maxY + padding
+
+        var lower = 0
+        var upper = count
+        while lower < upper {
+            let mid = (lower + upper) / 2
+            if analysis.blockMaxY[mid] < minY {
+                lower = mid + 1
+            } else {
+                upper = mid
+            }
+        }
+        let start = lower
+
+        lower = 0
+        upper = count
+        while lower < upper {
+            let mid = (lower + upper) / 2
+            if analysis.blockMinY[mid] <= maxY {
+                lower = mid + 1
+            } else {
+                upper = mid
+            }
+        }
+        let end = max(start, lower)
+        return start..<end
+    }
+
+    private func combineSceneArtifacts(
+        chromeScene: VVScene,
+        contentScene: VVScene,
+        contentOffset: CGPoint
+    ) -> VVChatSceneArtifacts {
+        var builder = VVSceneBuilder()
+        builder.add(node: VVNode.fromScene(chromeScene))
+        if !contentScene.primitives.isEmpty {
+            builder.withOffset(contentOffset) { builder in
+                builder.add(node: VVNode.fromScene(contentScene))
+            }
+        }
+        return makeSceneArtifacts(builder.scene)
+    }
+
+    private func makeSceneArtifacts(_ scene: VVScene) -> VVChatSceneArtifacts {
+        let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
+        return VVChatSceneArtifacts(
+            scene: scene,
+            orderedPrimitiveIndices: orderedPrimitiveIndices,
+            visibilityIndex: VVPrimitiveVisibilityIndex(
+                scene: scene,
+                orderedPrimitiveIndices: orderedPrimitiveIndices,
+                bucketHeight: 192
+            )
+        )
+    }
+
+    private func layoutBounds(for block: LayoutBlock) -> CGRect? {
+        switch block.content {
+        case .text(let runs):
+            return layoutBounds(for: runs, images: [])
+        case .inline(let runs, let images):
+            return layoutBounds(for: runs, images: images)
+        case .imageRow(let images):
+            return layoutBounds(for: images)
+        case .image:
+            return block.frame
+        case .code, .diff, .thematicBreak, .math, .mermaid:
+            return block.frame
+        case .listItems(let items):
+            return layoutBounds(for: items)
+        case .quoteBlocks(let blocks):
+            return layoutBounds(for: blocks)?.union(block.frame) ?? block.frame
+        case .tableRows(let rows):
+            return layoutBounds(for: rows)?.union(block.frame) ?? block.frame
+        case .definitionList(let items):
+            return layoutBounds(for: items)?.union(block.frame) ?? block.frame
+        case .abbreviationList(let items):
+            return layoutBounds(for: items)?.union(block.frame) ?? block.frame
+        }
+    }
+
+    private func layoutBounds(for blocks: [LayoutBlock]) -> CGRect? {
+        var bounds = CGRect.null
+        for block in blocks {
+            if let blockBounds = layoutBounds(for: block) {
+                bounds = bounds.union(blockBounds)
+            }
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for rows: [LayoutTableRow]) -> CGRect? {
+        var bounds = CGRect.null
+        for row in rows {
+            bounds = bounds.union(row.frame)
+            for cell in row.cells {
+                bounds = bounds.union(cell.frame)
+                if let cellBounds = layoutBounds(for: cell.textRuns, images: cell.inlineImages) {
+                    bounds = bounds.union(cellBounds)
+                }
+            }
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for items: [LayoutListItem]) -> CGRect? {
+        var bounds = CGRect.null
+        for item in items {
+            if let itemBounds = layoutBounds(for: item) {
+                bounds = bounds.union(itemBounds)
+            }
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for item: LayoutListItem) -> CGRect? {
+        var bounds = CGRect.null
+        let bulletSize: CGFloat = 10
+        bounds = bounds.union(
+            CGRect(
+                x: item.bulletPosition.x,
+                y: item.bulletPosition.y - bulletSize * 0.5,
+                width: bulletSize,
+                height: bulletSize
+            )
+        )
+        if let textBounds = layoutBounds(for: item.contentRuns, images: item.inlineImages) {
+            bounds = bounds.union(textBounds)
+        }
+        if let childBounds = layoutBounds(for: item.children) {
+            bounds = bounds.union(childBounds)
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for items: [LayoutDefinitionItem]) -> CGRect? {
+        var bounds = CGRect.null
+        for item in items {
+            if let termBounds = layoutBounds(for: item.termRuns, images: item.termImages) {
+                bounds = bounds.union(termBounds)
+            }
+            for (index, runs) in item.definitionRuns.enumerated() {
+                let images = index < item.definitionImages.count ? item.definitionImages[index] : []
+                if let definitionBounds = layoutBounds(for: runs, images: images) {
+                    bounds = bounds.union(definitionBounds)
+                }
+            }
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for items: [LayoutAbbreviationItem]) -> CGRect? {
+        var bounds = CGRect.null
+        for item in items {
+            if let itemBounds = layoutBounds(for: item.runs, images: item.images) {
+                bounds = bounds.union(itemBounds)
+            }
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for runs: [LayoutTextRun], images: [LayoutInlineImage]) -> CGRect? {
+        var bounds = CGRect.null
+        for run in runs {
+            if let runBounds = layoutBounds(for: run) {
+                bounds = bounds.union(runBounds)
+            }
+        }
+        if let imageBounds = layoutBounds(for: images) {
+            bounds = bounds.union(imageBounds)
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for run: LayoutTextRun) -> CGRect? {
+        guard !run.glyphs.isEmpty else { return nil }
+        var bounds = CGRect.null
+        for glyph in run.glyphs where glyph.color.w > 0 {
+            let rect = CGRect(
+                x: glyph.position.x,
+                y: glyph.position.y - glyph.size.height,
+                width: glyph.size.width,
+                height: glyph.size.height * 1.5
+            )
+            bounds = bounds.union(rect)
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func layoutBounds(for images: [LayoutInlineImage]) -> CGRect? {
+        var bounds = CGRect.null
+        for image in images {
+            bounds = bounds.union(image.frame)
+        }
+        return bounds.isNull ? nil : bounds
+    }
+
+    private func estimatedLayoutCost(for block: LayoutBlock) -> Int {
+        var cost = 160
+        switch block.content {
+        case .text(let runs):
+            cost += estimatedLayoutCost(for: runs, images: [])
+        case .inline(let runs, let images):
+            cost += estimatedLayoutCost(for: runs, images: images)
+        case .imageRow(let images):
+            cost += estimatedLayoutCost(for: images)
+        case .code(let code, _, let lines):
+            cost += code.utf16.count * 2
+            cost += lines.reduce(into: 0) { partial, line in
+                partial += 96
+                partial += line.text.utf16.count * 2
+                partial += line.tokens.count * 64
+            }
+        case .diff(let text, _):
+            cost += 192 + text.utf16.count * 2
+        case .listItems(let items):
+            cost += items.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+        case .quoteBlocks(let blocks):
+            cost += blocks.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+        case .tableRows(let rows):
+            cost += estimatedLayoutCost(for: rows)
+        case .definitionList(let items):
+            cost += items.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+        case .abbreviationList(let items):
+            cost += items.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+        case .image(let url, let alt, _):
+            cost += 160 + url.utf16.count * 2 + (alt?.utf16.count ?? 0) * 2
+        case .thematicBreak:
+            cost += 32
+        case .math(let latex, let runs):
+            cost += latex.utf16.count * 2
+            cost += runs.count * 64
+        case .mermaid(let diagram):
+            cost += 256
+            cost += diagram.backgrounds.count * 96
+            cost += diagram.nodes.count * 160
+            cost += diagram.lines.count * 48
+            cost += diagram.pieSlices.count * 64
+            cost += diagram.labels.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+            for node in diagram.nodes {
+                cost += node.labelRuns.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+            }
+        }
+        return cost
+    }
+
+    private func estimatedLayoutCost(for rows: [LayoutTableRow]) -> Int {
+        rows.reduce(into: 0) { partial, row in
+            partial += 160
+            for cell in row.cells {
+                partial += 96
+                partial += estimatedLayoutCost(for: cell.textRuns, images: cell.inlineImages)
+            }
+        }
+    }
+
+    private func estimatedLayoutCost(for item: LayoutListItem) -> Int {
+        var cost = 128
+        cost += estimatedLayoutCost(for: item.contentRuns, images: item.inlineImages)
+        cost += item.children.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+        return cost
+    }
+
+    private func estimatedLayoutCost(for item: LayoutDefinitionItem) -> Int {
+        var cost = 160
+        cost += estimatedLayoutCost(for: item.termRuns, images: item.termImages)
+        for index in item.definitionRuns.indices {
+            let images = index < item.definitionImages.count ? item.definitionImages[index] : []
+            cost += estimatedLayoutCost(for: item.definitionRuns[index], images: images)
+        }
+        return cost
+    }
+
+    private func estimatedLayoutCost(for item: LayoutAbbreviationItem) -> Int {
+        128 + estimatedLayoutCost(for: item.runs, images: item.images)
+    }
+
+    private func estimatedLayoutCost(for runs: [LayoutTextRun], images: [LayoutInlineImage]) -> Int {
+        var cost = runs.reduce(into: 0) { $0 += estimatedLayoutCost(for: $1) }
+        cost += estimatedLayoutCost(for: images)
+        return cost
+    }
+
+    private func estimatedLayoutCost(for run: LayoutTextRun) -> Int {
+        96 + run.text.utf16.count * 2 + run.glyphs.count * 48
+    }
+
+    private func estimatedLayoutCost(for images: [LayoutInlineImage]) -> Int {
+        images.reduce(into: 0) { partial, image in
+            partial += 128 + image.url.utf16.count * 2
+        }
     }
 
     private func renderMeta(
@@ -1652,6 +2623,93 @@ public final class VVChatMessageRenderer {
         }
         for child in item.children {
             collectImageURLs(from: child, into: &urls)
+        }
+    }
+
+    private func dematerializePreparedLayoutsIfNeeded(excluding protectedKey: CacheKey?) {
+        func currentResidentCost() -> Int {
+            preparedMarkdownCache.valuesFromLeastRecent().reduce(into: 0) { total, value in
+                total += Self.estimatedResidentPreparedLayoutCost(value)
+            }
+        }
+
+        var residentCost = currentResidentCost()
+        guard residentCost > Self.materializedPreparedLayoutCostLimit ||
+                preparedMarkdownCache.currentCost > Self.preparedMarkdownCacheCostLimit else { return }
+        for key in preparedMarkdownCache.keysFromLeastRecent() {
+            if let protectedKey, protectedKey == key {
+                continue
+            }
+            preparedMarkdownCache.updateValue(for: key) { prepared in
+                guard prepared.layout != nil else { return }
+                prepared.layout = nil
+            }
+            residentCost = currentResidentCost()
+            if residentCost <= Self.materializedPreparedLayoutCostLimit &&
+                preparedMarkdownCache.currentCost <= Self.preparedMarkdownCacheCostLimit {
+                break
+            }
+        }
+    }
+
+    private static func estimatedPreparedMarkdownCost(_ content: PreparedMarkdownContent) -> Int {
+        let analysisCost = max(
+            1024,
+            content.analysis.blockMinY.count * MemoryLayout<CGFloat>.stride * 3 +
+            content.analysis.sourceBlockIndexes.count * MemoryLayout<Int>.stride
+        )
+        let mappingCost = (content.analysis.directImageBlockIDsByURL.count + content.analysis.imageRowBlockIDsByURL.count) * 64
+        let imageURLCost = content.analysis.imageURLs.reduce(into: 0) { $0 += 32 + $1.utf16.count * 2 }
+        let documentFloor = 16 * 1024
+        if content.layout != nil {
+            return max(content.analysis.estimatedCost + imageURLCost + mappingCost, documentFloor)
+        }
+        return max(documentFloor, analysisCost + mappingCost + imageURLCost)
+    }
+
+    private static func estimatedResidentPreparedLayoutCost(_ content: PreparedMarkdownContent) -> Int {
+        guard content.layout != nil else { return 0 }
+        return max(content.analysis.estimatedCost, 1)
+    }
+
+    private static func estimatedSceneArtifactsCost(_ artifacts: VVChatSceneArtifacts) -> Int {
+        var cost = max(artifacts.orderedPrimitiveIndices.count, 1) * MemoryLayout<Int>.stride
+        for primitive in artifacts.scene.primitives {
+            cost += estimatedPrimitiveCost(primitive)
+        }
+        return max(cost, 1)
+    }
+
+    private static func estimatedRenderedMessageCost(_ rendered: VVChatRenderedMessage) -> Int {
+        var cost = max(rendered.chromeOrderedPrimitiveIndices.count, 1) * MemoryLayout<Int>.stride
+        cost += rendered.interactiveRegions.count * MemoryLayout<VVChatInteractiveRegion>.stride
+        cost += rendered.imageURLs.reduce(into: 0) { total, url in
+            total += 32 + url.utf16.count * 2
+        }
+        if rendered.footerTrailingActionFrame != nil {
+            cost += MemoryLayout<CGRect>.stride
+        }
+        for primitive in rendered.chromeScene.primitives {
+            cost += estimatedPrimitiveCost(primitive)
+        }
+        return max(cost, 1)
+    }
+
+    private static func estimatedPrimitiveCost(_ primitive: VVPrimitive) -> Int {
+        switch primitive.kind {
+        case .textRun(let run):
+            let glyphCost = run.glyphs.count * 48
+            return 128 + glyphCost
+        case .quad:
+            return 64
+        case .gradientQuad:
+            return 96
+        case .line, .underline, .bullet, .blockQuoteBorder, .tableLine, .pieSlice:
+            return 64
+        case .image(let image):
+            return 128 + image.url.utf16.count * 2
+        case .path(let path):
+            return 160 + path.vertices.count * MemoryLayout<VVPathVertex>.stride
         }
     }
 

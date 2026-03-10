@@ -531,8 +531,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private func currentLayoutSnapshots() -> [String: VVLayoutAnimationSnapshot] {
         guard let controller else { return [:] }
         var snapshots: [String: VVLayoutAnimationSnapshot] = [:]
-        snapshots.reserveCapacity(controller.layouts.count)
-        for layout in controller.layouts {
+        snapshots.reserveCapacity(controller.layoutCount)
+        for index in 0..<controller.layoutCount {
+            guard let layout = controller.itemLayout(at: index) else { continue }
             snapshots[layout.id] = VVLayoutAnimationSnapshot(
                 id: layout.id,
                 frame: layout.frame,
@@ -707,20 +708,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             visibleRenderRange = 0..<0
             return
         }
-        let layouts = controller.layouts
-        guard !layouts.isEmpty else {
-            visibleRenderRange = 0..<0
-            return
-        }
-
         let viewport = scrollView.contentView.bounds
         let overscan: CGFloat = 900
-        let minY = viewport.minY - overscan
-        let maxY = viewport.maxY + overscan
-
-        let lower = lowerBound(forMaxYAbove: minY, layouts: layouts)
-        let upper = upperBound(forMinYBelow: maxY, layouts: layouts)
-        visibleRenderRange = lower..<max(lower, upper)
+        visibleRenderRange = controller.visibleLayoutRange(in: viewport, overscan: overscan)
     }
 
     private func clearSelectionHelperCache() {
@@ -735,14 +725,17 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         selectionHelperCacheOrder.removeAll { ids.contains($0.messageID) }
     }
 
-    private func cachedSelectionHelper(messageID: String, rendered: VVChatRenderedMessage) -> VVMarkdownSelectionHelper {
-        let key = SelectionHelperCacheKey(messageID: messageID, revision: rendered.revision)
+    private func cachedSelectionHelper(itemIndex: Int, messageID: String, revision: Int) -> VVMarkdownSelectionHelper? {
+        let key = SelectionHelperCacheKey(messageID: messageID, revision: revision)
         if let cached = selectionHelperCache[key] {
             touchSelectionHelperCache(key)
             return cached
         }
 
-        let helper = VVMarkdownSelectionHelper(layout: rendered.layout, layoutEngine: rendered.layoutEngine)
+        guard let controller,
+              let helper = controller.selectionHelper(at: itemIndex) else {
+            return nil
+        }
         selectionHelperCache[key] = helper
         selectionHelperCacheOrder.removeAll { $0 == key }
         selectionHelperCacheOrder.append(key)
@@ -759,103 +752,61 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func itemIndex(containingDocumentPoint point: CGPoint) -> Int? {
-        guard let controller else { return nil }
-        let layouts = controller.layouts
-        guard !layouts.isEmpty else { return nil }
-
-        var low = 0
-        var high = layouts.count - 1
-        while low <= high {
-            let mid = (low + high) / 2
-            let frame = layouts[mid].frame
-            if point.y < frame.minY {
-                high = mid - 1
-            } else if point.y > frame.maxY {
-                low = mid + 1
-            } else {
-                return frame.contains(point) ? mid : nil
-            }
-        }
-        return nil
+        controller?.itemIndex(containingDocumentY: point.y)
     }
 
     private func nearestItemIndex(forDocumentY y: CGFloat) -> Int? {
-        guard let controller else { return nil }
-        let layouts = controller.layouts
-        guard !layouts.isEmpty else { return nil }
-
-        var low = 0
-        var high = layouts.count - 1
-        while low <= high {
-            let mid = (low + high) / 2
-            let frame = layouts[mid].frame
-            if y < frame.minY {
-                high = mid - 1
-            } else if y > frame.maxY {
-                low = mid + 1
-            } else {
-                return mid
-            }
-        }
-
-        if low >= layouts.count { return layouts.count - 1 }
-        if high < 0 { return 0 }
-
-        let lowerDistance = abs(y - layouts[high].frame.maxY)
-        let upperDistance = abs(layouts[low].frame.minY - y)
-        return lowerDistance <= upperDistance ? high : low
-    }
-
-    private func lowerBound(forMaxYAbove value: CGFloat, layouts: [VVChatTimelineController.ItemLayout]) -> Int {
-        var low = 0
-        var high = layouts.count
-        while low < high {
-            let mid = (low + high) / 2
-            if layouts[mid].frame.maxY < value {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
-    }
-
-    private func upperBound(forMinYBelow value: CGFloat, layouts: [VVChatTimelineController.ItemLayout]) -> Int {
-        var low = 0
-        var high = layouts.count
-        while low < high {
-            let mid = (low + high) / 2
-            if layouts[mid].frame.minY <= value {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
+        controller?.nearestItemIndex(forDocumentY: y)
     }
 
     // MARK: - VVChatTimelineRenderDataSource
 
     public var renderItemCount: Int {
-        controller?.layouts.count ?? 0
+        controller?.layoutCount ?? 0
     }
 
     public func visibleRenderIndexes() -> Range<Int> {
         visibleRenderRange
     }
 
-    public func renderItem(at index: Int) -> VVChatTimelineRenderItem? {
+    public func renderItem(at index: Int, visibleRect: CGRect) -> VVChatTimelineRenderItem? {
         guard let controller,
               let layout = controller.itemLayout(at: index),
+              controller.messages.indices.contains(index),
               let rendered = controller.renderedMessage(at: index) else { return nil }
         let snapshot = animatedLayoutSnapshots[layout.id] ?? stableLayoutSnapshots[layout.id]
+        let resolvedFrame = snapshot?.frame ?? layout.frame
+        let resolvedContentOffset = snapshot?.contentOffset ?? layout.contentOffset
+        let itemVisibleRect = visibleRect.offsetBy(
+            dx: -resolvedFrame.origin.x - resolvedContentOffset.x,
+            dy: -resolvedFrame.origin.y - resolvedContentOffset.y
+        )
+        var layers: [VVChatTimelineRenderLayer] = [
+            VVChatTimelineRenderLayer(
+                offset: resolvedContentOffset,
+                scene: rendered.chromeScene,
+                orderedPrimitiveIndices: rendered.chromeOrderedPrimitiveIndices,
+                visibilityIndex: rendered.chromeVisibilityIndex
+            )
+        ]
+        if let contentArtifacts = controller.contentSceneArtifacts(at: index, visibleRect: itemVisibleRect) {
+            layers.append(
+                VVChatTimelineRenderLayer(
+                    offset: CGPoint(
+                        x: resolvedContentOffset.x + rendered.selectionContentOffset.x,
+                        y: resolvedContentOffset.y + rendered.selectionContentOffset.y
+                    ),
+                    scene: contentArtifacts.scene,
+                    orderedPrimitiveIndices: contentArtifacts.orderedPrimitiveIndices,
+                    visibilityIndex: contentArtifacts.visibilityIndex
+                )
+            )
+        }
         return VVChatTimelineRenderItem(
             id: layout.id,
-            frame: snapshot?.frame ?? layout.frame,
-            contentOffset: snapshot?.contentOffset ?? layout.contentOffset,
-            scene: rendered.scene,
-            orderedPrimitiveIndices: rendered.orderedPrimitiveIndices,
-            visibilityIndex: rendered.visibilityIndex
+            frame: resolvedFrame,
+            contentOffset: resolvedContentOffset,
+            layers: layers
         )
     }
 
@@ -910,7 +861,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         let (start, end) = selection.ordered
         guard start.itemIndex <= index && end.itemIndex >= index else { return [] }
 
-        let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
+        guard let helper = cachedSelectionHelper(itemIndex: index, messageID: layout.id, revision: rendered.revision) else {
+            return []
+        }
 
         // Map chat positions to markdown positions for the item
         let mdStart: MarkdownTextPosition
@@ -987,13 +940,15 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         guard let controller else { return "" }
         var result: [String] = []
 
-        for itemIndex in start.itemIndex...min(end.itemIndex, controller.layouts.count - 1) {
+        for itemIndex in start.itemIndex...min(end.itemIndex, controller.layoutCount - 1) {
             guard itemIndex < controller.messages.count else { continue }
 
             guard let layout = controller.itemLayout(at: itemIndex),
                   let rendered = controller.renderedMessage(at: itemIndex) else { continue }
 
-            let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
+            guard let helper = cachedSelectionHelper(itemIndex: itemIndex, messageID: layout.id, revision: rendered.revision) else {
+                continue
+            }
 
             let mdStart: MarkdownTextPosition
             let mdEnd: MarkdownTextPosition
@@ -1041,15 +996,17 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func selectAllText() {
-        guard let controller, !controller.layouts.isEmpty else { return }
+        guard let controller, controller.layoutCount > 0 else { return }
 
         // Find first valid position
         var firstPos: ChatTextPosition?
-        for i in 0..<controller.layouts.count {
+        for i in 0..<controller.layoutCount {
             guard i < controller.messages.count else { continue }
             guard let layout = controller.itemLayout(at: i),
                   let rendered = controller.renderedMessage(at: i) else { continue }
-            let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
+            guard let helper = cachedSelectionHelper(itemIndex: i, messageID: layout.id, revision: rendered.revision) else {
+                continue
+            }
             if let pos = helper.findFirstPosition() {
                 firstPos = ChatTextPosition(itemIndex: i, blockIndex: pos.blockIndex, runIndex: pos.runIndex, characterOffset: pos.characterOffset)
                 break
@@ -1058,11 +1015,13 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         // Find last valid position
         var lastPos: ChatTextPosition?
-        for i in stride(from: controller.layouts.count - 1, through: 0, by: -1) {
+        for i in stride(from: controller.layoutCount - 1, through: 0, by: -1) {
             guard i < controller.messages.count else { continue }
             guard let layout = controller.itemLayout(at: i),
                   let rendered = controller.renderedMessage(at: i) else { continue }
-            let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
+            guard let helper = cachedSelectionHelper(itemIndex: i, messageID: layout.id, revision: rendered.revision) else {
+                continue
+            }
             if let pos = helper.findLastPosition() {
                 lastPos = ChatTextPosition(itemIndex: i, blockIndex: pos.blockIndex, runIndex: pos.runIndex, characterOffset: pos.characterOffset)
                 break
@@ -1184,7 +1143,13 @@ private extension VVChatTimelineView {
     }
 
     private func linkURL(in context: TimelineInteractionContext) -> String? {
-        let helper = cachedSelectionHelper(messageID: context.layout.id, rendered: context.rendered)
+        guard let helper = cachedSelectionHelper(
+            itemIndex: context.itemIndex,
+            messageID: context.layout.id,
+            revision: context.rendered.revision
+        ) else {
+            return nil
+        }
         return helper.linkURL(at: context.localPoint)
     }
 
@@ -1282,7 +1247,7 @@ private extension VVChatTimelineView {
         guard let controller else { return nil }
         let docPoint = viewPointToDocumentPoint(point)
         guard let index = itemIndex(containingDocumentPoint: docPoint) else { return nil }
-        return controller.layouts[index].id
+        return controller.itemLayout(at: index)?.id
     }
 }
 
@@ -1317,7 +1282,9 @@ extension VVChatTimelineView: VVTextHitTestable {
             y: docPoint.y - layout.frame.origin.y - layout.contentOffset.y - contentOffset.y
         )
 
-        let helper = cachedSelectionHelper(messageID: layout.id, rendered: rendered)
+        guard let helper = cachedSelectionHelper(itemIndex: targetItemIndex, messageID: layout.id, revision: rendered.revision) else {
+            return nil
+        }
         let markdownPosition = preferNearest
             ? helper.nearestTextPosition(to: localPoint)
             : helper.hitTest(at: localPoint)

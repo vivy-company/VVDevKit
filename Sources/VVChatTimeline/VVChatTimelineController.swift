@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import VVMarkdown
 
 @MainActor
 public final class VVChatTimelineController {
@@ -44,11 +45,76 @@ public final class VVChatTimelineController {
         public var revision: Int
     }
 
+    private struct LayoutRecord {
+        var id: String
+        var height: CGFloat
+        var contentOffset: CGPoint
+        var isDraft: Bool
+        var revision: Int
+    }
+
+    private struct HeightIndex {
+        private var heights: [CGFloat] = []
+        private var tree: [CGFloat] = [0]
+
+        var count: Int { heights.count }
+
+        mutating func rebuild(heights: [CGFloat]) {
+            self.heights = heights
+            tree = Array(repeating: 0, count: heights.count + 1)
+            for (index, height) in heights.enumerated() {
+                add(height, at: index)
+            }
+        }
+
+        mutating func append(_ height: CGFloat) {
+            heights.append(height)
+            let oneBasedIndex = heights.count
+            let lowerBound = oneBasedIndex - (oneBasedIndex & -oneBasedIndex)
+            let previousCoveredHeight = prefixHeight(before: oneBasedIndex - 1) - prefixHeight(before: lowerBound)
+            tree.append(previousCoveredHeight + height)
+        }
+
+        mutating func updateHeight(at index: Int, to newHeight: CGFloat) {
+            guard heights.indices.contains(index) else { return }
+            let delta = newHeight - heights[index]
+            guard delta != 0 else { return }
+            heights[index] = newHeight
+            add(delta, at: index)
+        }
+
+        func height(at index: Int) -> CGFloat {
+            guard heights.indices.contains(index) else { return 0 }
+            return heights[index]
+        }
+
+        func prefixHeight(before count: Int) -> CGFloat {
+            guard count > 0 else { return 0 }
+            var index = min(count, heights.count)
+            var sum: CGFloat = 0
+            while index > 0 {
+                sum += tree[index]
+                index -= index & -index
+            }
+            return sum
+        }
+
+        private mutating func add(_ delta: CGFloat, at index: Int) {
+            var treeIndex = index + 1
+            while treeIndex < tree.count {
+                tree[treeIndex] += delta
+                treeIndex += treeIndex & -treeIndex
+            }
+        }
+    }
+
     public private(set) var entries: [VVChatTimelineEntry] = []
     public private(set) var messages: [VVChatMessage] = []
-    public private(set) var layouts: [ItemLayout] = []
     public private(set) var totalHeight: CGFloat = 0
     public private(set) var state: VVChatTimelineState
+    public var layouts: [ItemLayout] {
+        layoutSnapshot()
+    }
 
     public var onUpdate: ((Update) -> Void)?
 
@@ -62,6 +128,8 @@ public final class VVChatTimelineController {
     private var messageIndexByID: [String: Int] = [:]
     private var entryIndexByID: [String: Int] = [:]
     private var customEntryMessageMapper: CustomEntryMessageMapper?
+    private var layoutRecords: [LayoutRecord] = []
+    private var heightIndex = HeightIndex()
 
     public init(style: VVChatTimelineStyle = .init(), renderWidth: CGFloat = 0) {
         self.style = style
@@ -110,8 +178,8 @@ public final class VVChatTimelineController {
     /// Pass the ID of the item at or above the insertion/removal point.
     public func prepareLayoutTransition(anchorItemID: String) {
         let anchorY: CGFloat
-        if let index = messageIndexByID[anchorItemID], layouts.indices.contains(index) {
-            anchorY = layouts[index].frame.origin.y
+        if let index = messageIndexByID[anchorItemID], let layout = itemLayout(at: index) {
+            anchorY = layout.frame.origin.y
         } else {
             anchorY = 0
         }
@@ -153,9 +221,10 @@ public final class VVChatTimelineController {
         messages.append(message)
         messageIndexByID[message.id] = index
         entryIndexByID[message.id] = entries.count - 1
-        let layout = buildLayout(for: message, at: nextYPosition())
-        layouts.append(layout)
-        totalHeight = layout.frame.maxY + style.timelineInsets.bottom
+        let layout = buildLayoutRecord(for: message)
+        layoutRecords.append(layout)
+        heightIndex.append(layout.height)
+        totalHeight = computedTotalHeight()
 
         let shouldFollow = state.shouldAutoFollow
         if !shouldFollow {
@@ -180,9 +249,10 @@ public final class VVChatTimelineController {
         messageIndexByID[message.id] = index
         entryIndexByID[entry.id] = entries.count - 1
 
-        let layout = buildLayout(for: message, at: nextYPosition())
-        layouts.append(layout)
-        totalHeight = layout.frame.maxY + style.timelineInsets.bottom
+        let layout = buildLayoutRecord(for: message)
+        layoutRecords.append(layout)
+        heightIndex.append(layout.height)
+        totalHeight = computedTotalHeight()
 
         let shouldFollow = state.shouldAutoFollow
         if !shouldFollow {
@@ -305,12 +375,87 @@ public final class VVChatTimelineController {
         let sorted = messageIDs.compactMap { id -> Int? in
             messageIndexByID[id]
         }.sorted()
-        relayoutMessages(at: sorted, shouldScrollToBottom: state.shouldAutoFollow, markUnread: false)
+        relayoutMessages(
+            at: sorted,
+            shouldScrollToBottom: state.shouldAutoFollow,
+            markUnread: false,
+            preservePreparedMarkdown: true
+        )
     }
 
     public func itemLayout(at index: Int) -> ItemLayout? {
-        guard layouts.indices.contains(index) else { return nil }
-        return layouts[index]
+        guard layoutRecords.indices.contains(index) else { return nil }
+        let record = layoutRecords[index]
+        return ItemLayout(
+            id: record.id,
+            frame: CGRect(
+                x: 0,
+                y: originY(for: index),
+                width: renderWidth,
+                height: record.height
+            ),
+            contentOffset: record.contentOffset,
+            isDraft: record.isDraft,
+            revision: record.revision
+        )
+    }
+
+    public var layoutCount: Int {
+        layoutRecords.count
+    }
+
+    func visibleLayoutRange(in viewport: CGRect, overscan: CGFloat) -> Range<Int> {
+        guard !layoutRecords.isEmpty else { return 0..<0 }
+        let minY = viewport.minY - overscan
+        let maxY = viewport.maxY + overscan
+        let lower = lowerBound(forMaxYAbove: minY)
+        let upper = upperBound(forMinYBelow: maxY)
+        return lower..<max(lower, upper)
+    }
+
+    func itemIndex(containingDocumentY y: CGFloat) -> Int? {
+        guard !layoutRecords.isEmpty else { return nil }
+        var low = 0
+        var high = layoutRecords.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            guard let frame = frame(at: mid) else { return nil }
+            if y < frame.minY {
+                high = mid - 1
+            } else if y > frame.maxY {
+                low = mid + 1
+            } else {
+                return mid
+            }
+        }
+        return nil
+    }
+
+    func nearestItemIndex(forDocumentY y: CGFloat) -> Int? {
+        guard !layoutRecords.isEmpty else { return nil }
+        var low = 0
+        var high = layoutRecords.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            guard let frame = frame(at: mid) else { return nil }
+            if y < frame.minY {
+                high = mid - 1
+            } else if y > frame.maxY {
+                low = mid + 1
+            } else {
+                return mid
+            }
+        }
+
+        if low >= layoutRecords.count { return layoutRecords.count - 1 }
+        if high < 0 { return 0 }
+
+        guard let lowerFrame = frame(at: high), let upperFrame = frame(at: low) else {
+            return nil
+        }
+        let lowerDistance = abs(y - lowerFrame.maxY)
+        let upperDistance = abs(upperFrame.minY - y)
+        return lowerDistance <= upperDistance ? high : low
     }
 
     public func entry(at index: Int) -> VVChatTimelineEntry? {
@@ -328,6 +473,27 @@ public final class VVChatTimelineController {
         return renderer.renderedMessage(for: messages[index])
     }
 
+    func sceneArtifacts(at index: Int, visibleRect: CGRect?) -> VVChatSceneArtifacts? {
+        guard messages.indices.contains(index) else { return nil }
+        let message = messages[index]
+        let rendered = renderer.renderedMessage(for: message)
+        return renderer.sceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+    }
+
+    func contentSceneArtifacts(at index: Int, visibleRect: CGRect?) -> VVChatSceneArtifacts? {
+        guard messages.indices.contains(index) else { return nil }
+        let message = messages[index]
+        let rendered = renderer.renderedMessage(for: message)
+        return renderer.contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+    }
+
+    func selectionHelper(at index: Int) -> VVMarkdownSelectionHelper? {
+        guard messages.indices.contains(index) else { return nil }
+        let message = messages[index]
+        let rendered = renderer.renderedMessage(for: message)
+        return renderer.selectionHelper(for: message, rendered: rendered)
+    }
+
     private func applyDraftUpdate(id: String, content: String) {
         guard let index = messageIndexByID[id] else { return }
         guard messages[index].state == .draft else { return }
@@ -343,18 +509,18 @@ public final class VVChatTimelineController {
         let shouldFollow = shouldScrollToBottom
         let renderedMessage = renderer.renderedMessage(for: message)
         updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
-        let oldHeight = layouts[index].frame.height
+        let oldHeight = heightIndex.height(at: index)
         let newHeight = renderedMessage.height
         let delta = newHeight - oldHeight
-        layouts[index].frame.size.height = newHeight
-        layouts[index].contentOffset = renderedMessage.contentOffset
-        layouts[index].isDraft = message.state == .draft
-        layouts[index].revision = message.revision
+        layoutRecords[index].height = newHeight
+        layoutRecords[index].contentOffset = renderedMessage.contentOffset
+        layoutRecords[index].isDraft = message.state == .draft
+        layoutRecords[index].revision = message.revision
 
         if delta != 0 {
-            shiftLayouts(startingAt: index + 1, delta: delta)
+            heightIndex.updateHeight(at: index, to: newHeight)
         }
-        totalHeight = (layouts.last?.frame.maxY ?? style.timelineInsets.top) + style.timelineInsets.bottom
+        totalHeight = computedTotalHeight()
 
         if markUnread && !shouldFollow {
             state.hasUnreadNewContent = true
@@ -371,7 +537,12 @@ public final class VVChatTimelineController {
         onUpdate?(update)
     }
 
-    private func relayoutMessages(at indexes: [Int], shouldScrollToBottom: Bool, markUnread: Bool) {
+    private func relayoutMessages(
+        at indexes: [Int],
+        shouldScrollToBottom: Bool,
+        markUnread: Bool,
+        preservePreparedMarkdown: Bool = false
+    ) {
         guard !indexes.isEmpty else { return }
 
         let uniqueSorted = Array(Set(indexes)).sorted()
@@ -380,37 +551,38 @@ public final class VVChatTimelineController {
 
         for index in uniqueSorted {
             guard messages.indices.contains(index) else { continue }
-            renderer.invalidate(messageID: messages[index].id)
+            if preservePreparedMarkdown {
+                renderer.invalidateRendered(messageID: messages[index].id)
+            } else {
+                renderer.invalidate(messageID: messages[index].id)
+            }
         }
 
-        var cumulativeDelta: CGFloat = 0
-        let startIndex = uniqueSorted[0]
         var updatedIndexes = IndexSet()
 
-        for index in startIndex..<layouts.count {
-            if cumulativeDelta != 0 {
-                layouts[index].frame.origin.y += cumulativeDelta
-            }
-            guard affectedIndexes.contains(index) else { continue }
+        var cumulativeDelta: CGFloat = 0
+        for index in uniqueSorted {
+            guard affectedIndexes.contains(index), messages.indices.contains(index) else { continue }
 
             let message = messages[index]
             let renderedMessage = renderer.renderedMessage(for: message)
             updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
 
-            let oldHeight = layouts[index].frame.height
+            let oldHeight = heightIndex.height(at: index)
             let newHeight = renderedMessage.height
             let delta = newHeight - oldHeight
 
-            layouts[index].frame.size.height = newHeight
-            layouts[index].contentOffset = renderedMessage.contentOffset
-            layouts[index].isDraft = message.state == .draft
-            layouts[index].revision = message.revision
+            layoutRecords[index].height = newHeight
+            layoutRecords[index].contentOffset = renderedMessage.contentOffset
+            layoutRecords[index].isDraft = message.state == .draft
+            layoutRecords[index].revision = message.revision
 
+            heightIndex.updateHeight(at: index, to: newHeight)
             cumulativeDelta += delta
             updatedIndexes.insert(index)
         }
 
-        totalHeight = (layouts.last?.frame.maxY ?? style.timelineInsets.top) + style.timelineInsets.bottom
+        totalHeight = computedTotalHeight()
 
         if markUnread && !shouldFollow {
             state.hasUnreadNewContent = true
@@ -428,29 +600,22 @@ public final class VVChatTimelineController {
     }
 
     private func rebuildLayouts(shouldScrollToBottom: Bool) {
-        layouts.removeAll(keepingCapacity: true)
+        layoutRecords.removeAll(keepingCapacity: true)
         messageImageURLs.removeAll(keepingCapacity: true)
         imageURLToMessageIDs.removeAll(keepingCapacity: true)
 
-        var currentY = style.timelineInsets.top
+        var heights: [CGFloat] = []
+        heights.reserveCapacity(messages.count)
         for message in messages {
-            let renderedMessage = renderer.renderedMessage(for: message)
-            updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
-            let frame = CGRect(x: 0, y: currentY, width: renderWidth, height: renderedMessage.height)
-            let layout = ItemLayout(
-                id: message.id,
-                frame: frame,
-                contentOffset: renderedMessage.contentOffset,
-                isDraft: message.state == .draft,
-                revision: message.revision
-            )
-            layouts.append(layout)
-            currentY = frame.maxY + style.messageSpacing
+            let record = buildLayoutRecord(for: message)
+            layoutRecords.append(record)
+            heights.append(record.height)
         }
-        totalHeight = (layouts.last?.frame.maxY ?? style.timelineInsets.top) + style.timelineInsets.bottom
+        heightIndex.rebuild(heights: heights)
+        totalHeight = computedTotalHeight()
 
         let update = Update(
-            insertedIndexes: IndexSet(integersIn: 0..<layouts.count),
+            insertedIndexes: IndexSet(integersIn: 0..<layoutRecords.count),
             totalHeight: totalHeight,
             shouldScrollToBottom: shouldScrollToBottom,
             hasUnreadNewContent: state.hasUnreadNewContent
@@ -458,31 +623,81 @@ public final class VVChatTimelineController {
         onUpdate?(update)
     }
 
-    private func buildLayout(for message: VVChatMessage, at y: CGFloat) -> ItemLayout {
+    private func buildLayoutRecord(for message: VVChatMessage) -> LayoutRecord {
         let renderedMessage = renderer.renderedMessage(for: message)
         updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
-        let frame = CGRect(x: 0, y: y, width: renderWidth, height: renderedMessage.height)
-        return ItemLayout(
+        return LayoutRecord(
             id: message.id,
-            frame: frame,
+            height: renderedMessage.height,
             contentOffset: renderedMessage.contentOffset,
             isDraft: message.state == .draft,
             revision: message.revision
         )
     }
 
-    private func nextYPosition() -> CGFloat {
-        guard let last = layouts.last else {
-            return style.timelineInsets.top
+    private func layoutSnapshot() -> [ItemLayout] {
+        guard !layoutRecords.isEmpty else { return [] }
+        var snapshot: [ItemLayout] = []
+        snapshot.reserveCapacity(layoutRecords.count)
+        for index in layoutRecords.indices {
+            if let layout = itemLayout(at: index) {
+                snapshot.append(layout)
+            }
         }
-        return last.frame.maxY + style.messageSpacing
+        return snapshot
     }
 
-    private func shiftLayouts(startingAt index: Int, delta: CGFloat) {
-        guard delta != 0, index < layouts.count else { return }
-        for i in index..<layouts.count {
-            layouts[i].frame.origin.y += delta
+    private func computedTotalHeight() -> CGFloat {
+        guard !layoutRecords.isEmpty else {
+            return style.timelineInsets.top + style.timelineInsets.bottom
         }
+        let heights = heightIndex.prefixHeight(before: layoutRecords.count)
+        let spacing = CGFloat(max(0, layoutRecords.count - 1)) * style.messageSpacing
+        return style.timelineInsets.top + heights + spacing + style.timelineInsets.bottom
+    }
+
+    private func originY(for index: Int) -> CGFloat {
+        style.timelineInsets.top + heightIndex.prefixHeight(before: index) + CGFloat(index) * style.messageSpacing
+    }
+
+    private func frame(at index: Int) -> CGRect? {
+        guard layoutRecords.indices.contains(index) else { return nil }
+        return CGRect(
+            x: 0,
+            y: originY(for: index),
+            width: renderWidth,
+            height: layoutRecords[index].height
+        )
+    }
+
+    private func lowerBound(forMaxYAbove value: CGFloat) -> Int {
+        var low = 0
+        var high = layoutRecords.count
+        while low < high {
+            let mid = (low + high) / 2
+            let maxY = originY(for: mid) + layoutRecords[mid].height
+            if maxY < value {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    private func upperBound(forMinYBelow value: CGFloat) -> Int {
+        var low = 0
+        var high = layoutRecords.count
+        while low < high {
+            let mid = (low + high) / 2
+            let minY = originY(for: mid)
+            if minY <= value {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
     }
 
     private func updateImageMappings(messageID: String, imageURLs: Set<String>) {

@@ -1294,7 +1294,10 @@ private final class DiffSceneBuilder {
         let iconWidth = buildFileHeaderIcon(x: iconX, centerY: y + height * 0.5, builder: &builder)
         var currentX = iconX + iconWidth + 8
 
-        let nameGlyphs = layoutEngine.layoutTextGlyphs(parts.fileName, variant: .semibold, at: .zero, color: textColor)
+        // File-header names should avoid weight-derived variants here. Custom/variable
+        // fonts can keep the same PostScript name across weights, which breaks glyph-id
+        // reuse in the Metal atlas and produces corrupted file names.
+        let nameGlyphs = layoutEngine.layoutTextGlyphs(parts.fileName, variant: .regular, at: .zero, color: textColor)
         addTextGlyphs(nameGlyphs, offsetX: currentX, baselineY: baselineY, builder: &builder)
         currentX += (nameGlyphs.map { $0.position.x + $0.size.width }.max() ?? 0) + 8
 

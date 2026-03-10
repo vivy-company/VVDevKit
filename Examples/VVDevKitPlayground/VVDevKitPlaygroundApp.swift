@@ -1006,7 +1006,7 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
     var renderItemCount: Int { 1 }
     func visibleRenderIndexes() -> Range<Int> { 0..<1 }
 
-    func renderItem(at index: Int) -> VVChatTimelineRenderItem? {
+    func renderItem(at index: Int, visibleRect: CGRect) -> VVChatTimelineRenderItem? {
         guard index == 0 else { return nil }
         let orderedPrimitiveIndices = scene.primitives.enumerated().sorted { lhs, rhs in
             if lhs.element.zIndex == rhs.element.zIndex {
@@ -1023,9 +1023,14 @@ final class PrimitiveSceneView: NSView, VVChatTimelineRenderDataSource {
             id: "primitives",
             frame: bounds,
             contentOffset: .zero,
-            scene: scene,
-            orderedPrimitiveIndices: orderedPrimitiveIndices,
-            visibilityIndex: visibilityIndex
+            layers: [
+                VVChatTimelineRenderLayer(
+                    offset: .zero,
+                    scene: scene,
+                    orderedPrimitiveIndices: orderedPrimitiveIndices,
+                    visibilityIndex: visibilityIndex
+                )
+            ]
         )
     }
 

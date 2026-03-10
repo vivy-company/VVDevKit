@@ -9,21 +9,34 @@ public struct VVChatTimelineRenderItem {
     public let id: String
     public let frame: CGRect
     public let contentOffset: CGPoint
-    public let scene: VVScene
-    public let orderedPrimitiveIndices: [Int]
-    public let visibilityIndex: VVPrimitiveVisibilityIndex
+    public let layers: [VVChatTimelineRenderLayer]
 
     public init(
         id: String,
         frame: CGRect,
         contentOffset: CGPoint,
-        scene: VVScene,
-        orderedPrimitiveIndices: [Int],
-        visibilityIndex: VVPrimitiveVisibilityIndex
+        layers: [VVChatTimelineRenderLayer]
     ) {
         self.id = id
         self.frame = frame
         self.contentOffset = contentOffset
+        self.layers = layers
+    }
+}
+
+public struct VVChatTimelineRenderLayer {
+    public let offset: CGPoint
+    public let scene: VVScene
+    public let orderedPrimitiveIndices: [Int]
+    public let visibilityIndex: VVPrimitiveVisibilityIndex
+
+    public init(
+        offset: CGPoint,
+        scene: VVScene,
+        orderedPrimitiveIndices: [Int],
+        visibilityIndex: VVPrimitiveVisibilityIndex
+    ) {
+        self.offset = offset
         self.scene = scene
         self.orderedPrimitiveIndices = orderedPrimitiveIndices
         self.visibilityIndex = visibilityIndex
@@ -32,7 +45,7 @@ public struct VVChatTimelineRenderItem {
 
 public protocol VVChatTimelineRenderDataSource: AnyObject {
     var renderItemCount: Int { get }
-    func renderItem(at index: Int) -> VVChatTimelineRenderItem?
+    func renderItem(at index: Int, visibleRect: CGRect) -> VVChatTimelineRenderItem?
     func visibleRenderIndexes() -> Range<Int>
     var viewportRect: CGRect { get }
     var backgroundColor: SIMD4<Float> { get }
@@ -223,30 +236,39 @@ public final class VVChatTimelineMetalView: MTKView {
         renderer.beginFrame(viewportSize: viewportSize, scrollOffset: scrollOffset)
 
         for index in renderDataSource.visibleRenderIndexes() {
-            guard let item = renderDataSource.renderItem(at: index) else { continue }
+            guard let item = renderDataSource.renderItem(at: index, visibleRect: visibleRect) else { continue }
             if item.frame.maxY < visibleRect.minY - visibilityPadding { continue }
             if item.frame.minY > visibleRect.maxY + visibilityPadding { continue }
 
             // Each item's scene uses local coordinates (0,0 = item top-left).
             // Offset primitives by the item's absolute position so they render
             // correctly under the single global projection + scroll offset.
-            let itemOffset = CGPoint(x: item.frame.origin.x + item.contentOffset.x,
-                                     y: item.frame.origin.y + item.contentOffset.y)
-            let itemVisibleRect = visibleRect.offsetBy(dx: -itemOffset.x, dy: -itemOffset.y)
-                .insetBy(dx: -visibilityPadding, dy: -visibilityPadding)
-
-            renderScene(
-                item.scene,
-                orderedPrimitiveIndices: item.orderedPrimitiveIndices,
-                visibilityIndex: item.visibilityIndex,
-                visibleRect: itemVisibleRect,
-                encoder: encoder,
-                renderer: renderer,
-                imageProvider: renderDataSource,
-                itemOffset: itemOffset
+            let selectionItemOffset = CGPoint(
+                x: item.frame.origin.x + item.contentOffset.x,
+                y: item.frame.origin.y + item.contentOffset.y
             )
 
-            let hoverQuads = renderDataSource.hoverQuads(forItemAt: index, itemOffset: itemOffset)
+            for layer in item.layers {
+                let layerOffset = CGPoint(
+                    x: item.frame.origin.x + layer.offset.x,
+                    y: item.frame.origin.y + layer.offset.y
+                )
+                let itemVisibleRect = visibleRect.offsetBy(dx: -layerOffset.x, dy: -layerOffset.y)
+                    .insetBy(dx: -visibilityPadding, dy: -visibilityPadding)
+
+                renderScene(
+                    layer.scene,
+                    orderedPrimitiveIndices: layer.orderedPrimitiveIndices,
+                    visibilityIndex: layer.visibilityIndex,
+                    visibleRect: itemVisibleRect,
+                    encoder: encoder,
+                    renderer: renderer,
+                    imageProvider: renderDataSource,
+                    itemOffset: layerOffset
+                )
+            }
+
+            let hoverQuads = renderDataSource.hoverQuads(forItemAt: index, itemOffset: selectionItemOffset)
             if !hoverQuads.isEmpty {
                 var instances: [QuadInstance] = []
                 instances.reserveCapacity(hoverQuads.count)
@@ -264,7 +286,7 @@ public final class VVChatTimelineMetalView: MTKView {
             }
 
             // Draw selection after scene so bubbles do not occlude highlight quads.
-            let selQuads = renderDataSource.selectionQuads(forItemAt: index, itemOffset: itemOffset)
+            let selQuads = renderDataSource.selectionQuads(forItemAt: index, itemOffset: selectionItemOffset)
             if !selQuads.isEmpty {
                 var instances: [QuadInstance] = []
                 instances.reserveCapacity(selQuads.count)

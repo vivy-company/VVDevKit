@@ -645,6 +645,39 @@ public final class MarkdownLayoutEngine {
         )
     }
 
+    public func layout(
+        _ document: ParsedMarkdownDocument,
+        sourceBlockIndexes: [Int],
+        at yPositions: [CGFloat],
+        totalHeight: CGFloat? = nil
+    ) -> MarkdownLayout {
+        precondition(sourceBlockIndexes.count == yPositions.count, "block indexes and y positions must have the same count")
+
+        var blocks: [LayoutBlock] = []
+        blocks.reserveCapacity(sourceBlockIndexes.count)
+
+        for (sourceIndex, yPosition) in zip(sourceBlockIndexes, yPositions) {
+            guard document.blocks.indices.contains(sourceIndex) else { continue }
+            let block = document.blocks[sourceIndex]
+            if isEmptyParagraph(block) {
+                continue
+            }
+            let layoutBlock = layoutBlock(block, at: yPosition)
+            if isEmptyParagraphBlock(layoutBlock) {
+                continue
+            }
+            blocks.append(layoutBlock)
+        }
+
+        let padding = CGFloat(theme.contentPadding)
+        let computedTotalHeight = (blocks.last?.frame.maxY ?? padding) + padding
+        return MarkdownLayout(
+            blocks: blocks,
+            totalHeight: max(totalHeight ?? computedTotalHeight, computedTotalHeight),
+            contentWidth: contentWidth
+        )
+    }
+
     private func blockSpacing(after blockType: LayoutBlockType, currentBlock: MarkdownBlock, nextBlock: MarkdownBlock?) -> CGFloat {
         switch blockType {
         case .heading(let level):

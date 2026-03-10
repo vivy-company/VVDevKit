@@ -15,10 +15,60 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
             let messageID = controller.messages[index].id
             let byIndex = controller.renderedMessage(at: index)
             let byID = controller.renderedMessage(for: messageID)
+            let fullByIndex = controller.sceneArtifacts(at: index, visibleRect: nil)
+            let byIDIndex = controller.messages.firstIndex { $0.id == messageID }!
+            let fullByID = controller.sceneArtifacts(at: byIDIndex, visibleRect: nil)
             XCTAssertEqual(byIndex?.id, byID?.id)
             XCTAssertEqual(byIndex?.revision, byID?.revision)
-            XCTAssertEqual(byIndex?.scene.primitives.count, byID?.scene.primitives.count)
+            XCTAssertEqual(fullByIndex?.scene.primitives.count, fullByID?.scene.primitives.count)
         }
+    }
+
+    func testVisibleLayoutRangeMatchesLinearScan() {
+        let controller = makeSeededController(messageCount: 240, width: viewportSize.width)
+        let overscan: CGFloat = 900
+        let offsets = makeScrollOffsets(totalHeight: controller.totalHeight, viewportHeight: viewportSize.height, steps: 8)
+
+        for offset in offsets {
+            let viewport = CGRect(x: 0, y: offset, width: viewportSize.width, height: viewportSize.height)
+            let expected = controller.layouts.enumerated().reduce(into: [Int]()) { result, pair in
+                let (index, layout) = pair
+                if layout.frame.maxY >= viewport.minY - overscan && layout.frame.minY <= viewport.maxY + overscan {
+                    result.append(index)
+                }
+            }
+            let actual = Array(controller.visibleLayoutRange(in: viewport, overscan: overscan))
+            XCTAssertEqual(actual, expected, "visible range mismatch at offset \(offset)")
+        }
+    }
+
+    func testItemLayoutsRemainMonotonicAfterMiddleHeightChange() {
+        let controller = makeSeededController(messageCount: 48, width: viewportSize.width)
+        let targetID = controller.messages[22].id
+        let before = controller.layouts
+
+        controller.replaceEntry(
+            id: targetID,
+            with: .message(
+                VVChatMessage(
+                    id: targetID,
+                    role: .assistant,
+                    state: .final,
+                    content: longMessageContent(paragraphCount: 180),
+                    revision: controller.messages[22].revision + 1
+                )
+            ),
+            scrollToBottom: false,
+            markUnread: false
+        )
+
+        let after = controller.layouts
+        XCTAssertEqual(before.count, after.count)
+        for index in after.indices.dropFirst() {
+            XCTAssertGreaterThanOrEqual(after[index].frame.minY, after[index - 1].frame.maxY)
+        }
+        XCTAssertGreaterThan(after[22].frame.height, before[22].frame.height)
+        XCTAssertGreaterThan(after.last?.frame.maxY ?? 0, before.last?.frame.maxY ?? 0)
     }
 
     func testLongRenderedMessageProvidesVisiblePrimitiveSubset() {
@@ -38,11 +88,195 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         }
 
         let localVisibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
-        let visiblePositions = rendered.visibilityIndex.visiblePositions(in: localVisibleRect)
+        guard let fullArtifacts = controller.sceneArtifacts(at: 0, visibleRect: nil),
+              let visibleArtifacts = controller.sceneArtifacts(at: 0, visibleRect: localVisibleRect) else {
+            XCTFail("Expected scene artifacts")
+            return
+        }
 
         XCTAssertGreaterThan(rendered.height, localVisibleRect.height)
-        XCTAssertGreaterThan(rendered.orderedPrimitiveIndices.count, visiblePositions.count)
-        XCTAssertGreaterThan(visiblePositions.count, 0)
+        XCTAssertGreaterThan(fullArtifacts.scene.primitives.count, visibleArtifacts.scene.primitives.count)
+        XCTAssertGreaterThan(visibleArtifacts.scene.primitives.count, 0)
+    }
+
+    func testLongRenderedMessageSeparatesChromeAndContentArtifacts() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        controller.appendMessage(
+            VVChatMessage(
+                id: "long-message-layers",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 220)
+            )
+        )
+
+        let localVisibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        guard let rendered = controller.renderedMessage(at: 0),
+              let fullContentArtifacts = controller.contentSceneArtifacts(at: 0, visibleRect: nil),
+              let visibleContentArtifacts = controller.contentSceneArtifacts(at: 0, visibleRect: localVisibleRect),
+              let fullArtifacts = controller.sceneArtifacts(at: 0, visibleRect: nil) else {
+            XCTFail("Expected layered scene artifacts")
+            return
+        }
+
+        XCTAssertGreaterThan(fullContentArtifacts.scene.primitives.count, visibleContentArtifacts.scene.primitives.count)
+        XCTAssertEqual(
+            fullArtifacts.scene.primitives.count,
+            rendered.chromeScene.primitives.count + fullContentArtifacts.scene.primitives.count
+        )
+    }
+
+    func testLargeMessageReuseAfterRenderedInvalidationAvoidsReparse() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "reuse-large-message",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 260)
+        )
+
+        _ = renderer.renderedMessage(for: message)
+        let first = renderer.debugSnapshot()
+        renderer.invalidateRendered(messageID: message.id)
+        _ = renderer.renderedMessage(for: message)
+        let second = renderer.debugSnapshot()
+
+        XCTAssertEqual(second.markdownParseCount, first.markdownParseCount)
+        XCTAssertEqual(second.markdownLayoutCount, first.markdownLayoutCount)
+        XCTAssertEqual(second.markdownSceneBuildCount, first.markdownSceneBuildCount)
+        XCTAssertGreaterThan(second.preparedMarkdownCacheHits, first.preparedMarkdownCacheHits)
+        XCTAssertEqual(second.preparedMarkdownCacheMisses, first.preparedMarkdownCacheMisses)
+    }
+
+    func testImageSizeRelayoutReusesPreparedMarkdownLayout() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let url = "https://example.com/hero.png"
+        let message = VVChatMessage(
+            id: "image-large-message",
+            role: .assistant,
+            state: .final,
+            content: largeImageMessageContent(url: url, paragraphCount: 80)
+        )
+
+        _ = renderer.renderedMessage(for: message)
+        let firstSnapshot = renderer.debugSnapshot()
+
+        XCTAssertTrue(renderer.updateImageSize(url: url, size: CGSize(width: 1400, height: 900)))
+        renderer.invalidateRendered(messageID: message.id)
+        let second = renderer.renderedMessage(for: message)
+        let secondSnapshot = renderer.debugSnapshot()
+
+        XCTAssertEqual(secondSnapshot.markdownParseCount, firstSnapshot.markdownParseCount)
+        XCTAssertGreaterThan(secondSnapshot.preparedMarkdownCacheHits, firstSnapshot.preparedMarkdownCacheHits)
+        XCTAssertEqual(secondSnapshot.preparedMarkdownCacheMisses, firstSnapshot.preparedMarkdownCacheMisses)
+        XCTAssertTrue(
+            secondSnapshot.incrementalImageLayoutPassCount > firstSnapshot.incrementalImageLayoutPassCount ||
+            secondSnapshot.markdownLayoutCount > firstSnapshot.markdownLayoutCount
+        )
+        let fullArtifacts = renderer.sceneArtifacts(for: message, rendered: second, visibleRect: nil)
+        let finalSnapshot = renderer.debugSnapshot()
+        XCTAssertGreaterThan(finalSnapshot.markdownSceneBuildCount, firstSnapshot.markdownSceneBuildCount)
+        XCTAssertGreaterThan(fullArtifacts.scene.primitives.count, 0)
+    }
+
+    func testVisibleSceneBuildDoesNotRequireResidentFullPreparedLayout() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "windowed-layout-message",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 260)
+        )
+
+        let rendered = renderer.renderedMessage(for: message)
+        let afterRender = renderer.debugSnapshot()
+        XCTAssertEqual(afterRender.materializedPreparedLayoutCount, 0)
+
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        let artifacts = renderer.contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let afterVisibleScene = renderer.debugSnapshot()
+
+        XCTAssertNotNil(artifacts)
+        XCTAssertGreaterThan(artifacts?.scene.primitives.count ?? 0, 0)
+        XCTAssertEqual(afterVisibleScene.materializedPreparedLayoutCount, 0)
+        XCTAssertGreaterThan(afterVisibleScene.markdownWindowLayoutCount, afterRender.markdownWindowLayoutCount)
+    }
+
+    func testSelectionHelperDoesNotRetainPreparedFullLayout() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "selection-window-message",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 180)
+        )
+
+        let rendered = renderer.renderedMessage(for: message)
+        XCTAssertEqual(renderer.debugSnapshot().materializedPreparedLayoutCount, 0)
+
+        let helper = renderer.selectionHelper(for: message, rendered: rendered)
+        let snapshot = renderer.debugSnapshot()
+
+        XCTAssertNotNil(helper)
+        XCTAssertEqual(snapshot.materializedPreparedLayoutCount, 0)
+    }
+
+    func testLargeRenderedMessagesRespectCacheCostBudgets() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+
+        for index in 0..<18 {
+            let message = VVChatMessage(
+                id: "huge-message-\(index)",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 220)
+            )
+            let rendered = renderer.renderedMessage(for: message)
+            _ = renderer.sceneArtifacts(for: message, rendered: rendered, visibleRect: nil)
+        }
+
+        let snapshot = renderer.debugSnapshot()
+        XCTAssertGreaterThan(snapshot.preparedMarkdownCacheEstimatedCost, 0)
+        XCTAssertGreaterThan(snapshot.sceneWindowCacheEstimatedCost, 0)
+        XCTAssertLessThanOrEqual(snapshot.materializedPreparedLayoutEstimatedCost, snapshot.materializedPreparedLayoutCostLimit)
+        XCTAssertLessThanOrEqual(snapshot.preparedMarkdownCacheEstimatedCost, snapshot.preparedMarkdownCacheCostLimit)
+        XCTAssertLessThanOrEqual(snapshot.sceneWindowCacheEstimatedCost, snapshot.sceneWindowCacheCostLimit)
+    }
+
+    func testLargeRenderedMessagesDematerializeColdPreparedLayouts() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+
+        for index in 0..<18 {
+            let message = VVChatMessage(
+                id: "cold-layout-message-\(index)",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 220)
+            )
+            _ = renderer.renderedMessage(for: message)
+        }
+
+        let snapshot = renderer.debugSnapshot()
+        XCTAssertGreaterThan(snapshot.preparedMarkdownCacheCount, 0)
+        XCTAssertLessThan(snapshot.materializedPreparedLayoutCount, snapshot.preparedMarkdownCacheCount)
+    }
+
+    func testRenderedMessageCacheRespectsCostBudget() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+
+        for index in 0..<140 {
+            let message = VVChatMessage(
+                id: "rendered-cache-\(index)",
+                role: index.isMultiple(of: 2) ? .assistant : .user,
+                state: .final,
+                content: seededMessage(index: index) + "\n\n" + longMessageContent(paragraphCount: 12)
+            )
+            _ = renderer.renderedMessage(for: message)
+        }
+
+        let snapshot = renderer.debugSnapshot()
+        XCTAssertGreaterThan(snapshot.renderedMessageCacheCount, 0)
+        XCTAssertLessThanOrEqual(snapshot.renderedMessageCacheEstimatedCost, snapshot.renderedMessageCacheCostLimit)
     }
 
     func testRepeatedStreamingMemoryStabilizesAfterWarmCaches() {
@@ -159,13 +393,13 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         let maxY = scrollOffsetY + viewportHeight + overscan
         var builder = VVSceneBuilder()
 
-        for index in controller.layouts.indices {
-            let layout = controller.layouts[index]
+        for index in 0..<controller.layoutCount {
+            guard let layout = controller.itemLayout(at: index) else { continue }
             if layout.frame.maxY < minY { continue }
             if layout.frame.minY > maxY { break }
-            guard let rendered = controller.renderedMessage(at: index) else { continue }
+            guard let sceneArtifacts = controller.sceneArtifacts(at: index, visibleRect: nil) else { continue }
             builder.withOffset(CGPoint(x: layout.frame.origin.x + layout.contentOffset.x, y: layout.frame.origin.y + layout.contentOffset.y)) { builder in
-                builder.add(node: VVNode.fromScene(rendered.scene))
+                builder.add(node: VVNode.fromScene(sceneArtifacts.scene))
             }
         }
 
@@ -305,6 +539,24 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
             let value\(index) = BenchmarkRenderer.render(row: \(index), width: 480, theme: .dark)
             print(value\(index))
             ```
+
+            """
+        }
+
+        return text
+    }
+
+    private func largeImageMessageContent(url: String, paragraphCount: Int) -> String {
+        var text = """
+        ## Large Image Message
+
+        ![](\(url))
+
+        """
+
+        for index in 0..<paragraphCount {
+            text += """
+            Paragraph \(index): the image above should relayout in place without reparsing the whole markdown message every time an image size arrives.
 
             """
         }

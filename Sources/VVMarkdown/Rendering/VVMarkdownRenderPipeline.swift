@@ -86,6 +86,10 @@ public struct VVMarkdownRenderPipeline {
     }
 
     public func buildScene(from layout: MarkdownLayout) -> VVScene {
+        buildScene(from: layout, blockRange: layout.blocks.indices)
+    }
+
+    public func buildScene(from layout: MarkdownLayout, blockRange: Range<Int>) -> VVScene {
         let sceneBuilder = VVMarkdownSceneBuilder(
             theme: theme,
             layoutEngine: layoutEngine,
@@ -103,6 +107,6 @@ public struct VVMarkdownRenderPipeline {
             lineMetrics: lineMetrics,
             runFont: runFont
         )
-        return sceneBuilder.buildScene(from: layout)
+        return sceneBuilder.buildScene(from: layout, blockRange: blockRange)
     }
 }
