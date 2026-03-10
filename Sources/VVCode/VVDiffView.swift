@@ -111,6 +111,7 @@ private typealias DisplayBlock = VVDiffLayoutBlock
 
 struct VVDiffViewDebugMetrics {
     let rowGeometryCount: Int
+    let totalVisualLineCount: Int
     let storedTextGeometryCount: Int
     let storedTextCharacterCount: Int
     let desiredHighlightRange: Range<Int>
@@ -457,6 +458,7 @@ private final class VVDiffMetalView: NSView {
     private let selectionController = VVTextSelectionController<DiffTextPosition>()
     private let selectionColor: SIMD4<Float> = .rgba(0.24, 0.40, 0.65, 0.55)
     private var rowGeometries: [RowGeometry] = []
+    private var rowGeometryWindowRange: Range<Int> = 0..<0
     private var displayBlocks: [DisplayBlock] = []
     private var layoutPlan: VVDiffLayoutPlan?
     private var filePathByHeaderRowID: [Int: String] = [:]
@@ -541,6 +543,7 @@ private final class VVDiffMetalView: NSView {
     @objc private func scrollViewBoundsChanged(_ notification: Notification) {
         updateMetalViewport()
         noteScrollActivity()
+        refreshVisibleRowGeometryWindow()
         requestViewportHighlightingIfNeeded()
         prewarmSceneBuildIfNeeded()
         if !staleHighlightedRowIDs.isEmpty, shouldRedrawForHighlightedRowIDs(staleHighlightedRowIDs) {
@@ -821,6 +824,7 @@ private final class VVDiffMetalView: NSView {
         let previousContentHeight = contentHeight
         let previousDocumentFrame = documentView.frame
         buildLayoutIfNeeded(width: width)
+        refreshVisibleRowGeometryWindow()
         contentHeight = rowGeometriesContentHeight
 
         let wrapsUnified = self.wrapsUnified
@@ -831,8 +835,9 @@ private final class VVDiffMetalView: NSView {
             maxLineWidth = width
         } else {
             var widestLine = width
-            for geo in rowGeometries {
-                let candidate = geo.codeStartX + codeInsetX + CGFloat(geo.textLength) * dr.charWidth + 20
+            for row in rows {
+                let rowText = row.kind == .hunkHeader ? VVDiffDisplayText(for: row) : row.text
+                let candidate = (layoutPlan?.metrics.codeStartX ?? dr.charWidth) + codeInsetX + CGFloat(rowText.count) * dr.charWidth + 20
                 if candidate > widestLine {
                     widestLine = candidate
                 }
@@ -885,6 +890,7 @@ private final class VVDiffMetalView: NSView {
         guard let analyzedDocument else {
             layoutPlan = nil
             rowGeometries.removeAll(keepingCapacity: true)
+            rowGeometryWindowRange = 0..<0
             displayBlocks.removeAll(keepingCapacity: true)
             rowGeometriesContentHeight = 0
             rowGeometryCacheKey = cacheKey
@@ -902,10 +908,11 @@ private final class VVDiffMetalView: NSView {
             includesMetadata: false
         )
         layoutPlan = plan
-        rowGeometries = plan.visualLines
+        rowGeometries.removeAll(keepingCapacity: true)
+        rowGeometryWindowRange = 0..<0
         displayBlocks = plan.blocks
         rowGeometriesContentHeight = plan.contentHeight
-        assertRowGeometriesAreSorted()
+        refreshVisibleRowGeometryWindow(force: true)
         rowGeometryCacheKey = cacheKey
     }
 
@@ -944,6 +951,83 @@ private final class VVDiffMetalView: NSView {
             previousY = geometry.y
         }
         #endif
+    }
+
+    private func refreshVisibleRowGeometryWindow(force: Bool = false) {
+        let visibleRect = scrollView.contentView.bounds.insetBy(dx: 0, dy: -Self.renderCullPadding)
+        refreshRowGeometryWindow(in: visibleRect, force: force)
+    }
+
+    private func refreshRowGeometryWindow(aroundDocumentY y: CGFloat, force: Bool = false) {
+        let viewportHeight = max(scrollView.contentView.bounds.height, 1)
+        let visibleRect = CGRect(
+            x: 0,
+            y: max(0, y - viewportHeight * 0.5),
+            width: documentView.bounds.width,
+            height: viewportHeight
+        ).insetBy(dx: 0, dy: -Self.renderCullPadding)
+        refreshRowGeometryWindow(in: visibleRect, force: force)
+    }
+
+    private func refreshRowGeometryWindow(in visibleRect: CGRect, force: Bool = false) {
+        guard let layoutPlan else {
+            rowGeometries.removeAll(keepingCapacity: true)
+            rowGeometryWindowRange = 0..<0
+            return
+        }
+
+        let blockRange = rowGeometryBlockRange(in: visibleRect)
+        let visualLineRange = visualLineRange(for: blockRange)
+        if !force, rowGeometryWindowRange == visualLineRange {
+            return
+        }
+
+        rowGeometries = VVDiffLayoutBuilder.materializeVisualLines(in: layoutPlan, blockRange: blockRange)
+        rowGeometryWindowRange = visualLineRange
+        assertRowGeometriesAreSorted()
+    }
+
+    private func rowGeometryBlockRange(in visibleRect: CGRect) -> Range<Int> {
+        guard !displayBlocks.isEmpty else { return 0..<0 }
+        let visibleRange = visibleDisplayBlockRange(in: visibleRect)
+        guard visibleRange.lowerBound < visibleRange.upperBound else {
+            return 0..<min(displayBlocks.count, 1)
+        }
+
+        let visibleCount = max(visibleRange.count, 1)
+        let paddingBlocks = max(24, Int((CGFloat(visibleCount) * 0.75).rounded(.up)))
+        let startBlockIndex = max(0, visibleRange.lowerBound - paddingBlocks)
+        let endBlockIndex = min(displayBlocks.count, visibleRange.upperBound + paddingBlocks)
+        return startBlockIndex..<endBlockIndex
+    }
+
+    private func visualLineRange(for blockRange: Range<Int>) -> Range<Int> {
+        guard blockRange.lowerBound < blockRange.upperBound,
+              displayBlocks.indices.contains(blockRange.lowerBound),
+              displayBlocks.indices.contains(blockRange.upperBound - 1) else {
+            return 0..<0
+        }
+        let start = displayBlocks[blockRange.lowerBound].visualLineStartIndex
+        let endBlock = displayBlocks[blockRange.upperBound - 1]
+        let end = endBlock.visualLineStartIndex + endBlock.visualLineCount
+        return start..<end
+    }
+
+    private func materializedRowGeometries(for visualLineRange: Range<Int>) -> [RowGeometry] {
+        guard let layoutPlan, visualLineRange.lowerBound < visualLineRange.upperBound else { return [] }
+        if rowGeometryWindowRange.lowerBound <= visualLineRange.lowerBound &&
+            rowGeometryWindowRange.upperBound >= visualLineRange.upperBound {
+            let startOffset = visualLineRange.lowerBound - rowGeometryWindowRange.lowerBound
+            let endOffset = startOffset + visualLineRange.count
+            guard startOffset >= 0, endOffset <= rowGeometries.count else { return [] }
+            return Array(rowGeometries[startOffset..<endOffset])
+        }
+        return VVDiffLayoutBuilder.materializeVisualLines(in: layoutPlan, visualLineRange: visualLineRange)
+    }
+
+    private func geometry(at rowIndex: Int) -> RowGeometry? {
+        guard rowIndex >= 0 else { return nil }
+        return materializedRowGeometries(for: rowIndex..<(rowIndex + 1)).first
     }
 
     private func rebuildFileHeaderPathLookup() {
@@ -1193,8 +1277,38 @@ private final class VVDiffMetalView: NSView {
         deferredHighlightSceneRefresh = false
         staleHighlightedRowIDs.removeAll(keepingCapacity: true)
         highlightSceneVersion &+= 1
-        invalidateSceneCache(clearScene: false)
-        prewarmSceneBuildIfNeeded()
+        let renderWidth = currentRenderWidth()
+        if let layoutPlan {
+            let refreshSceneKey = makeHighlightRefreshSceneCacheKey(renderWidth: renderWidth)
+            let refreshBlockRange = refreshSceneKey.startBlockIndex..<refreshSceneKey.endBlockIndex
+            if refreshBlockRange.lowerBound < refreshBlockRange.upperBound {
+                let artifacts = Self.buildSceneArtifacts(
+                    layoutPlan: layoutPlan,
+                    blockRange: refreshBlockRange,
+                    theme: markdownTheme(from: theme),
+                    baseFont: configuration.font,
+                    highlightedRanges: highlightedRanges
+                )
+                cachedScene = artifacts.scene
+                cachedSceneKey = refreshSceneKey
+                cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
+                cachedSceneVisibilityIndex = artifacts.visibilityIndex
+                cachedVisibleBucketRange = nil
+                cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+                sceneBuildInFlightKey = nil
+
+                let paddedSceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
+                if paddedSceneKey != refreshSceneKey {
+                    scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: paddedSceneKey)
+                }
+            } else {
+                invalidateSceneCache(clearScene: false)
+                prewarmSceneBuildIfNeeded()
+            }
+        } else {
+            invalidateSceneCache(clearScene: false)
+            prewarmSceneBuildIfNeeded()
+        }
         if redraw {
             metalView?.setNeedsDisplay(metalView.bounds)
         }
@@ -1573,6 +1687,38 @@ extension VVDiffMetalView: MTKViewDelegate {
         )
     }
 
+    private func makeHighlightRefreshSceneCacheKey(renderWidth: CGFloat) -> ViewportSceneCacheKey {
+        let renderWidthBucket = Int((renderWidth * 2).rounded())
+        guard let scrollView, !displayBlocks.isEmpty else {
+            return ViewportSceneCacheKey(
+                startBlockIndex: 0,
+                endBlockIndex: 0,
+                renderWidthBucket: renderWidthBucket,
+                highlightVersion: highlightSceneVersion
+            )
+        }
+
+        let visibleRange = visibleDisplayBlockRange(in: scrollView.contentView.bounds.insetBy(dx: 0, dy: -Self.renderCullPadding * 0.5))
+        guard visibleRange.lowerBound < visibleRange.upperBound else {
+            return ViewportSceneCacheKey(
+                startBlockIndex: 0,
+                endBlockIndex: min(displayBlocks.count, 1),
+                renderWidthBucket: renderWidthBucket,
+                highlightVersion: highlightSceneVersion
+            )
+        }
+
+        let paddingBlocks = min(12, max(4, visibleRange.count / 4))
+        let startBlockIndex = max(0, visibleRange.lowerBound - paddingBlocks)
+        let endBlockIndex = min(displayBlocks.count, visibleRange.upperBound + paddingBlocks)
+        return ViewportSceneCacheKey(
+            startBlockIndex: startBlockIndex,
+            endBlockIndex: endBlockIndex,
+            renderWidthBucket: renderWidthBucket,
+            highlightVersion: highlightSceneVersion
+        )
+    }
+
     fileprivate func debugMetrics() -> VVDiffViewDebugMetrics {
         debugBuildCurrentSceneIfNeeded()
         let visibleBlockRange = visibleDisplayBlockRange(in: scrollView.contentView.bounds)
@@ -1583,6 +1729,7 @@ extension VVDiffMetalView: MTKViewDelegate {
         }
         return VVDiffViewDebugMetrics(
             rowGeometryCount: rowGeometries.count,
+            totalVisualLineCount: layoutPlan?.totalVisualLineCount ?? rowGeometries.count,
             storedTextGeometryCount: 0,
             storedTextCharacterCount: 0,
             desiredHighlightRange: desiredHighlightedCodeRowRangeForVisibleViewport(),
@@ -1666,6 +1813,13 @@ extension VVDiffMetalView: MTKViewDelegate {
     }
 
     private func findRow(at y: CGFloat, x: CGFloat? = nil) -> RowGeometry? {
+        if rowGeometries.isEmpty {
+            refreshVisibleRowGeometryWindow(force: true)
+        } else if let first = rowGeometries.first,
+                  let last = rowGeometries.last,
+                  (y < first.y || y >= last.y + last.height) {
+            refreshRowGeometryWindow(aroundDocumentY: y, force: true)
+        }
         guard !rowGeometries.isEmpty else { return nil }
 
         // Clamp to first/last row when outside bounds
@@ -1803,9 +1957,10 @@ extension VVDiffMetalView: MTKViewDelegate {
     }
 
     @IBAction override func selectAll(_ sender: Any?) {
-        guard !rowGeometries.isEmpty else { return }
+        guard let layoutPlan, layoutPlan.totalVisualLineCount > 0 else { return }
         let first = DiffTextPosition(rowIndex: 0, charOffset: 0)
-        let last = DiffTextPosition(rowIndex: rowGeometries.count - 1, charOffset: rowGeometries.last!.textLength)
+        guard let lastGeometry = geometry(at: layoutPlan.totalVisualLineCount - 1) else { return }
+        let last = DiffTextPosition(rowIndex: lastGeometry.rowIndex, charOffset: lastGeometry.textLength, paneX: lastGeometry.paneX)
         selectionController.selectAll(from: first, to: last)
         invalidateAndRedraw()
     }
@@ -1848,8 +2003,9 @@ extension VVDiffMetalView: VVTextSelectionRenderer {
         var quads: [VVQuadPrimitive] = []
         let dr = ensureDiffRenderer()
         let selectionPane = start.paneX
+        let geometries = materializedRowGeometries(for: start.rowIndex..<(end.rowIndex + 1))
 
-        for geo in rowGeometries {
+        for geo in geometries {
             guard geo.rowIndex >= start.rowIndex && geo.rowIndex <= end.rowIndex else { continue }
 
             // In split mode, only select rows within the same pane
@@ -1920,8 +2076,9 @@ extension VVDiffMetalView: VVTextExtractor {
     func extractText(from start: DiffTextPosition, to end: DiffTextPosition) -> String {
         var lines: [String] = []
         let selectionPane = start.paneX
+        let geometries = materializedRowGeometries(for: start.rowIndex..<(end.rowIndex + 1))
 
-        for geo in rowGeometries {
+        for geo in geometries {
             guard geo.rowIndex >= start.rowIndex && geo.rowIndex <= end.rowIndex else { continue }
             // In split mode, only extract text from the same pane
             if renderStyle == .sideBySide && geo.paneX != selectionPane { continue }

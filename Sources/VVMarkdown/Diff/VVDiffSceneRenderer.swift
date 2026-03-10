@@ -900,7 +900,10 @@ private final class DiffSceneBuilder {
         let splitRows = layout.document.splitRows
 
         for block in layout.blocks[clampedRange] {
-            switch block.kind {
+            guard let materializedBlock = VVDiffLayoutBuilder.materializedBlock(block, in: layout) else {
+                continue
+            }
+            switch materializedBlock {
             case let .unifiedFileHeader(sectionIndex, _):
                 guard options.showsFileHeaders, sections.indices.contains(sectionIndex) else { continue }
                 buildFileHeader(

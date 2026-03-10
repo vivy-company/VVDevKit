@@ -85,6 +85,36 @@ final class VVDiffViewPerformanceTests: XCTestCase {
         }
     }
 
+    func testHeavySplitDiffRowGeometryIsWindowed() {
+        var configuration = VVConfiguration.default
+        configuration.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+
+        let diff = makeLargeUnifiedDiff(fileCount: 96, linesPerHunk: 30)
+        let topMetrics = VVDiffViewDebug.makeMetrics(
+            unifiedDiff: diff,
+            style: .sideBySide,
+            configuration: configuration,
+            viewportSize: CGSize(width: 1100, height: 760),
+            scrollOffsetY: 0
+        )
+        let deepMetrics = VVDiffViewDebug.makeMetrics(
+            unifiedDiff: diff,
+            style: .sideBySide,
+            configuration: configuration,
+            viewportSize: CGSize(width: 1100, height: 760),
+            scrollOffsetY: max(0, topMetrics.contentHeight * 0.8)
+        )
+
+        for metrics in [topMetrics, deepMetrics] {
+            XCTAssertGreaterThan(metrics.totalVisualLineCount, 0)
+            XCTAssertLessThan(
+                metrics.rowGeometryCount,
+                metrics.totalVisualLineCount,
+                "Visible row geometry should be materialized as a window, not the full diff."
+            )
+        }
+    }
+
     private func makeLargeUnifiedDiff(fileCount: Int, linesPerHunk: Int) -> String {
         var lines: [String] = []
         lines.reserveCapacity(fileCount * (linesPerHunk * 3 + 6))
