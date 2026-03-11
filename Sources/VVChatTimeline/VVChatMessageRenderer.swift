@@ -51,6 +51,17 @@ struct VVChatSceneArtifacts {
     let visibilityIndex: VVPrimitiveVisibilityIndex
 }
 
+struct VVChatSelectionArtifacts {
+    let helper: VVMarkdownSelectionHelper
+    let blockRange: Range<Int>
+}
+
+struct VVChatMessageLayoutSummary {
+    let height: CGFloat
+    let contentOffset: CGPoint
+    let imageURLs: [String]
+}
+
 public final class VVChatMessageRenderer {
     private final class LRUCache<Key: Hashable, Value> {
         private final class Node {
@@ -219,11 +230,18 @@ public final class VVChatMessageRenderer {
         let contentScaleKey: Int
     }
 
+    private struct DraftPreparedKey: Hashable {
+        let id: String
+        let widthKey: Int
+        let contentScaleKey: Int
+    }
+
     struct DebugSnapshot {
         let renderedMessageCacheCount: Int
         let renderedMessageCacheEstimatedCost: Int
         let renderedMessageCacheCostLimit: Int
         let preparedMarkdownCacheCount: Int
+        let draftPreparedStateCount: Int
         let materializedPreparedLayoutCount: Int
         let materializedPreparedLayoutEstimatedCost: Int
         let materializedPreparedLayoutCostLimit: Int
@@ -236,6 +254,9 @@ public final class VVChatMessageRenderer {
         let markdownWindowLayoutCount: Int
         let markdownSceneBuildCount: Int
         let incrementalImageLayoutPassCount: Int
+        let incrementalDraftReuseCount: Int
+        let incrementalDraftLayoutPassCount: Int
+        let incrementalDraftFullRebuildCount: Int
         let sceneWindowCacheEstimatedCost: Int
         let sceneWindowCacheCostLimit: Int
     }
@@ -261,6 +282,16 @@ public final class VVChatMessageRenderer {
         var appliedImageSizes: [String: CGSize]
     }
 
+    private struct DraftPreparedState {
+        let key: DraftPreparedKey
+        var revision: Int
+        var content: String
+        var stableContent: String
+        var stableBlocks: [MarkdownBlock]
+        var stableFootnotes: [String: MarkdownBlock]
+        var prepared: PreparedMarkdownContent
+    }
+
     fileprivate enum ContentSceneSource {
         case none
         case markdown(CacheKey)
@@ -268,6 +299,12 @@ public final class VVChatMessageRenderer {
     }
 
     private struct SceneWindowCacheKey: Hashable {
+        let key: CacheKey
+        let startBlock: Int
+        let endBlock: Int
+    }
+
+    private struct SelectionWindowCacheKey: Hashable {
         let key: CacheKey
         let startBlock: Int
         let endBlock: Int
@@ -320,7 +357,9 @@ public final class VVChatMessageRenderer {
     private var styledTextResourceCache: [StyledTextResourceKey: ContentResources] = [:]
     private var cache: LRUCache<CacheKey, VVChatRenderedMessage>
     private var preparedMarkdownCache: LRUCache<CacheKey, PreparedMarkdownContent>
+    private var draftPreparedStates: LRUCache<DraftPreparedKey, DraftPreparedState>
     private var sceneWindowCache: LRUCache<SceneWindowCacheKey, VVChatSceneArtifacts>
+    private var selectionWindowCache: LRUCache<SelectionWindowCacheKey, VVChatSelectionArtifacts>
     private var contentWidth: CGFloat
     private var style: VVChatTimelineStyle
     private var imageSizes: [String: CGSize] = [:]
@@ -331,10 +370,15 @@ public final class VVChatMessageRenderer {
     private var markdownWindowLayoutCount = 0
     private var markdownSceneBuildCount = 0
     private var incrementalImageLayoutPassCount = 0
+    private var incrementalDraftReuseCount = 0
+    private var incrementalDraftLayoutPassCount = 0
+    private var incrementalDraftFullRebuildCount = 0
     private static let renderedMessageCacheCostLimit = 12 * 1024 * 1024
     private static let materializedPreparedLayoutCostLimit = 24 * 1024 * 1024
     private static let preparedMarkdownCacheCostLimit = 64 * 1024 * 1024
+    private static let draftPreparedStateCostLimit = 24 * 1024 * 1024
     private static let sceneWindowCacheCostLimit = 24 * 1024 * 1024
+    private static let selectionWindowCacheCostLimit = 12 * 1024 * 1024
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
@@ -366,10 +410,22 @@ public final class VVChatMessageRenderer {
             costLimit: Self.preparedMarkdownCacheCostLimit,
             cost: Self.estimatedPreparedMarkdownCost
         )
+        self.draftPreparedStates = LRUCache(
+            limit: max(2, style.renderedCacheLimit),
+            costLimit: Self.draftPreparedStateCostLimit,
+            cost: { state in
+                Self.estimatedPreparedMarkdownCost(state.prepared)
+            }
+        )
         self.sceneWindowCache = LRUCache(
             limit: max(8, style.renderedCacheLimit * 4),
             costLimit: Self.sceneWindowCacheCostLimit,
             cost: Self.estimatedSceneArtifactsCost
+        )
+        self.selectionWindowCache = LRUCache(
+            limit: max(8, style.renderedCacheLimit * 3),
+            costLimit: Self.selectionWindowCacheCostLimit,
+            cost: Self.estimatedSelectionArtifactsCost
         )
     }
 
@@ -391,11 +447,17 @@ public final class VVChatMessageRenderer {
         cache.updateCostLimit(Self.renderedMessageCacheCostLimit)
         preparedMarkdownCache.updateLimit(style.renderedCacheLimit)
         preparedMarkdownCache.updateCostLimit(Self.preparedMarkdownCacheCostLimit)
+        draftPreparedStates.updateLimit(max(2, style.renderedCacheLimit))
+        draftPreparedStates.updateCostLimit(Self.draftPreparedStateCostLimit)
         sceneWindowCache.updateLimit(max(8, style.renderedCacheLimit * 4))
         sceneWindowCache.updateCostLimit(Self.sceneWindowCacheCostLimit)
+        selectionWindowCache.updateLimit(max(8, style.renderedCacheLimit * 3))
+        selectionWindowCache.updateCostLimit(Self.selectionWindowCacheCostLimit)
         cache.removeAll()
         preparedMarkdownCache.removeAll()
+        draftPreparedStates.removeAll()
         sceneWindowCache.removeAll()
+        selectionWindowCache.removeAll()
     }
 
     public func updateContentWidth(_ width: CGFloat) {
@@ -412,7 +474,9 @@ public final class VVChatMessageRenderer {
         clearResourceCaches()
         cache.removeAll()
         preparedMarkdownCache.removeAll()
+        draftPreparedStates.removeAll()
         sceneWindowCache.removeAll()
+        selectionWindowCache.removeAll()
     }
 
     public func updateImageSize(url: String, size: CGSize) -> Bool {
@@ -423,46 +487,70 @@ public final class VVChatMessageRenderer {
         return true
     }
 
+    func trimCaches(keepingMessageIDs: Set<String>) {
+        let keep = keepingMessageIDs
+        cache.remove(where: { !keep.contains($0.id) })
+        preparedMarkdownCache.remove(where: { !keep.contains($0.id) })
+        draftPreparedStates.remove(where: { !keep.contains($0.id) })
+        sceneWindowCache.remove(where: { !keep.contains($0.key.id) })
+        selectionWindowCache.remove(where: { !keep.contains($0.key.id) })
+        dematerializePreparedLayoutsIfNeeded(excluding: nil)
+    }
+
     public func invalidate(messageID: String) {
         cache.remove(where: { $0.id == messageID })
         preparedMarkdownCache.remove(where: { $0.id == messageID })
+        draftPreparedStates.remove(where: { $0.id == messageID })
         sceneWindowCache.remove(where: { $0.key.id == messageID })
+        selectionWindowCache.remove(where: { $0.key.id == messageID })
     }
 
     func invalidateRendered(messageID: String) {
         cache.remove(where: { $0.id == messageID })
         sceneWindowCache.remove(where: { $0.key.id == messageID })
+        selectionWindowCache.remove(where: { $0.key.id == messageID })
     }
 
     public func invalidateAll() {
         cache.removeAll()
         preparedMarkdownCache.removeAll()
+        draftPreparedStates.removeAll()
         sceneWindowCache.removeAll()
+        selectionWindowCache.removeAll()
     }
 
     func debugSnapshot() -> DebugSnapshot {
         let preparedValues = preparedMarkdownCache.valuesFromLeastRecent()
+        let draftValues = draftPreparedStates.valuesFromLeastRecent()
         return DebugSnapshot(
             renderedMessageCacheCount: cache.count,
             renderedMessageCacheEstimatedCost: cache.currentCost,
             renderedMessageCacheCostLimit: Self.renderedMessageCacheCostLimit,
             preparedMarkdownCacheCount: preparedMarkdownCache.count,
+            draftPreparedStateCount: draftPreparedStates.count,
             materializedPreparedLayoutCount: preparedValues.reduce(into: 0) { count, value in
                 if value.layout != nil { count += 1 }
+            } + draftValues.reduce(into: 0) { count, value in
+                if value.prepared.layout != nil { count += 1 }
             },
             materializedPreparedLayoutEstimatedCost: preparedValues.reduce(into: 0) { total, value in
                 total += Self.estimatedResidentPreparedLayoutCost(value)
+            } + draftValues.reduce(into: 0) { total, value in
+                total += Self.estimatedResidentPreparedLayoutCost(value.prepared)
             },
             materializedPreparedLayoutCostLimit: Self.materializedPreparedLayoutCostLimit,
             preparedMarkdownCacheHits: preparedMarkdownCacheHits,
             preparedMarkdownCacheMisses: preparedMarkdownCacheMisses,
-            preparedMarkdownCacheEstimatedCost: preparedMarkdownCache.currentCost,
+            preparedMarkdownCacheEstimatedCost: preparedMarkdownCache.currentCost + draftPreparedStates.currentCost,
             preparedMarkdownCacheCostLimit: Self.preparedMarkdownCacheCostLimit,
             markdownParseCount: markdownParseCount,
             markdownLayoutCount: markdownLayoutCount,
             markdownWindowLayoutCount: markdownWindowLayoutCount,
             markdownSceneBuildCount: markdownSceneBuildCount,
             incrementalImageLayoutPassCount: incrementalImageLayoutPassCount,
+            incrementalDraftReuseCount: incrementalDraftReuseCount,
+            incrementalDraftLayoutPassCount: incrementalDraftLayoutPassCount,
+            incrementalDraftFullRebuildCount: incrementalDraftFullRebuildCount,
             sceneWindowCacheEstimatedCost: sceneWindowCache.currentCost,
             sceneWindowCacheCostLimit: Self.sceneWindowCacheCostLimit
         )
@@ -873,10 +961,403 @@ public final class VVChatMessageRenderer {
         return rendered
     }
 
+    func layoutSummary(for message: VVChatMessage) -> VVChatMessageLayoutSummary {
+        let insets = style.insets(for: message.role)
+        let presentation = message.presentation
+        let leadingIconURL = normalizedAssetURL(presentation?.leadingIconURL)
+        let hasLeadingIcon = leadingIconURL != nil
+        let leadingIconSize = hasLeadingIcon ? max(8, presentation?.leadingIconSize ?? style.headerIconSize) : 0
+        let leadingIconSpacing = hasLeadingIcon ? max(0, presentation?.leadingIconSpacing ?? style.headerIconSpacing) : 0
+        let explicitLaneWidth = max(0, presentation?.leadingLaneWidth ?? 0)
+        let implicitLaneWidth = hasLeadingIcon ? (leadingIconSize + leadingIconSpacing) : 0
+        let leadingLaneWidth = max(explicitLaneWidth, implicitLaneWidth)
+        let bubbleStyle = presentation?.bubbleStyle ?? style.bubbleStyle(for: message.role)
+        let usesBubble = bubbleStyle != nil
+        let bubbleInsets = bubbleStyle?.insets ?? VVInsets()
+        let availableWidth = max(0, contentWidth - insets.left - insets.right - leadingLaneWidth)
+        let maxBubbleWidth = bubbleStyle?.maxWidth ?? availableWidth
+        let maxContentWidth = usesBubble ? min(availableWidth - bubbleInsets.left - bubbleInsets.right, maxBubbleWidth) : availableWidth
+        let messageContentWidth = max(0, maxContentWidth)
+        let isDraft = message.state == .draft
+        let contentScale = normalizedContentScale(presentation?.contentFontScale)
+        let (layoutEngine, _) = contentResources(isDraft: isDraft, scale: contentScale)
+        let customContent = message.customContent
+
+        layoutEngine.updateImageSizeProvider { [weak self] url in
+            self?.imageSizes[url]
+        }
+        layoutEngine.updateContentWidth(messageContentWidth)
+
+        let contentLayoutTotalHeight: CGFloat?
+        let contentBounds: CGRect?
+        var imageURLs = Set<String>()
+        let measuredWidth: CGFloat?
+
+        if let customContent {
+            markdownParseCount += 1
+            markdownLayoutCount += 1
+            let customRender = renderCustomContent(
+                customContent,
+                width: messageContentWidth,
+                contentScale: contentScale
+            )
+            contentBounds = sceneBounds(for: customRender.scene, layoutEngine: layoutEngine)
+            imageURLs = Set(customRender.imageURLs)
+            measuredWidth = customRender.visualWidth
+            contentLayoutTotalHeight = nil
+        } else {
+            if isDraft {
+                let widthKey = Self.widthKey(for: messageContentWidth)
+                let contentScaleKey = Self.contentScaleKey(for: contentScale)
+                let key = CacheKey(
+                    id: message.id,
+                    revision: message.revision,
+                    widthKey: widthKey,
+                    isDraft: true,
+                    contentScaleKey: contentScaleKey
+                )
+                let prepared = preparedMarkdownContent(
+                    for: message,
+                    key: key,
+                    layoutEngine: layoutEngine,
+                    requiresLayout: true
+                )
+                contentBounds = prepared.analysis.contentBounds
+                imageURLs = prepared.analysis.imageURLs
+                measuredWidth = usesBubble ? prepared.analysis.measuredWidth : nil
+                contentLayoutTotalHeight = prepared.analysis.totalHeight
+            } else {
+                markdownParseCount += 1
+                let document = parser.parse(message.content)
+                markdownLayoutCount += 1
+                var layout = layoutEngine.layout(document)
+                applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
+                layoutEngine.adjustParagraphImageSpacing(in: &layout)
+                let analysis = analyzePreparedMarkdownLayout(layout, document: document)
+                contentBounds = analysis.contentBounds
+                imageURLs = analysis.imageURLs
+                measuredWidth = usesBubble ? analysis.measuredWidth : nil
+                contentLayoutTotalHeight = layout.totalHeight
+            }
+        }
+
+        let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
+        let bubbleContentWidth = usesBubble ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth)) : messageContentWidth
+        let shouldShowHeader = presentation?.showsHeader ?? style.showsHeader(for: message.role)
+        let headerText = shouldShowHeader ? (presentation?.headerTitle ?? style.headerTitle(for: message.role)) : ""
+        let headerIconURL = shouldShowHeader ? (presentation?.headerIconURL ?? style.headerIconURL(for: message.role)) : nil
+        let headerHasIcon = (headerIconURL?.isEmpty == false)
+        let headerIconFootprint: CGFloat = headerHasIcon ? max(8, style.headerIconSize) + max(0, style.headerIconSpacing) : 0
+        let headerTrailingIconURL = shouldShowHeader ? normalizedAssetURL(presentation?.headerTrailingIconURL) : nil
+        let headerTrailingHasIcon = (headerTrailingIconURL?.isEmpty == false)
+        let headerTrailingIconFootprint: CGFloat = headerTrailingHasIcon ? (max(8, style.headerIconSize) + max(0, style.headerIconSpacing)) : 0
+        let headerBadgesWidth: CGFloat = {
+            guard let badges = presentation?.headerBadges, !badges.isEmpty else { return 0 }
+            let spacing: CGFloat = 6
+            return badges.reduce(CGFloat(0)) { sum, badge in
+                sum + spacing + Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+            }
+        }()
+
+        let footerMetaFont: VVFont
+        let footerText: String
+        let footerPrefixIconURL: String?
+        let footerSuffixIconURL: String?
+        let footerIconSize: CGFloat
+        let footerIconSpacing: CGFloat
+
+        if isDraft && message.role == .assistant {
+            footerMetaFont = style.loadingIndicatorFont
+            footerText = style.loadingIndicatorText
+            footerPrefixIconURL = nil
+            footerSuffixIconURL = nil
+            footerIconSize = 0
+            footerIconSpacing = 0
+        } else if presentation?.showsTimestamp ?? style.showsTimestamp(for: message.role) {
+            footerMetaFont = style.timestampFont
+            footerPrefixIconURL = normalizedAssetURL(presentation?.timestampPrefixIconURL)
+            footerSuffixIconURL = normalizedAssetURL(presentation?.timestampSuffixIconURL)
+            let hasPrefixIcon = footerPrefixIconURL != nil
+            let hasSuffixIcon = footerSuffixIconURL != nil
+            let prefixText = hasPrefixIcon ? "" : (presentation?.timestampPrefix ?? "")
+            let suffixText = hasSuffixIcon ? "" : (presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role))
+            footerText = prefixText + timestampCoreLabel(for: message) + suffixText
+            footerIconSize = max(10, presentation?.timestampIconSize ?? ceil(footerMetaFont.pointSize))
+            footerIconSpacing = max(0, presentation?.timestampIconSpacing ?? 5)
+        } else {
+            footerMetaFont = style.timestampFont
+            footerText = ""
+            footerPrefixIconURL = normalizedAssetURL(presentation?.timestampPrefixIconURL)
+            footerSuffixIconURL = normalizedAssetURL(presentation?.timestampSuffixIconURL)
+            let hasFooterIconOnlyAction = footerPrefixIconURL != nil || footerSuffixIconURL != nil
+            footerIconSize = hasFooterIconOnlyAction ? max(10, presentation?.timestampIconSize ?? ceil(footerMetaFont.pointSize)) : 0
+            footerIconSpacing = hasFooterIconOnlyAction ? max(0, presentation?.timestampIconSpacing ?? 5) : 0
+        }
+
+        let footerTextWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
+        let hasFooterPrefixIcon = footerPrefixIconURL != nil
+        let hasFooterSuffixIcon = footerSuffixIconURL != nil
+        let hasFooterText = footerTextWidth > 0
+        let prefixIconFootprint = hasFooterPrefixIcon ? (footerIconSize + (hasFooterText ? footerIconSpacing : 0)) : 0
+        let suffixIconFootprint = hasFooterSuffixIcon ? ((hasFooterText ? footerIconSpacing : 0) + footerIconSize) : 0
+        let footerRequiredWidth = footerTextWidth + prefixIconFootprint + suffixIconFootprint
+        if let footerPrefixIconURL {
+            imageURLs.insert(footerPrefixIconURL)
+        }
+        if let footerSuffixIconURL {
+            imageURLs.insert(footerSuffixIconURL)
+        }
+
+        let headerRequiredWidth = headerText.isEmpty ? 0 : (Self.singleLineMetaWidth(headerText, font: style.headerFont) + headerIconFootprint + headerTrailingIconFootprint + headerBadgesWidth)
+        let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
+        let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
+        let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
+
+        let headerHeight: CGFloat
+        if headerText.isEmpty {
+            headerHeight = 0
+        } else {
+            let headerRender = renderHeader(
+                text: headerText,
+                iconURL: headerIconURL,
+                trailingIconURL: headerTrailingIconURL,
+                badges: presentation?.headerBadges,
+                width: metaWidth
+            )
+            headerHeight = headerRender.height
+            headerRender.imageURLs.forEach { imageURLs.insert($0) }
+        }
+
+        let footerHeight: CGFloat
+        if isDraft && message.role == .assistant {
+            let footerRender = renderMeta(text: footerText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
+            footerHeight = max(footerRender.layout.totalHeight, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
+        } else if footerText.isEmpty {
+            footerHeight = max(0, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
+        } else {
+            let footerRender = renderMeta(text: footerText, layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
+            footerHeight = max(footerRender.layout.totalHeight, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
+        }
+
+        let contentHeight = max(1, contentBounds?.height ?? contentLayoutTotalHeight ?? 1)
+        let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
+        let footerBlockHeight = footerHeight > 0 ? style.footerSpacing + footerHeight : 0
+        let contentBlockHeight = usesBubble
+            ? (bubbleInsets.top + contentHeight + bubbleInsets.bottom)
+            : contentHeight
+        let bubbleWidth = usesBubble ? (bubbleContentWidth + bubbleInsets.left + bubbleInsets.right) : 0
+        let contentStartY = headerBlockHeight
+        var messageHeight = headerBlockHeight + contentBlockHeight + footerBlockHeight
+        if hasLeadingIcon {
+            messageHeight = max(messageHeight, contentStartY + leadingIconSize)
+        }
+
+        let topOverflow = max(0, -(contentBounds?.minY ?? 0))
+        let height = messageHeight + topOverflow + insets.top + insets.bottom
+
+        let bubbleOffsetX: CGFloat
+        if let bubbleStyle {
+            switch bubbleStyle.alignment {
+            case .leading:
+                bubbleOffsetX = 0
+            case .center:
+                bubbleOffsetX = max(0, (availableWidth - bubbleWidth) / 2)
+            case .trailing:
+                bubbleOffsetX = max(0, availableWidth - bubbleWidth)
+            }
+        } else {
+            bubbleOffsetX = 0
+        }
+
+        return VVChatMessageLayoutSummary(
+            height: height,
+            contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
+            imageURLs: Array(imageURLs)
+        )
+    }
+
+    func estimatedLayoutSummary(for message: VVChatMessage) -> VVChatMessageLayoutSummary {
+        guard message.customContent == nil else {
+            return layoutSummary(for: message)
+        }
+
+        let insets = style.insets(for: message.role)
+        let presentation = message.presentation
+        let leadingIconURL = normalizedAssetURL(presentation?.leadingIconURL)
+        let hasLeadingIcon = leadingIconURL != nil
+        let leadingIconSize = hasLeadingIcon ? max(8, presentation?.leadingIconSize ?? style.headerIconSize) : 0
+        let leadingIconSpacing = hasLeadingIcon ? max(0, presentation?.leadingIconSpacing ?? style.headerIconSpacing) : 0
+        let explicitLaneWidth = max(0, presentation?.leadingLaneWidth ?? 0)
+        let implicitLaneWidth = hasLeadingIcon ? (leadingIconSize + leadingIconSpacing) : 0
+        let leadingLaneWidth = max(explicitLaneWidth, implicitLaneWidth)
+        let bubbleStyle = presentation?.bubbleStyle ?? style.bubbleStyle(for: message.role)
+        let usesBubble = bubbleStyle != nil
+        let bubbleInsets = bubbleStyle?.insets ?? VVInsets()
+        let availableWidth = max(0, contentWidth - insets.left - insets.right - leadingLaneWidth)
+        let maxBubbleWidth = bubbleStyle?.maxWidth ?? availableWidth
+        let maxContentWidth = usesBubble ? min(availableWidth - bubbleInsets.left - bubbleInsets.right, maxBubbleWidth) : availableWidth
+        let messageContentWidth = max(0, maxContentWidth)
+        let isDraft = message.state == .draft
+        let contentScale = normalizedContentScale(presentation?.contentFontScale)
+        let estimatedContent = estimateMarkdownContentMetrics(
+            content: message.content,
+            width: messageContentWidth,
+            isDraft: isDraft,
+            scale: contentScale
+        )
+
+        var imageURLs = estimatedContent.imageURLs
+        let bubbleWidthSource = estimatedContent.measuredWidth
+        let bubbleContentWidth = usesBubble
+            ? max(1, min(messageContentWidth, bubbleWidthSource > 0 ? bubbleWidthSource : messageContentWidth))
+            : messageContentWidth
+
+        let shouldShowHeader = presentation?.showsHeader ?? style.showsHeader(for: message.role)
+        let headerText = shouldShowHeader ? (presentation?.headerTitle ?? style.headerTitle(for: message.role)) : ""
+        let headerIconURL = shouldShowHeader ? (presentation?.headerIconURL ?? style.headerIconURL(for: message.role)) : nil
+        let headerHasIcon = (headerIconURL?.isEmpty == false)
+        let headerIconFootprint: CGFloat = headerHasIcon ? max(8, style.headerIconSize) + max(0, style.headerIconSpacing) : 0
+        let headerTrailingIconURL = shouldShowHeader ? normalizedAssetURL(presentation?.headerTrailingIconURL) : nil
+        let headerTrailingHasIcon = (headerTrailingIconURL?.isEmpty == false)
+        let headerTrailingIconFootprint: CGFloat = headerTrailingHasIcon ? (max(8, style.headerIconSize) + max(0, style.headerIconSpacing)) : 0
+        let headerBadgesWidth: CGFloat = {
+            guard let badges = presentation?.headerBadges, !badges.isEmpty else { return 0 }
+            let spacing: CGFloat = 6
+            return badges.reduce(CGFloat(0)) { sum, badge in
+                sum + spacing + Self.singleLineMetaWidth(badge.text, font: style.headerFont)
+            }
+        }()
+
+        let footerMetaFont: VVFont
+        let footerText: String
+        let footerPrefixIconURL: String?
+        let footerSuffixIconURL: String?
+        let footerIconSize: CGFloat
+        let footerIconSpacing: CGFloat
+
+        if isDraft && message.role == .assistant {
+            footerMetaFont = style.loadingIndicatorFont
+            footerText = style.loadingIndicatorText
+            footerPrefixIconURL = nil
+            footerSuffixIconURL = nil
+            footerIconSize = 0
+            footerIconSpacing = 0
+        } else if presentation?.showsTimestamp ?? style.showsTimestamp(for: message.role) {
+            footerMetaFont = style.timestampFont
+            footerPrefixIconURL = normalizedAssetURL(presentation?.timestampPrefixIconURL)
+            footerSuffixIconURL = normalizedAssetURL(presentation?.timestampSuffixIconURL)
+            let hasPrefixIcon = footerPrefixIconURL != nil
+            let hasSuffixIcon = footerSuffixIconURL != nil
+            let prefixText = hasPrefixIcon ? "" : (presentation?.timestampPrefix ?? "")
+            let suffixText = hasSuffixIcon ? "" : (presentation?.timestampSuffix ?? style.timestampSuffix(for: message.role))
+            footerText = prefixText + timestampCoreLabel(for: message) + suffixText
+            footerIconSize = max(10, presentation?.timestampIconSize ?? ceil(footerMetaFont.pointSize))
+            footerIconSpacing = max(0, presentation?.timestampIconSpacing ?? 5)
+        } else {
+            footerMetaFont = style.timestampFont
+            footerText = ""
+            footerPrefixIconURL = normalizedAssetURL(presentation?.timestampPrefixIconURL)
+            footerSuffixIconURL = normalizedAssetURL(presentation?.timestampSuffixIconURL)
+            let hasFooterIconOnlyAction = footerPrefixIconURL != nil || footerSuffixIconURL != nil
+            footerIconSize = hasFooterIconOnlyAction ? max(10, presentation?.timestampIconSize ?? ceil(footerMetaFont.pointSize)) : 0
+            footerIconSpacing = hasFooterIconOnlyAction ? max(0, presentation?.timestampIconSpacing ?? 5) : 0
+        }
+
+        let footerTextWidth = footerText.isEmpty ? 0 : Self.singleLineMetaWidth(footerText, font: footerMetaFont)
+        let hasFooterPrefixIcon = footerPrefixIconURL != nil
+        let hasFooterSuffixIcon = footerSuffixIconURL != nil
+        let hasFooterText = footerTextWidth > 0
+        let prefixIconFootprint = hasFooterPrefixIcon ? (footerIconSize + (hasFooterText ? footerIconSpacing : 0)) : 0
+        let suffixIconFootprint = hasFooterSuffixIcon ? ((hasFooterText ? footerIconSpacing : 0) + footerIconSize) : 0
+        let footerRequiredWidth = footerTextWidth + prefixIconFootprint + suffixIconFootprint
+        if let footerPrefixIconURL { imageURLs.insert(footerPrefixIconURL) }
+        if let footerSuffixIconURL { imageURLs.insert(footerSuffixIconURL) }
+
+        let headerRequiredWidth = headerText.isEmpty ? 0 : (
+            Self.singleLineMetaWidth(headerText, font: style.headerFont) +
+            headerIconFootprint +
+            headerTrailingIconFootprint +
+            headerBadgesWidth
+        )
+        let preferredMetaWidth = max(style.bubbleMetadataMinWidth, headerRequiredWidth, footerRequiredWidth)
+        let clampedMetaWidth = max(1, min(messageContentWidth, preferredMetaWidth))
+        let metaWidth = usesBubble ? max(bubbleContentWidth, clampedMetaWidth) : messageContentWidth
+
+        let headerHeight: CGFloat
+        if headerText.isEmpty {
+            headerHeight = 0
+        } else {
+            let headerRender = renderHeader(
+                text: headerText,
+                iconURL: headerIconURL,
+                trailingIconURL: headerTrailingIconURL,
+                badges: presentation?.headerBadges,
+                width: metaWidth
+            )
+            headerHeight = headerRender.height
+            headerRender.imageURLs.forEach { imageURLs.insert($0) }
+        }
+
+        let footerHeight: CGFloat
+        if isDraft && message.role == .assistant {
+            let footerRender = renderMeta(text: footerText, layoutEngine: loadingLayoutEngine, pipeline: loadingPipeline, width: metaWidth)
+            footerHeight = max(footerRender.layout.totalHeight, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
+        } else if footerText.isEmpty {
+            footerHeight = max(0, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
+        } else {
+            let footerRender = renderMeta(text: footerText, layoutEngine: timestampLayoutEngine, pipeline: timestampPipeline, width: metaWidth)
+            footerHeight = max(footerRender.layout.totalHeight, (hasFooterPrefixIcon || hasFooterSuffixIcon) ? footerIconSize : 0)
+        }
+
+        let contentHeight = max(1, estimatedContent.contentBounds.height)
+        let headerBlockHeight = headerHeight > 0 ? headerHeight + style.headerSpacing : 0
+        let footerBlockHeight = footerHeight > 0 ? style.footerSpacing + footerHeight : 0
+        let contentBlockHeight = usesBubble
+            ? (bubbleInsets.top + contentHeight + bubbleInsets.bottom)
+            : contentHeight
+        let bubbleWidth = usesBubble ? (bubbleContentWidth + bubbleInsets.left + bubbleInsets.right) : 0
+        let contentStartY = headerBlockHeight
+        var messageHeight = headerBlockHeight + contentBlockHeight + footerBlockHeight
+        if hasLeadingIcon {
+            messageHeight = max(messageHeight, contentStartY + leadingIconSize)
+        }
+
+        let topOverflow = max(0, -estimatedContent.contentBounds.minY)
+        let height = messageHeight + topOverflow + insets.top + insets.bottom
+
+        let bubbleOffsetX: CGFloat
+        if let bubbleStyle {
+            switch bubbleStyle.alignment {
+            case .leading:
+                bubbleOffsetX = 0
+            case .center:
+                bubbleOffsetX = max(0, (availableWidth - bubbleWidth) / 2)
+            case .trailing:
+                bubbleOffsetX = max(0, availableWidth - bubbleWidth)
+            }
+        } else {
+            bubbleOffsetX = 0
+        }
+
+        return VVChatMessageLayoutSummary(
+            height: height,
+            contentOffset: CGPoint(x: insets.left + bubbleOffsetX, y: insets.top + topOverflow),
+            imageURLs: Array(imageURLs)
+        )
+    }
+
     func selectionHelper(
         for message: VVChatMessage,
         rendered: VVChatRenderedMessage
     ) -> VVMarkdownSelectionHelper? {
+        selectionArtifacts(for: message, rendered: rendered, visibleRect: nil)?.helper
+    }
+
+    func selectionArtifacts(
+        for message: VVChatMessage,
+        rendered: VVChatRenderedMessage,
+        visibleRect: CGRect?
+    ) -> VVChatSelectionArtifacts? {
         switch rendered.contentSceneSource {
         case .none, .staticScene:
             return nil
@@ -889,12 +1370,148 @@ public final class VVChatMessageRenderer {
                 layoutEngine: layoutEngine,
                 requiresLayout: false
             )
-            let layout = materializedPreparedMarkdownLayout(
-                from: prepared,
-                layoutEngine: layoutEngine
+            let blockRange = visibleRect.map { visibleMarkdownBlockRange(in: $0, analysis: prepared.analysis) }
+                ?? (0..<prepared.analysis.blockMinY.count)
+            guard !blockRange.isEmpty else { return nil }
+            let windowKey = SelectionWindowCacheKey(
+                key: key,
+                startBlock: blockRange.lowerBound,
+                endBlock: blockRange.upperBound
             )
-            return VVMarkdownSelectionHelper(layout: layout, layoutEngine: layoutEngine)
+            if let cached = selectionWindowCache.value(for: windowKey) {
+                return cached
+            }
+
+            let selectionLayout: MarkdownLayout
+            if let layout = prepared.layout {
+                if blockRange.lowerBound == 0 && blockRange.upperBound == layout.blocks.count {
+                    selectionLayout = layout
+                } else {
+                    selectionLayout = MarkdownLayout(
+                        blocks: Array(layout.blocks[blockRange]),
+                        totalHeight: layout.totalHeight,
+                        contentWidth: layout.contentWidth
+                    )
+                }
+            } else if blockRange.lowerBound == 0 && blockRange.upperBound == prepared.analysis.blockMinY.count {
+                selectionLayout = materializedPreparedMarkdownLayout(
+                    from: prepared,
+                    layoutEngine: layoutEngine
+                )
+            } else {
+                selectionLayout = partialPreparedMarkdownLayout(
+                    from: prepared,
+                    blockRange: blockRange,
+                    layoutEngine: layoutEngine
+                )
+            }
+            let artifacts = VVChatSelectionArtifacts(
+                helper: VVMarkdownSelectionHelper(layout: selectionLayout, layoutEngine: layoutEngine),
+                blockRange: blockRange
+            )
+            selectionWindowCache.set(artifacts, for: windowKey)
+            return artifacts
         }
+    }
+
+    private struct EstimatedMarkdownMetrics {
+        let measuredWidth: CGFloat
+        let contentBounds: CGRect
+        let imageURLs: Set<String>
+    }
+
+    private func estimateMarkdownContentMetrics(
+        content: String,
+        width: CGFloat,
+        isDraft: Bool,
+        scale: CGFloat
+    ) -> EstimatedMarkdownMetrics {
+        guard !content.isEmpty, width > 0 else {
+            return EstimatedMarkdownMetrics(
+                measuredWidth: max(1, width),
+                contentBounds: CGRect(x: 0, y: 0, width: max(1, width), height: max(1, style.baseFont.pointSize * 1.4)),
+                imageURLs: []
+            )
+        }
+
+        let baseFont = isDraft ? style.draftFont : style.baseFont
+        let fontSize = max(11, baseFont.pointSize * scale)
+        let lineHeight = ceil(fontSize * 1.42)
+        let paragraphSpacing = max(CGFloat(4), CGFloat(style.theme.paragraphSpacing))
+        let averageCharWidth = max(5, fontSize * 0.56)
+        let charsPerLine = max(12, Int(floor(width / averageCharWidth)))
+
+        var totalHeight: CGFloat = 0
+        var longestWrappedWidth: CGFloat = 0
+        var inCodeFence = false
+        var imageURLs = Set<String>()
+
+        for rawLine in content.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                inCodeFence.toggle()
+                totalHeight += lineHeight
+                longestWrappedWidth = max(longestWrappedWidth, min(width, CGFloat(trimmed.count) * averageCharWidth))
+                continue
+            }
+
+            if let imageURL = estimatedMarkdownImageURL(from: trimmed) {
+                imageURLs.insert(imageURL)
+                totalHeight += max(lineHeight, min(max(width * 0.58, 120), 280))
+                longestWrappedWidth = max(longestWrappedWidth, min(width, width * 0.82))
+                totalHeight += paragraphSpacing * 0.5
+                continue
+            }
+
+            if trimmed.isEmpty {
+                totalHeight += paragraphSpacing
+                continue
+            }
+
+            let lineMultiplier: CGFloat
+            if inCodeFence {
+                lineMultiplier = 1.0
+            } else if trimmed.hasPrefix("#") {
+                lineMultiplier = 1.2
+            } else {
+                lineMultiplier = 1.0
+            }
+
+            let effectiveChars = max(trimmed.count, 1)
+            let wrappedLines = max(1, Int(ceil(Double(effectiveChars) / Double(charsPerLine))))
+            totalHeight += CGFloat(wrappedLines) * lineHeight * lineMultiplier
+            longestWrappedWidth = max(
+                longestWrappedWidth,
+                min(width, CGFloat(min(effectiveChars, charsPerLine)) * averageCharWidth)
+            )
+
+            if !inCodeFence {
+                if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("> ") {
+                    totalHeight += paragraphSpacing * 0.15
+                } else if trimmed.hasSuffix(":") {
+                    totalHeight += paragraphSpacing * 0.1
+                }
+            }
+        }
+
+        totalHeight = max(totalHeight, lineHeight)
+        return EstimatedMarkdownMetrics(
+            measuredWidth: max(min(width, longestWrappedWidth), min(width, averageCharWidth * 8)),
+            contentBounds: CGRect(x: 0, y: 0, width: max(1, width), height: totalHeight),
+            imageURLs: imageURLs
+        )
+    }
+
+    private func estimatedMarkdownImageURL(from line: String) -> String? {
+        guard let markerRange = line.range(of: "]("),
+              line.hasPrefix("!["),
+              let closeRange = line[markerRange.upperBound...].firstIndex(of: ")") else {
+            return nil
+        }
+        let url = String(line[markerRange.upperBound..<closeRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return url.isEmpty ? nil : url
     }
 
     private func preparedMarkdownContent(
@@ -903,6 +1520,16 @@ public final class VVChatMessageRenderer {
         layoutEngine: MarkdownLayoutEngine,
         requiresLayout: Bool
     ) -> PreparedMarkdownContent {
+        configureMarkdownLayoutEngine(layoutEngine, for: key)
+        if message.state == .draft {
+            return draftPreparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: requiresLayout
+            )
+        }
+
         if var cached = preparedMarkdownCache.value(for: key) {
             preparedMarkdownCacheHits += 1
             let didRefresh = refreshPreparedMarkdownContentIfNeeded(
@@ -940,6 +1567,206 @@ public final class VVChatMessageRenderer {
         preparedMarkdownCache.set(prepared, for: key)
         dematerializePreparedLayoutsIfNeeded(excluding: requiresLayout ? key : nil)
         return prepared
+    }
+
+    private func draftPreparedMarkdownContent(
+        for message: VVChatMessage,
+        key: CacheKey,
+        layoutEngine: MarkdownLayoutEngine,
+        requiresLayout: Bool
+    ) -> PreparedMarkdownContent {
+        configureMarkdownLayoutEngine(layoutEngine, for: key)
+        let draftKey = DraftPreparedKey(
+            id: key.id,
+            widthKey: key.widthKey,
+            contentScaleKey: key.contentScaleKey
+        )
+        if var cached = draftPreparedStates.value(for: draftKey) {
+            preparedMarkdownCacheHits += 1
+            let didUpdate = updateDraftPreparedState(
+                &cached,
+                content: message.content,
+                revision: message.revision,
+                layoutEngine: layoutEngine
+            )
+            let didRefresh = refreshPreparedMarkdownContentIfNeeded(
+                &cached.prepared,
+                layoutEngine: layoutEngine,
+                keepMaterializedLayout: true
+            )
+            if didUpdate || didRefresh {
+                draftPreparedStates.set(cached, for: draftKey)
+            }
+            return cached.prepared
+        }
+
+        preparedMarkdownCacheMisses += 1
+        let rebuilt = buildDraftPreparedState(
+            key: draftKey,
+            content: message.content,
+            revision: message.revision,
+            layoutEngine: layoutEngine
+        )
+        draftPreparedStates.set(rebuilt, for: draftKey)
+        return rebuilt.prepared
+    }
+
+    private func configureMarkdownLayoutEngine(
+        _ layoutEngine: MarkdownLayoutEngine,
+        for key: CacheKey
+    ) {
+        layoutEngine.updateImageSizeProvider { [weak self] url in
+            self?.imageSizes[url]
+        }
+        layoutEngine.updateContentWidth(max(1, CGFloat(key.widthKey) / 2))
+    }
+
+    private func buildDraftPreparedState(
+        key: DraftPreparedKey,
+        content: String,
+        revision: Int,
+        layoutEngine: MarkdownLayoutEngine
+    ) -> DraftPreparedState {
+        incrementalDraftFullRebuildCount += 1
+        let boundary = parser.streamingBoundary(in: content)
+        if !boundary.stableContent.isEmpty {
+            markdownParseCount += 1
+        }
+        let stableDocument = parser.parse(boundary.stableContent, startingBlockIndex: 0)
+        if !boundary.buffer.isEmpty {
+            markdownParseCount += 1
+        }
+        let trailingDocument = parser.parse(boundary.buffer, startingBlockIndex: stableDocument.blocks.count)
+        let document = combineDraftDocuments(
+            stableDocument: stableDocument,
+            trailingDocument: trailingDocument,
+            streamingBuffer: boundary.buffer
+        )
+        markdownLayoutCount += 1
+        var layout = layoutEngine.layout(document)
+        applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
+        layoutEngine.adjustParagraphImageSpacing(in: &layout)
+        let analysis = analyzePreparedMarkdownLayout(layout, document: document)
+        let prepared = PreparedMarkdownContent(
+            document: document,
+            layout: layout,
+            analysis: analysis,
+            appliedImageSizes: currentAppliedImageSizes(for: analysis.imageURLs)
+        )
+        return DraftPreparedState(
+            key: key,
+            revision: revision,
+            content: content,
+            stableContent: boundary.stableContent,
+            stableBlocks: stableDocument.blocks,
+            stableFootnotes: stableDocument.footnotes,
+            prepared: prepared
+        )
+    }
+
+    private func updateDraftPreparedState(
+        _ state: inout DraftPreparedState,
+        content: String,
+        revision: Int,
+        layoutEngine: MarkdownLayoutEngine
+    ) -> Bool {
+        guard state.content != content || state.revision != revision else {
+            return false
+        }
+
+        let previousPrepared = state.prepared
+        guard content.hasPrefix(state.content) else {
+            state = buildDraftPreparedState(
+                key: state.key,
+                content: content,
+                revision: revision,
+                layoutEngine: layoutEngine
+            )
+            return true
+        }
+
+        let boundary = parser.streamingBoundary(in: content)
+        var stableBlocks = state.stableBlocks
+        var stableFootnotes = state.stableFootnotes
+
+        if boundary.stableContent != state.stableContent {
+            guard boundary.stableContent.hasPrefix(state.stableContent) else {
+                state = buildDraftPreparedState(
+                    key: state.key,
+                    content: content,
+                    revision: revision,
+                    layoutEngine: layoutEngine
+                )
+                return true
+            }
+            let appendedStableSuffix = String(boundary.stableContent.dropFirst(state.stableContent.count))
+            if !appendedStableSuffix.isEmpty {
+                markdownParseCount += 1
+                let appendedDocument = parser.parse(
+                    appendedStableSuffix,
+                    startingBlockIndex: stableBlocks.count
+                )
+                stableBlocks.append(contentsOf: appendedDocument.blocks)
+                stableFootnotes.merge(appendedDocument.footnotes) { _, new in new }
+            }
+        }
+
+        let trailingDocument: ParsedMarkdownDocument
+        if boundary.buffer.isEmpty {
+            trailingDocument = .empty
+        } else {
+            markdownParseCount += 1
+            trailingDocument = parser.parse(boundary.buffer, startingBlockIndex: stableBlocks.count)
+        }
+        let document = combineDraftDocuments(
+            stableDocument: ParsedMarkdownDocument(
+                blocks: stableBlocks,
+                footnotes: stableFootnotes,
+                isComplete: true,
+                streamingBuffer: ""
+            ),
+            trailingDocument: trailingDocument,
+            streamingBuffer: boundary.buffer
+        )
+
+        let commonPrefixCount = commonPrefixBlockCount(
+            lhs: previousPrepared.document.blocks,
+            rhs: document.blocks
+        )
+        let layout: MarkdownLayout
+        if let previousLayout = previousPrepared.layout, commonPrefixCount > 0 {
+            incrementalDraftReuseCount += 1
+            incrementalDraftLayoutPassCount += 1
+            markdownLayoutCount += 1
+            let relayoutSourceIndex = max(0, commonPrefixCount - 1)
+            layout = layoutEngine.relayout(
+                document,
+                preservingPrefixFrom: previousLayout,
+                previousSourceBlockIndexes: previousPrepared.analysis.sourceBlockIndexes,
+                startingAtSourceIndex: relayoutSourceIndex
+            )
+        } else {
+            incrementalDraftFullRebuildCount += 1
+            markdownLayoutCount += 1
+            layout = layoutEngine.layout(document)
+        }
+
+        var adjustedLayout = layout
+        applyKnownImageSizes(to: &adjustedLayout, layoutEngine: layoutEngine)
+        layoutEngine.adjustParagraphImageSpacing(in: &adjustedLayout)
+        let analysis = analyzePreparedMarkdownLayout(adjustedLayout, document: document)
+        state.revision = revision
+        state.content = content
+        state.stableContent = boundary.stableContent
+        state.stableBlocks = stableBlocks
+        state.stableFootnotes = stableFootnotes
+        state.prepared = PreparedMarkdownContent(
+            document: document,
+            layout: adjustedLayout,
+            analysis: analysis,
+            appliedImageSizes: currentAppliedImageSizes(for: analysis.imageURLs)
+        )
+        return true
     }
 
     private func refreshPreparedMarkdownContentIfNeeded(
@@ -1154,6 +1981,30 @@ public final class VVChatMessageRenderer {
                 layoutEngine.updateInlineImageRowLayout(in: &layout, blockId: block.blockId, imageSizes: imageSizes)
             }
         }
+    }
+
+    private func combineDraftDocuments(
+        stableDocument: ParsedMarkdownDocument,
+        trailingDocument: ParsedMarkdownDocument,
+        streamingBuffer: String
+    ) -> ParsedMarkdownDocument {
+        var footnotes = stableDocument.footnotes
+        footnotes.merge(trailingDocument.footnotes) { _, new in new }
+        return ParsedMarkdownDocument(
+            blocks: stableDocument.blocks + trailingDocument.blocks,
+            footnotes: footnotes,
+            isComplete: false,
+            streamingBuffer: streamingBuffer
+        )
+    }
+
+    private func commonPrefixBlockCount(lhs: [MarkdownBlock], rhs: [MarkdownBlock]) -> Int {
+        let count = min(lhs.count, rhs.count)
+        var index = 0
+        while index < count, lhs[index].id == rhs[index].id {
+            index += 1
+        }
+        return index
     }
 
     private func buildPreparedMarkdownScene(
@@ -2678,6 +3529,13 @@ public final class VVChatMessageRenderer {
             cost += estimatedPrimitiveCost(primitive)
         }
         return max(cost, 1)
+    }
+
+    private static func estimatedSelectionArtifactsCost(_ artifacts: VVChatSelectionArtifacts) -> Int {
+        let blocks = artifacts.helper.layout.blocks.count
+        let blockCost = max(blocks, 1) * MemoryLayout<LayoutBlock>.stride
+        let rangeCost = max(artifacts.blockRange.count, 1) * MemoryLayout<Int>.stride
+        return max(blockCost + rangeCost, 1)
     }
 
     private static func estimatedRenderedMessageCost(_ rendered: VVChatRenderedMessage) -> Int {

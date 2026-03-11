@@ -678,6 +678,71 @@ public final class MarkdownLayoutEngine {
         )
     }
 
+    public func relayout(
+        _ document: ParsedMarkdownDocument,
+        preservingPrefixFrom previousLayout: MarkdownLayout,
+        previousSourceBlockIndexes: [Int],
+        startingAtSourceIndex sourceStartIndex: Int
+    ) -> MarkdownLayout {
+        precondition(
+            previousLayout.blocks.count == previousSourceBlockIndexes.count,
+            "previous layout/source index counts must match"
+        )
+
+        let padding = CGFloat(theme.contentPadding)
+        guard !document.blocks.isEmpty else {
+            return MarkdownLayout(blocks: [], totalHeight: padding * 2, contentWidth: contentWidth)
+        }
+
+        let relayoutStartIndex = max(0, min(sourceStartIndex, document.blocks.count - 1))
+        let prefixBlockCount = previousSourceBlockIndexes.firstIndex(where: { $0 >= relayoutStartIndex }) ?? previousLayout.blocks.count
+        var blocks: [LayoutBlock] = []
+        blocks.reserveCapacity(max(previousLayout.blocks.count, document.blocks.count))
+        if prefixBlockCount > 0 {
+            blocks.append(contentsOf: previousLayout.blocks[..<prefixBlockCount])
+        }
+
+        var currentY: CGFloat
+        if prefixBlockCount < previousLayout.blocks.count {
+            currentY = previousLayout.blocks[prefixBlockCount].frame.minY
+        } else if let lastSourceIndex = previousSourceBlockIndexes.last,
+                  let lastBlock = previousLayout.blocks.last,
+                  document.blocks.indices.contains(lastSourceIndex) {
+            let nextBlock = nextNonEmptyBlock(after: lastSourceIndex, in: document.blocks)
+            currentY = lastBlock.frame.maxY + blockSpacing(
+                after: lastBlock.blockType,
+                currentBlock: document.blocks[lastSourceIndex],
+                nextBlock: nextBlock
+            )
+        } else {
+            currentY = padding
+        }
+
+        for sourceIndex in relayoutStartIndex..<document.blocks.count {
+            let block = document.blocks[sourceIndex]
+            if isEmptyParagraph(block) {
+                continue
+            }
+            let layoutBlock = layoutBlock(block, at: currentY)
+            if isEmptyParagraphBlock(layoutBlock) {
+                continue
+            }
+            blocks.append(layoutBlock)
+            let nextBlock = nextNonEmptyBlock(after: sourceIndex, in: document.blocks)
+            currentY = layoutBlock.frame.maxY + blockSpacing(
+                after: layoutBlock.blockType,
+                currentBlock: block,
+                nextBlock: nextBlock
+            )
+        }
+
+        return MarkdownLayout(
+            blocks: blocks,
+            totalHeight: currentY + padding,
+            contentWidth: contentWidth
+        )
+    }
+
     private func blockSpacing(after blockType: LayoutBlockType, currentBlock: MarkdownBlock, nextBlock: MarkdownBlock?) -> CGFloat {
         switch blockType {
         case .heading(let level):

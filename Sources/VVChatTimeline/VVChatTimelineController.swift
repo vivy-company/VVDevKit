@@ -1,5 +1,5 @@
-import Foundation
 import CoreGraphics
+import Foundation
 import VVMarkdown
 
 @MainActor
@@ -43,98 +43,41 @@ public final class VVChatTimelineController {
         public var contentOffset: CGPoint
         public var isDraft: Bool
         public var revision: Int
+        public var isExact: Bool
     }
 
-    private struct LayoutRecord {
-        var id: String
-        var height: CGFloat
-        var contentOffset: CGPoint
-        var isDraft: Bool
-        var revision: Int
-    }
-
-    private struct HeightIndex {
-        private var heights: [CGFloat] = []
-        private var tree: [CGFloat] = [0]
-
-        var count: Int { heights.count }
-
-        mutating func rebuild(heights: [CGFloat]) {
-            self.heights = heights
-            tree = Array(repeating: 0, count: heights.count + 1)
-            for (index, height) in heights.enumerated() {
-                add(height, at: index)
-            }
-        }
-
-        mutating func append(_ height: CGFloat) {
-            heights.append(height)
-            let oneBasedIndex = heights.count
-            let lowerBound = oneBasedIndex - (oneBasedIndex & -oneBasedIndex)
-            let previousCoveredHeight = prefixHeight(before: oneBasedIndex - 1) - prefixHeight(before: lowerBound)
-            tree.append(previousCoveredHeight + height)
-        }
-
-        mutating func updateHeight(at index: Int, to newHeight: CGFloat) {
-            guard heights.indices.contains(index) else { return }
-            let delta = newHeight - heights[index]
-            guard delta != 0 else { return }
-            heights[index] = newHeight
-            add(delta, at: index)
-        }
-
-        func height(at index: Int) -> CGFloat {
-            guard heights.indices.contains(index) else { return 0 }
-            return heights[index]
-        }
-
-        func prefixHeight(before count: Int) -> CGFloat {
-            guard count > 0 else { return 0 }
-            var index = min(count, heights.count)
-            var sum: CGFloat = 0
-            while index > 0 {
-                sum += tree[index]
-                index -= index & -index
-            }
-            return sum
-        }
-
-        private mutating func add(_ delta: CGFloat, at index: Int) {
-            var treeIndex = index + 1
-            while treeIndex < tree.count {
-                tree[treeIndex] += delta
-                treeIndex += treeIndex & -treeIndex
-            }
-        }
+    /// Pending layout transition state, consumed by the view on next update.
+    public struct PendingLayoutTransition {
+        public let anchorID: String
+        public let anchorY: CGFloat
+        public let previousTotalHeight: CGFloat
     }
 
     public private(set) var entries: [VVChatTimelineEntry] = []
     public private(set) var messages: [VVChatMessage] = []
     public private(set) var totalHeight: CGFloat = 0
     public private(set) var state: VVChatTimelineState
+    public internal(set) var pendingLayoutTransition: PendingLayoutTransition?
+
     public var layouts: [ItemLayout] {
-        layoutSnapshot()
+        layoutEngine.layouts()
     }
 
     public var onUpdate: ((Update) -> Void)?
 
     private var style: VVChatTimelineStyle
-    private var renderer: VVChatMessageRenderer
     private var renderWidth: CGFloat
     private let draftThrottler = VVChatDraftThrottler()
     private var activeDraftID: String?
-    private var messageImageURLs: [String: Set<String>] = [:]
-    private var imageURLToMessageIDs: [String: Set<String>] = [:]
-    private var messageIndexByID: [String: Int] = [:]
-    private var entryIndexByID: [String: Int] = [:]
-    private var customEntryMessageMapper: CustomEntryMessageMapper?
-    private var layoutRecords: [LayoutRecord] = []
-    private var heightIndex = HeightIndex()
+    private let coreStore = VVChatTimelineCoreStore()
+    private var renderService: VVChatTimelineRenderService
+    private var layoutEngine: VVChatTimelineLayoutEngine
 
     public init(style: VVChatTimelineStyle = .init(), renderWidth: CGFloat = 0) {
         self.style = style
         self.renderWidth = renderWidth
-        self.renderer = VVChatMessageRenderer(style: style, contentWidth: renderWidth)
+        self.renderService = VVChatTimelineRenderService(style: style, contentWidth: renderWidth)
+        self.layoutEngine = VVChatTimelineLayoutEngine(style: style, renderWidth: renderWidth)
         self.state = VVChatTimelineState(pinThreshold: style.pinThreshold)
     }
 
@@ -144,8 +87,9 @@ public final class VVChatTimelineController {
 
     public func updateStyle(_ style: VVChatTimelineStyle) {
         self.style = style
-        self.state.pinThreshold = style.pinThreshold
-        renderer.updateStyle(style)
+        state.pinThreshold = style.pinThreshold
+        renderService.updateStyle(style)
+        layoutEngine.updateStyle(style)
         rebuildLayouts(shouldScrollToBottom: state.shouldAutoFollow)
     }
 
@@ -154,7 +98,8 @@ public final class VVChatTimelineController {
         let normalizedWidth = max(1, (width * 2).rounded() / 2)
         guard abs(normalizedWidth - renderWidth) > 0.5 else { return }
         renderWidth = normalizedWidth
-        renderer.updateContentWidth(normalizedWidth)
+        renderService.updateContentWidth(normalizedWidth)
+        layoutEngine.updateRenderWidth(normalizedWidth)
         rebuildLayouts(shouldScrollToBottom: state.shouldAutoFollow)
     }
 
@@ -166,19 +111,11 @@ public final class VVChatTimelineController {
         )
     }
 
-    /// Pending layout transition state, consumed by the view on next update.
-    public struct PendingLayoutTransition {
-        public let anchorID: String
-        public let anchorY: CGFloat
-        public let previousTotalHeight: CGFloat
-    }
-    public internal(set) var pendingLayoutTransition: PendingLayoutTransition?
-
     /// Call before `setEntries` to animate the layout transition.
     /// Pass the ID of the item at or above the insertion/removal point.
     public func prepareLayoutTransition(anchorItemID: String) {
         let anchorY: CGFloat
-        if let index = messageIndexByID[anchorItemID], let layout = itemLayout(at: index) {
+        if let index = indexForItemID(anchorItemID), let layout = itemLayout(at: index) {
             anchorY = layout.frame.origin.y
         } else {
             anchorY = 0
@@ -198,14 +135,9 @@ public final class VVChatTimelineController {
         draftThrottler.cancel()
         activeDraftID = nil
 
-        self.customEntryMessageMapper = customEntryMessageMapper
-        entries = newEntries
-        messages = newEntries.map { materializeMessage(for: $0) }
-        rebuildIDIndexes()
-        renderer.invalidateAll()
-
-        messageImageURLs.removeAll(keepingCapacity: true)
-        imageURLToMessageIDs.removeAll(keepingCapacity: true)
+        coreStore.configure(customEntryMessageMapper: customEntryMessageMapper)
+        syncPublicState(from: coreStore.setEntries(newEntries))
+        renderService.invalidateAll()
 
         if scrollToBottom {
             state.hasUnreadNewContent = false
@@ -215,57 +147,61 @@ public final class VVChatTimelineController {
     }
 
     public func appendMessage(_ message: VVChatMessage) {
-        entries.append(.message(message))
+        let oldTotalHeight = totalHeight
+        preparePendingTailTransition(previousTotalHeight: oldTotalHeight)
 
-        let index = messages.count
-        messages.append(message)
-        messageIndexByID[message.id] = index
-        entryIndexByID[message.id] = entries.count - 1
-        let layout = buildLayoutRecord(for: message)
-        layoutRecords.append(layout)
-        heightIndex.append(layout.height)
-        totalHeight = computedTotalHeight()
+        let snapshot = coreStore.appendMessage(message)
+        syncPublicState(from: snapshot)
+        if let message = snapshot.messages.last {
+            layoutEngine.append(message: message, renderer: renderService)
+        }
+        totalHeight = layoutEngine.totalHeight
 
         let shouldFollow = state.shouldAutoFollow
         if !shouldFollow {
             state.hasUnreadNewContent = true
         }
 
-        let update = Update(
-            insertedIndexes: IndexSet(integer: index),
-            totalHeight: totalHeight,
-            shouldScrollToBottom: shouldFollow,
-            hasUnreadNewContent: state.hasUnreadNewContent
+        let index = max(0, snapshot.count - 1)
+        onUpdate?(
+            Update(
+                insertedIndexes: IndexSet(integer: index),
+                totalHeight: totalHeight,
+                heightDelta: totalHeight - oldTotalHeight,
+                changedIndex: index,
+                shouldScrollToBottom: shouldFollow,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
-        onUpdate?(update)
     }
 
     public func appendCustomEntry(_ entry: VVCustomTimelineEntry) {
-        entries.append(.custom(entry))
+        let oldTotalHeight = totalHeight
+        preparePendingTailTransition(previousTotalHeight: oldTotalHeight)
 
-        let index = messages.count
-        let message = materializeMessage(for: .custom(entry))
-        messages.append(message)
-        messageIndexByID[message.id] = index
-        entryIndexByID[entry.id] = entries.count - 1
-
-        let layout = buildLayoutRecord(for: message)
-        layoutRecords.append(layout)
-        heightIndex.append(layout.height)
-        totalHeight = computedTotalHeight()
+        let snapshot = coreStore.appendCustomEntry(entry)
+        syncPublicState(from: snapshot)
+        if let message = snapshot.messages.last {
+            layoutEngine.append(message: message, renderer: renderService)
+        }
+        totalHeight = layoutEngine.totalHeight
 
         let shouldFollow = state.shouldAutoFollow
         if !shouldFollow {
             state.hasUnreadNewContent = true
         }
 
-        let update = Update(
-            insertedIndexes: IndexSet(integer: index),
-            totalHeight: totalHeight,
-            shouldScrollToBottom: shouldFollow,
-            hasUnreadNewContent: state.hasUnreadNewContent
+        let index = max(0, snapshot.count - 1)
+        onUpdate?(
+            Update(
+                insertedIndexes: IndexSet(integer: index),
+                totalHeight: totalHeight,
+                heightDelta: totalHeight - oldTotalHeight,
+                changedIndex: index,
+                shouldScrollToBottom: shouldFollow,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
-        onUpdate?(update)
     }
 
     public func beginStreamingAssistantMessage(id: String = UUID().uuidString, content: String = "") -> String {
@@ -279,7 +215,7 @@ public final class VVChatTimelineController {
     }
 
     public func updateDraftMessage(id: String, content: String, throttle: Bool = true) {
-        guard let index = messageIndexByID[id] else { return }
+        guard let index = indexForItemID(id) else { return }
         guard messages[index].state == .draft else { return }
         if throttle {
             activeDraftID = id
@@ -297,23 +233,27 @@ public final class VVChatTimelineController {
 
     public func appendToDraftMessage(id: String, chunk: String, throttle: Bool = false) {
         guard !chunk.isEmpty else { return }
-        guard let index = messageIndexByID[id] else { return }
+        guard let index = indexForItemID(id) else { return }
         guard messages[index].state == .draft else { return }
         let appended = messages[index].content + chunk
         updateDraftMessage(id: id, content: appended, throttle: throttle)
     }
 
     public func finalizeMessage(id: String, content: String) {
-        guard let index = messageIndexByID[id] else { return }
-        renderer.invalidate(messageID: id)
-        messages[index].state = .final
-        messages[index].content = content
-        messages[index].revision += 1
-        syncMessageBackToEntries(messages[index])
+        guard let index = indexForItemID(id) else { return }
+        renderService.invalidate(messageID: id)
+
+        var message = messages[index]
+        message.state = .final
+        message.content = content
+        message.revision += 1
+        syncPublicState(from: coreStore.syncMessage(message))
+
         if activeDraftID == id {
             draftThrottler.cancel()
             activeDraftID = nil
         }
+
         updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: true)
     }
 
@@ -323,15 +263,15 @@ public final class VVChatTimelineController {
         scrollToBottom: Bool? = nil,
         markUnread: Bool = true
     ) {
-        guard let index = entryIndexByID[id] else { return }
+        guard let index = indexForItemID(id) else { return }
 
-        renderer.invalidate(messageID: id)
-        let previousMessageID = messages.indices.contains(index) ? messages[index].id : nil
-        entries[index] = entry
-        messages[index] = materializeMessage(for: entry)
-        rebuildIDIndexes()
-        if let previousMessageID, previousMessageID != messages[index].id {
-            renderer.invalidate(messageID: previousMessageID)
+        let oldTotalHeight = totalHeight
+        let previousMessageID = messages[index].id
+        renderService.invalidate(messageID: previousMessageID)
+
+        syncPublicState(from: coreStore.replaceEntry(id: id, with: entry))
+        if previousMessageID != messages[index].id {
+            renderService.invalidate(messageID: messages[index].id)
         }
 
         if activeDraftID == id, messages[index].state != .draft {
@@ -339,10 +279,84 @@ public final class VVChatTimelineController {
             activeDraftID = nil
         }
 
-        updateMessageLayout(
-            at: index,
-            shouldScrollToBottom: scrollToBottom ?? state.shouldAutoFollow,
-            markUnread: markUnread
+        layoutEngine.reset(messages: messages, renderer: renderService)
+        totalHeight = layoutEngine.totalHeight
+
+        let shouldFollow = scrollToBottom ?? state.shouldAutoFollow
+        if markUnread && !shouldFollow {
+            state.hasUnreadNewContent = true
+        } else if shouldFollow {
+            state.hasUnreadNewContent = false
+        }
+
+        onUpdate?(
+            Update(
+                updatedIndexes: IndexSet(integer: index),
+                totalHeight: totalHeight,
+                heightDelta: totalHeight - oldTotalHeight,
+                changedIndex: index,
+                shouldScrollToBottom: shouldFollow,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
+        )
+    }
+
+    public func replaceEntries(
+        in range: Range<Int>,
+        with newEntries: [VVChatTimelineEntry],
+        scrollToBottom: Bool? = nil,
+        markUnread: Bool = true
+    ) {
+        let clampedLower = max(0, min(range.lowerBound, entries.count))
+        let clampedUpper = max(clampedLower, min(range.upperBound, entries.count))
+        let clampedRange = clampedLower..<clampedUpper
+
+        let oldTotalHeight = totalHeight
+        let oldMessages = Array(messages[clampedRange])
+        let oldCount = oldMessages.count
+        let newCount = newEntries.count
+        let shouldFollow = scrollToBottom ?? state.shouldAutoFollow
+
+        for message in oldMessages {
+            renderService.invalidate(messageID: message.id)
+        }
+
+        syncPublicState(from: coreStore.replaceEntries(in: clampedRange, with: newEntries))
+        layoutEngine.reset(messages: messages, renderer: renderService)
+        totalHeight = layoutEngine.totalHeight
+
+        if let activeDraftID,
+           !messages.contains(where: { $0.id == activeDraftID && $0.state == .draft }) {
+            draftThrottler.cancel()
+            self.activeDraftID = nil
+        }
+
+        if markUnread && !shouldFollow {
+            state.hasUnreadNewContent = true
+        } else if shouldFollow {
+            state.hasUnreadNewContent = false
+        }
+
+        let overlappingCount = min(oldCount, newCount)
+        let insertedStart = clampedLower + overlappingCount
+        let removedStart = clampedLower + newCount
+        onUpdate?(
+            Update(
+                insertedIndexes: newCount > oldCount
+                    ? IndexSet(integersIn: insertedStart..<(clampedLower + newCount))
+                    : [],
+                updatedIndexes: overlappingCount > 0
+                    ? IndexSet(integersIn: clampedLower..<(clampedLower + overlappingCount))
+                    : [],
+                removedIndexes: oldCount > newCount
+                    ? IndexSet(integersIn: removedStart..<(clampedLower + oldCount))
+                    : [],
+                totalHeight: totalHeight,
+                heightDelta: totalHeight - oldTotalHeight,
+                changedIndex: clampedLower < layoutCount ? clampedLower : max(0, layoutCount - 1),
+                shouldScrollToBottom: shouldFollow,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
     }
 
@@ -361,20 +375,18 @@ public final class VVChatTimelineController {
         state.hasUnreadNewContent = false
         state.isPinnedToBottom = true
         state.userIsInteracting = false
-        let update = Update(
-            totalHeight: totalHeight,
-            shouldScrollToBottom: true,
-            hasUnreadNewContent: state.hasUnreadNewContent
+        onUpdate?(
+            Update(
+                totalHeight: totalHeight,
+                shouldScrollToBottom: true,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
-        onUpdate?(update)
     }
 
     public func updateImageSize(url: String, size: CGSize) {
-        guard renderer.updateImageSize(url: url, size: size) else { return }
-        guard let messageIDs = imageURLToMessageIDs[url] else { return }
-        let sorted = messageIDs.compactMap { id -> Int? in
-            messageIndexByID[id]
-        }.sorted()
+        guard renderService.updateImageSize(url: url, size: size) else { return }
+        let sorted = layoutEngine.messageIDs(forImageURL: url).compactMap(indexForItemID).sorted()
         relayoutMessages(
             at: sorted,
             shouldScrollToBottom: state.shouldAutoFollow,
@@ -384,78 +396,38 @@ public final class VVChatTimelineController {
     }
 
     public func itemLayout(at index: Int) -> ItemLayout? {
-        guard layoutRecords.indices.contains(index) else { return nil }
-        let record = layoutRecords[index]
-        return ItemLayout(
-            id: record.id,
-            frame: CGRect(
-                x: 0,
-                y: originY(for: index),
-                width: renderWidth,
-                height: record.height
-            ),
-            contentOffset: record.contentOffset,
-            isDraft: record.isDraft,
-            revision: record.revision
-        )
+        layoutEngine.itemLayout(at: index)
     }
 
     public var layoutCount: Int {
-        layoutRecords.count
+        layoutEngine.layoutCount
     }
 
     func visibleLayoutRange(in viewport: CGRect, overscan: CGFloat) -> Range<Int> {
-        guard !layoutRecords.isEmpty else { return 0..<0 }
-        let minY = viewport.minY - overscan
-        let maxY = viewport.maxY + overscan
-        let lower = lowerBound(forMaxYAbove: minY)
-        let upper = upperBound(forMinYBelow: maxY)
-        return lower..<max(lower, upper)
+        layoutEngine.visibleLayoutRange(in: viewport, overscan: overscan)
+    }
+
+    @discardableResult
+    func hydrateExactLayouts(in viewport: CGRect, overscan: CGFloat) -> Bool {
+        hydrateExactLayouts(in: visibleLayoutRange(in: viewport, overscan: overscan))
+    }
+
+    @discardableResult
+    func hydrateExactLayoutsSilently(in viewport: CGRect, overscan: CGFloat) -> Bool {
+        hydrateExactLayouts(in: visibleLayoutRange(in: viewport, overscan: overscan), emitUpdate: false)
+    }
+
+    @discardableResult
+    func hydrateExactLayout(at index: Int) -> Bool {
+        hydrateExactLayouts(in: index..<(index + 1))
     }
 
     func itemIndex(containingDocumentY y: CGFloat) -> Int? {
-        guard !layoutRecords.isEmpty else { return nil }
-        var low = 0
-        var high = layoutRecords.count - 1
-        while low <= high {
-            let mid = (low + high) / 2
-            guard let frame = frame(at: mid) else { return nil }
-            if y < frame.minY {
-                high = mid - 1
-            } else if y > frame.maxY {
-                low = mid + 1
-            } else {
-                return mid
-            }
-        }
-        return nil
+        layoutEngine.itemIndex(containingDocumentY: y)
     }
 
     func nearestItemIndex(forDocumentY y: CGFloat) -> Int? {
-        guard !layoutRecords.isEmpty else { return nil }
-        var low = 0
-        var high = layoutRecords.count - 1
-        while low <= high {
-            let mid = (low + high) / 2
-            guard let frame = frame(at: mid) else { return nil }
-            if y < frame.minY {
-                high = mid - 1
-            } else if y > frame.maxY {
-                low = mid + 1
-            } else {
-                return mid
-            }
-        }
-
-        if low >= layoutRecords.count { return layoutRecords.count - 1 }
-        if high < 0 { return 0 }
-
-        guard let lowerFrame = frame(at: high), let upperFrame = frame(at: low) else {
-            return nil
-        }
-        let lowerDistance = abs(y - lowerFrame.maxY)
-        let upperDistance = abs(upperFrame.minY - y)
-        return lowerDistance <= upperDistance ? high : low
+        layoutEngine.nearestItemIndex(forDocumentY: y)
     }
 
     public func entry(at index: Int) -> VVChatTimelineEntry? {
@@ -464,77 +436,139 @@ public final class VVChatTimelineController {
     }
 
     public func renderedMessage(for id: String) -> VVChatRenderedMessage? {
-        guard let index = messageIndexByID[id] else { return nil }
-        return renderer.renderedMessage(for: messages[index])
+        guard let index = indexForItemID(id), messages.indices.contains(index) else { return nil }
+        return renderService.renderedMessage(for: messages[index])
     }
 
     public func renderedMessage(at index: Int) -> VVChatRenderedMessage? {
         guard messages.indices.contains(index) else { return nil }
-        return renderer.renderedMessage(for: messages[index])
+        return renderService.renderedMessage(for: messages[index])
+    }
+
+    func resolvedRenderItem(
+        at index: Int,
+        hydrateExactLayoutIfNeeded: Bool = false
+    ) -> VVChatTimelineResolvedRenderItem? {
+        guard coreStore.snapshot.items.indices.contains(index) else { return nil }
+        if hydrateExactLayoutIfNeeded,
+           let existingLayout = itemLayout(at: index),
+           !existingLayout.isExact {
+            _ = hydrateExactLayout(at: index)
+        }
+        guard let item = coreStore.snapshot.item(at: index),
+              let layout = itemLayout(at: index) else {
+            return nil
+        }
+        let rendered = renderService.renderedMessage(for: item.message)
+        return VVChatTimelineResolvedRenderItem(
+            index: index,
+            item: item,
+            layout: layout,
+            rendered: rendered
+        )
+    }
+
+#if os(macOS)
+    func visibleRenderSnapshot(
+        in viewport: CGRect,
+        overscan: CGFloat,
+        shouldHydrateExactLayouts: Bool
+    ) -> VVChatTimelineVisibleRenderSnapshot {
+        if shouldHydrateExactLayouts {
+            _ = hydrateExactLayouts(in: viewport, overscan: overscan)
+        }
+        let range = visibleLayoutRange(in: viewport, overscan: overscan)
+        guard !range.isEmpty else { return .empty }
+        let resolvedItems = range.compactMap { resolvedRenderItem(at: $0) }
+        return renderService.visibleRenderSnapshot(
+            for: resolvedItems,
+            range: range,
+            viewport: viewport
+        )
+    }
+#endif
+
+    func debugSnapshot() -> VVChatMessageRenderer.DebugSnapshot {
+        renderService.debugSnapshot()
+    }
+
+    func debugExactLayoutCount() -> Int {
+        layoutEngine.debugExactLayoutCount()
     }
 
     func sceneArtifacts(at index: Int, visibleRect: CGRect?) -> VVChatSceneArtifacts? {
         guard messages.indices.contains(index) else { return nil }
         let message = messages[index]
-        let rendered = renderer.renderedMessage(for: message)
-        return renderer.sceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let rendered = renderService.renderedMessage(for: message)
+        return renderService.sceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
     }
 
     func contentSceneArtifacts(at index: Int, visibleRect: CGRect?) -> VVChatSceneArtifacts? {
         guard messages.indices.contains(index) else { return nil }
         let message = messages[index]
-        let rendered = renderer.renderedMessage(for: message)
-        return renderer.contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let rendered = renderService.renderedMessage(for: message)
+        return renderService.contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
     }
 
     func selectionHelper(at index: Int) -> VVMarkdownSelectionHelper? {
         guard messages.indices.contains(index) else { return nil }
         let message = messages[index]
-        let rendered = renderer.renderedMessage(for: message)
-        return renderer.selectionHelper(for: message, rendered: rendered)
+        let rendered = renderService.renderedMessage(for: message)
+        return renderService.selectionHelper(for: message, rendered: rendered)
+    }
+
+    func selectionArtifacts(at index: Int, visibleRect: CGRect?) -> VVChatSelectionArtifacts? {
+        guard messages.indices.contains(index) else { return nil }
+        let message = messages[index]
+        let rendered = renderService.renderedMessage(for: message)
+        return renderService.selectionArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+    }
+
+    func trimCaches(in viewport: CGRect, overscan: CGFloat, itemPadding: Int = 12) {
+        layoutEngine.trimCaches(
+            in: viewport,
+            overscan: overscan,
+            itemPadding: itemPadding,
+            renderer: renderService
+        )
+    }
+
+    func indexForLayout(id: String) -> Int? {
+        indexForItemID(id)
     }
 
     private func applyDraftUpdate(id: String, content: String) {
-        guard let index = messageIndexByID[id] else { return }
+        guard let index = indexForItemID(id) else { return }
         guard messages[index].state == .draft else { return }
-        renderer.invalidate(messageID: id)
-        messages[index].content = content
-        messages[index].revision += 1
-        syncMessageBackToEntries(messages[index])
+
+        renderService.invalidateRendered(messageID: id)
+        var message = messages[index]
+        message.content = content
+        message.revision += 1
+        syncPublicState(from: coreStore.syncMessage(message))
+
         updateMessageLayout(at: index, shouldScrollToBottom: state.shouldAutoFollow, markUnread: true)
     }
 
     private func updateMessageLayout(at index: Int, shouldScrollToBottom: Bool, markUnread: Bool) {
-        let message = messages[index]
-        let shouldFollow = shouldScrollToBottom
-        let renderedMessage = renderer.renderedMessage(for: message)
-        updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
-        let oldHeight = heightIndex.height(at: index)
-        let newHeight = renderedMessage.height
-        let delta = newHeight - oldHeight
-        layoutRecords[index].height = newHeight
-        layoutRecords[index].contentOffset = renderedMessage.contentOffset
-        layoutRecords[index].isDraft = message.state == .draft
-        layoutRecords[index].revision = message.revision
+        guard messages.indices.contains(index) else { return }
+        let delta = layoutEngine.updateLayout(at: index, message: messages[index], renderer: renderService)
+        totalHeight = layoutEngine.totalHeight
 
-        if delta != 0 {
-            heightIndex.updateHeight(at: index, to: newHeight)
-        }
-        totalHeight = computedTotalHeight()
-
-        if markUnread && !shouldFollow {
+        if markUnread && !shouldScrollToBottom {
             state.hasUnreadNewContent = true
         }
 
-        let update = Update(
-            updatedIndexes: IndexSet(integer: index),
-            totalHeight: totalHeight,
-            heightDelta: delta,
-            changedIndex: index,
-            shouldScrollToBottom: shouldFollow,
-            hasUnreadNewContent: state.hasUnreadNewContent
+        onUpdate?(
+            Update(
+                updatedIndexes: IndexSet(integer: index),
+                totalHeight: totalHeight,
+                heightDelta: delta,
+                changedIndex: index,
+                shouldScrollToBottom: shouldScrollToBottom,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
-        onUpdate?(update)
     }
 
     private func relayoutMessages(
@@ -546,215 +580,88 @@ public final class VVChatTimelineController {
         guard !indexes.isEmpty else { return }
 
         let uniqueSorted = Array(Set(indexes)).sorted()
-        let affectedIndexes = Set(uniqueSorted)
-        let shouldFollow = shouldScrollToBottom
-
-        for index in uniqueSorted {
-            guard messages.indices.contains(index) else { continue }
+        for index in uniqueSorted where messages.indices.contains(index) {
             if preservePreparedMarkdown {
-                renderer.invalidateRendered(messageID: messages[index].id)
+                renderService.invalidateRendered(messageID: messages[index].id)
             } else {
-                renderer.invalidate(messageID: messages[index].id)
+                renderService.invalidate(messageID: messages[index].id)
             }
         }
 
-        var updatedIndexes = IndexSet()
+        let mutation = layoutEngine.relayout(indexes: uniqueSorted, messages: messages, renderer: renderService)
+        totalHeight = layoutEngine.totalHeight
 
-        var cumulativeDelta: CGFloat = 0
-        for index in uniqueSorted {
-            guard affectedIndexes.contains(index), messages.indices.contains(index) else { continue }
-
-            let message = messages[index]
-            let renderedMessage = renderer.renderedMessage(for: message)
-            updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
-
-            let oldHeight = heightIndex.height(at: index)
-            let newHeight = renderedMessage.height
-            let delta = newHeight - oldHeight
-
-            layoutRecords[index].height = newHeight
-            layoutRecords[index].contentOffset = renderedMessage.contentOffset
-            layoutRecords[index].isDraft = message.state == .draft
-            layoutRecords[index].revision = message.revision
-
-            heightIndex.updateHeight(at: index, to: newHeight)
-            cumulativeDelta += delta
-            updatedIndexes.insert(index)
-        }
-
-        totalHeight = computedTotalHeight()
-
-        if markUnread && !shouldFollow {
+        if markUnread && !shouldScrollToBottom {
             state.hasUnreadNewContent = true
         }
 
-        let update = Update(
-            updatedIndexes: updatedIndexes,
-            totalHeight: totalHeight,
-            heightDelta: cumulativeDelta,
-            changedIndex: uniqueSorted.first,
-            shouldScrollToBottom: shouldFollow,
-            hasUnreadNewContent: state.hasUnreadNewContent
+        onUpdate?(
+            Update(
+                updatedIndexes: mutation.updatedIndexes,
+                totalHeight: totalHeight,
+                heightDelta: mutation.totalDelta,
+                changedIndex: mutation.updatedIndexes.first ?? uniqueSorted.first,
+                shouldScrollToBottom: shouldScrollToBottom,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
-        onUpdate?(update)
     }
 
     private func rebuildLayouts(shouldScrollToBottom: Bool) {
-        layoutRecords.removeAll(keepingCapacity: true)
-        messageImageURLs.removeAll(keepingCapacity: true)
-        imageURLToMessageIDs.removeAll(keepingCapacity: true)
-
-        var heights: [CGFloat] = []
-        heights.reserveCapacity(messages.count)
-        for message in messages {
-            let record = buildLayoutRecord(for: message)
-            layoutRecords.append(record)
-            heights.append(record.height)
-        }
-        heightIndex.rebuild(heights: heights)
-        totalHeight = computedTotalHeight()
-
-        let update = Update(
-            insertedIndexes: IndexSet(integersIn: 0..<layoutRecords.count),
-            totalHeight: totalHeight,
-            shouldScrollToBottom: shouldScrollToBottom,
-            hasUnreadNewContent: state.hasUnreadNewContent
-        )
-        onUpdate?(update)
-    }
-
-    private func buildLayoutRecord(for message: VVChatMessage) -> LayoutRecord {
-        let renderedMessage = renderer.renderedMessage(for: message)
-        updateImageMappings(messageID: message.id, imageURLs: Set(renderedMessage.imageURLs))
-        return LayoutRecord(
-            id: message.id,
-            height: renderedMessage.height,
-            contentOffset: renderedMessage.contentOffset,
-            isDraft: message.state == .draft,
-            revision: message.revision
+        layoutEngine.reset(messages: messages, renderer: renderService)
+        totalHeight = layoutEngine.totalHeight
+        onUpdate?(
+            Update(
+                insertedIndexes: IndexSet(integersIn: 0..<layoutCount),
+                totalHeight: totalHeight,
+                shouldScrollToBottom: shouldScrollToBottom,
+                hasUnreadNewContent: state.hasUnreadNewContent
+            )
         )
     }
 
-    private func layoutSnapshot() -> [ItemLayout] {
-        guard !layoutRecords.isEmpty else { return [] }
-        var snapshot: [ItemLayout] = []
-        snapshot.reserveCapacity(layoutRecords.count)
-        for index in layoutRecords.indices {
-            if let layout = itemLayout(at: index) {
-                snapshot.append(layout)
-            }
+    @discardableResult
+    private func hydrateExactLayouts(in range: Range<Int>) -> Bool {
+        hydrateExactLayouts(in: range, emitUpdate: true)
+    }
+
+    @discardableResult
+    private func hydrateExactLayouts(in range: Range<Int>, emitUpdate: Bool) -> Bool {
+        let mutation = layoutEngine.hydrateExactLayouts(in: range, messages: messages, renderer: renderService)
+        guard !mutation.updatedIndexes.isEmpty else { return false }
+        totalHeight = layoutEngine.totalHeight
+        if emitUpdate {
+            onUpdate?(
+                Update(
+                    updatedIndexes: mutation.updatedIndexes,
+                    totalHeight: totalHeight,
+                    heightDelta: mutation.totalDelta,
+                    changedIndex: mutation.updatedIndexes.first,
+                    shouldScrollToBottom: false,
+                    hasUnreadNewContent: state.hasUnreadNewContent
+                )
+            )
         }
-        return snapshot
+        return true
     }
 
-    private func computedTotalHeight() -> CGFloat {
-        guard !layoutRecords.isEmpty else {
-            return style.timelineInsets.top + style.timelineInsets.bottom
-        }
-        let heights = heightIndex.prefixHeight(before: layoutRecords.count)
-        let spacing = CGFloat(max(0, layoutRecords.count - 1)) * style.messageSpacing
-        return style.timelineInsets.top + heights + spacing + style.timelineInsets.bottom
-    }
-
-    private func originY(for index: Int) -> CGFloat {
-        style.timelineInsets.top + heightIndex.prefixHeight(before: index) + CGFloat(index) * style.messageSpacing
-    }
-
-    private func frame(at index: Int) -> CGRect? {
-        guard layoutRecords.indices.contains(index) else { return nil }
-        return CGRect(
-            x: 0,
-            y: originY(for: index),
-            width: renderWidth,
-            height: layoutRecords[index].height
-        )
-    }
-
-    private func lowerBound(forMaxYAbove value: CGFloat) -> Int {
-        var low = 0
-        var high = layoutRecords.count
-        while low < high {
-            let mid = (low + high) / 2
-            let maxY = originY(for: mid) + layoutRecords[mid].height
-            if maxY < value {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
-    }
-
-    private func upperBound(forMinYBelow value: CGFloat) -> Int {
-        var low = 0
-        var high = layoutRecords.count
-        while low < high {
-            let mid = (low + high) / 2
-            let minY = originY(for: mid)
-            if minY <= value {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
-    }
-
-    private func updateImageMappings(messageID: String, imageURLs: Set<String>) {
-        if let previous = messageImageURLs[messageID] {
-            for url in previous {
-                imageURLToMessageIDs[url]?.remove(messageID)
-                if imageURLToMessageIDs[url]?.isEmpty == true {
-                    imageURLToMessageIDs.removeValue(forKey: url)
-                }
-            }
-        }
-        messageImageURLs[messageID] = imageURLs
-        for url in imageURLs {
-            imageURLToMessageIDs[url, default: []].insert(messageID)
+    private func preparePendingTailTransition(previousTotalHeight: CGFloat) {
+        if let lastIndex = (0..<layoutCount).last,
+           let anchorLayout = itemLayout(at: lastIndex) {
+            pendingLayoutTransition = PendingLayoutTransition(
+                anchorID: anchorLayout.id,
+                anchorY: anchorLayout.frame.origin.y,
+                previousTotalHeight: previousTotalHeight
+            )
         }
     }
 
-    private func syncMessageBackToEntries(_ message: VVChatMessage) {
-        guard let entryIndex = entryIndexByID[message.id] else { return }
-        entries[entryIndex] = .message(message)
+    private func indexForItemID(_ id: String) -> Int? {
+        coreStore.snapshot.index(forItemID: id)
     }
 
-    private func rebuildIDIndexes() {
-        messageIndexByID.removeAll(keepingCapacity: true)
-        messageIndexByID.reserveCapacity(messages.count)
-        for (index, message) in messages.enumerated() {
-            messageIndexByID[message.id] = index
-        }
-
-        entryIndexByID.removeAll(keepingCapacity: true)
-        entryIndexByID.reserveCapacity(entries.count)
-        for (index, entry) in entries.enumerated() {
-            entryIndexByID[entry.id] = index
-        }
-    }
-
-    private func materializeMessage(for entry: VVChatTimelineEntry) -> VVChatMessage {
-        switch entry {
-        case .message(let message):
-            return message
-        case .custom(let custom):
-            if let customEntryMessageMapper {
-                return customEntryMessageMapper(custom)
-            }
-            return defaultMessage(for: custom)
-        }
-    }
-
-    private func defaultMessage(for custom: VVCustomTimelineEntry) -> VVChatMessage {
-        let content = String(data: custom.payload, encoding: .utf8) ?? "[\(custom.kind)]"
-        return VVChatMessage(
-            id: custom.id,
-            role: .system,
-            state: .final,
-            content: content,
-            revision: custom.revision,
-            timestamp: custom.timestamp
-        )
+    private func syncPublicState(from snapshot: VVChatTimelineCoreSnapshot) {
+        entries = snapshot.entries
+        messages = snapshot.messages
     }
 }

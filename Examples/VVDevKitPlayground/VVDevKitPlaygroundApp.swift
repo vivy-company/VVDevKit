@@ -1116,8 +1116,8 @@ struct ChatPlaygroundView: View {
     @State private var pauseBetweenTurns: Double = 1.1
     @State private var expandNewToolGroups = true
     @State private var includeInterrupts = true
-    @State private var timelineItems: [PlaygroundChatTimelineItem] = []
     @State private var expandedToolGroupIDs: Set<String> = []
+    @State private var toolGroupsByID: [String: PlaygroundToolGroup] = [:]
     @State private var nextScriptedTurn = 0
     @State private var chatState = VVChatTimelineState()
     var body: some View {
@@ -1172,8 +1172,9 @@ struct ChatPlaygroundView: View {
 
                 Button("Clear Timeline") {
                     stopAutoSimulation()
-                    timelineItems = []
-                    applyTimeline(scrollToBottom: true)
+                    expandedToolGroupIDs = []
+                    toolGroupsByID = [:]
+                    controller.setEntries([], scrollToBottom: true, customEntryMessageMapper: customEntryMapper())
                 }
 
                 Spacer()
@@ -1210,7 +1211,7 @@ struct ChatPlaygroundView: View {
 
     private func updateChatStyle() {
         controller.updateStyle(SampleData.chatStyle(dark: !useLightTheme, fontSize: fontSize))
-        applyTimeline(scrollToBottom: false)
+        rebuildTimelineFromController(scrollToBottom: controller.state.shouldAutoFollow)
     }
 
     private func handleStateChange(_ state: VVChatTimelineState) {
@@ -1222,40 +1223,151 @@ struct ChatPlaygroundView: View {
     private func seedTranscript() {
         stopAutoSimulation()
         nextScriptedTurn = 0
-        timelineItems = SampleData.aizenSeedTimelineItems(includeInterrupts: includeInterrupts)
-        expandedToolGroupIDs = Set(timelineItems.compactMap { item in
+        let seedItems = SampleData.aizenSeedTimelineItems(includeInterrupts: includeInterrupts)
+        expandedToolGroupIDs = Set(seedItems.compactMap { item in
             guard case .toolGroup(let group) = item else { return nil }
             return group.id
         })
-        applyTimeline(scrollToBottom: true)
+        toolGroupsByID = Dictionary(
+            uniqueKeysWithValues: seedItems.compactMap { item in
+                guard case .toolGroup(let group) = item else { return nil }
+                return (group.id, group)
+            }
+        )
+        controller.setEntries(
+            buildEntries(from: seedItems),
+            scrollToBottom: true,
+            customEntryMessageMapper: customEntryMapper()
+        )
     }
 
-    private func applyTimeline(scrollToBottom: Bool, animatedAnchorID: String? = nil) {
+    private func rebuildTimelineFromController(scrollToBottom: Bool, animatedAnchorID: String? = nil) {
         if let animatedAnchorID {
             controller.prepareLayoutTransition(anchorItemID: animatedAnchorID)
         }
         controller.setEntries(
-            buildEntries(from: timelineItems),
+            buildEntries(from: controllerBaseEntries()),
             scrollToBottom: scrollToBottom,
             customEntryMessageMapper: customEntryMapper()
         )
     }
 
-    private func buildEntries(from items: [PlaygroundChatTimelineItem]) -> [VVChatTimelineEntry] {
+    private func controllerBaseEntries() -> [VVChatTimelineEntry] {
+        controller.entries.filter { entry in
+            guard case .custom(let custom) = entry else { return true }
+            return custom.kind != "toolCallDetail" && custom.kind != "toolCallInlineDiff"
+        }
+    }
+
+    private func expandedToolEntries(for group: PlaygroundToolGroup) -> [VVChatTimelineEntry] {
+        guard expandedToolGroupIDs.contains(group.id) else { return [] }
         var entries: [VVChatTimelineEntry] = []
-        entries.reserveCapacity(items.count * 2)
+        entries.reserveCapacity(group.toolCalls.count * 2)
+        for call in group.toolCalls {
+            entries.append(.custom(toolDetailEntry(for: call, group: group)))
+            if let diffEntry = toolInlineDiffEntry(for: call, group: group) {
+                entries.append(.custom(diffEntry))
+            }
+        }
+        return entries
+    }
+
+    private func toolEntryRange(afterGroupID groupID: String) -> Range<Int>? {
+        guard let groupIndex = controller.entries.firstIndex(where: { $0.id == groupID }) else {
+            return nil
+        }
+
+        var end = groupIndex + 1
+        while end < controller.entries.count {
+            guard case .custom(let custom) = controller.entries[end],
+                  custom.id.hasPrefix("\(groupID)::") else {
+                break
+            }
+            end += 1
+        }
+        return (groupIndex + 1)..<end
+    }
+
+    private func upsertToolGroupBlock(
+        _ group: PlaygroundToolGroup,
+        replacingExistingGroup: Bool,
+        scrollToBottom: Bool,
+        markUnread: Bool = true,
+        animatedAnchorID: String? = nil
+    ) {
+        if let animatedAnchorID {
+            controller.prepareLayoutTransition(anchorItemID: animatedAnchorID)
+        }
+
+        let desiredEntries = [VVChatTimelineEntry.custom(groupEntry(for: group))] + expandedToolEntries(for: group)
+        if replacingExistingGroup,
+           let groupIndex = controller.entries.firstIndex(where: { $0.id == group.id }) {
+            let replacementRange = groupIndex..<(toolEntryRange(afterGroupID: group.id)?.upperBound ?? (groupIndex + 1))
+            controller.replaceEntries(
+                in: replacementRange,
+                with: desiredEntries,
+                scrollToBottom: scrollToBottom,
+                markUnread: markUnread
+            )
+        } else {
+            let insertIndex = controller.entries.count
+            controller.replaceEntries(
+                in: insertIndex..<insertIndex,
+                with: desiredEntries,
+                scrollToBottom: scrollToBottom,
+                markUnread: markUnread
+            )
+        }
+    }
+
+    private func syncExpandedToolGroupEntries(for groupID: String, scrollToBottom: Bool, animatedAnchorID: String? = nil) {
+        guard let group = toolGroupsByID[groupID],
+              let toolRange = toolEntryRange(afterGroupID: groupID) else {
+            return
+        }
+        if let animatedAnchorID {
+            controller.prepareLayoutTransition(anchorItemID: animatedAnchorID)
+        }
+        controller.replaceEntries(
+            in: toolRange,
+            with: expandedToolEntries(for: group),
+            scrollToBottom: scrollToBottom,
+            markUnread: false
+        )
+    }
+
+    private func buildEntries(from items: [PlaygroundChatTimelineItem]) -> [VVChatTimelineEntry] {
+        buildEntries(
+            from: items.map { item in
+                switch item {
+                case .message(let message):
+                    return .message(chatMessage(from: message, startsAssistantLane: false))
+                case .toolGroup(let group):
+                    return .custom(groupEntry(for: group))
+                case .turnSummary(let summary):
+                    return .custom(turnSummaryEntry(for: summary))
+                }
+            }
+        )
+    }
+
+    private func buildEntries(from baseEntries: [VVChatTimelineEntry]) -> [VVChatTimelineEntry] {
+        var entries: [VVChatTimelineEntry] = []
+        entries.reserveCapacity(baseEntries.count * 2)
         var hasRenderedAssistantMessageInTurn = false
 
-        for item in items {
-            switch item {
+        for entry in baseEntries {
+            switch entry {
             case .message(let message):
                 let startsAssistantLane = message.role == .assistant && !hasRenderedAssistantMessageInTurn
-                entries.append(.message(chatMessage(from: message, startsAssistantLane: startsAssistantLane)))
+                entries.append(.message(restyledMessage(message, startsAssistantLane: startsAssistantLane)))
                 hasRenderedAssistantMessageInTurn = message.role == .assistant
 
-            case .toolGroup(let group):
-                entries.append(.custom(groupEntry(for: group)))
-                if expandedToolGroupIDs.contains(group.id) {
+            case .custom(let custom):
+                entries.append(.custom(custom))
+                if custom.kind == "toolCallGroup",
+                   expandedToolGroupIDs.contains(custom.id),
+                   let group = toolGroupsByID[custom.id] {
                     for call in group.toolCalls {
                         entries.append(.custom(toolDetailEntry(for: call, group: group)))
                         if let diffEntry = toolInlineDiffEntry(for: call, group: group) {
@@ -1263,14 +1375,39 @@ struct ChatPlaygroundView: View {
                         }
                     }
                 }
-
-            case .turnSummary(let summary):
-                entries.append(.custom(turnSummaryEntry(for: summary)))
-                hasRenderedAssistantMessageInTurn = false
+                if custom.kind == "turnSummary" {
+                    hasRenderedAssistantMessageInTurn = false
+                }
             }
         }
 
         return entries
+    }
+
+    private func restyledMessage(
+        _ message: VVChatMessage,
+        startsAssistantLane: Bool
+    ) -> VVChatMessage {
+        VVChatMessage(
+            id: message.id,
+            role: message.role,
+            state: message.state,
+            content: message.content,
+            revision: message.revision,
+            timestamp: message.timestamp,
+            presentation: messagePresentation(for: message, startsAssistantLane: startsAssistantLane),
+            customContent: message.customContent
+        )
+    }
+
+    private func storeToolGroup(_ group: PlaygroundToolGroup, replacing previousID: String? = nil) {
+        if let previousID {
+            toolGroupsByID.removeValue(forKey: previousID)
+            if previousID != group.id, expandedToolGroupIDs.remove(previousID) != nil {
+                expandedToolGroupIDs.insert(group.id)
+            }
+        }
+        toolGroupsByID[group.id] = group
     }
 
     private func chatMessage(from message: PlaygroundChatMessage, startsAssistantLane: Bool) -> VVChatMessage {
@@ -1283,6 +1420,44 @@ struct ChatPlaygroundView: View {
             timestamp: message.timestamp,
             presentation: messagePresentation(for: message, startsAssistantLane: startsAssistantLane)
         )
+    }
+
+    private func messagePresentation(for message: VVChatMessage, startsAssistantLane: Bool) -> VVChatMessagePresentation? {
+        switch message.role {
+        case .user:
+            return VVChatMessagePresentation(
+                timestampPrefixIconURL: timelineSymbolIconURL("clock", fallbackID: "timestamp-clock"),
+                timestampSuffixIconURL: timelineSymbolIconURL("doc.on.doc", fallbackID: "copy-user"),
+                timestampIconSize: max(14, CGFloat(fontSize) - 0.5),
+                timestampIconSpacing: 6
+            )
+        case .assistant:
+            return VVChatMessagePresentation(
+                bubbleStyle: VVChatBubbleStyle(
+                    isEnabled: true,
+                    color: .clear,
+                    borderColor: .clear,
+                    borderWidth: 0,
+                    cornerRadius: 0,
+                    insets: .init(top: 0, left: 0, bottom: 4, right: 0),
+                    maxWidth: 4000,
+                    alignment: .leading
+                ),
+                showsHeader: false,
+                leadingLaneWidth: 0,
+                leadingIconURL: startsAssistantLane ? timelineSymbolIconURL("sparkles", fallbackID: "assistant-lane") : nil,
+                leadingIconSize: startsAssistantLane ? 0 : nil,
+                leadingIconSpacing: startsAssistantLane ? 0 : nil,
+                showsTimestamp: false
+            )
+        case .system:
+            return VVChatMessagePresentation(
+                showsHeader: false,
+                showsTimestamp: false,
+                contentFontScale: 0.78,
+                textOpacityMultiplier: !useLightTheme ? 0.5 : 0.58
+            )
+        }
     }
 
     private func messagePresentation(for message: PlaygroundChatMessage, startsAssistantLane: Bool) -> VVChatMessagePresentation? {
@@ -1684,7 +1859,6 @@ struct ChatPlaygroundView: View {
         nextScriptedTurn += 1
 
         await MainActor.run {
-            timelineItems.append(.message(turn.userMessage))
             prepareAppendTransition()
             controller.appendMessage(chatMessage(from: turn.userMessage, startsAssistantLane: false))
         }
@@ -1699,7 +1873,6 @@ struct ChatPlaygroundView: View {
             timestamp: turn.agentPreface.timestamp
         )
         await MainActor.run {
-            timelineItems.append(.message(currentDraft))
             prepareAppendTransition()
             controller.appendMessage(chatMessage(from: currentDraft, startsAssistantLane: true))
         }
@@ -1709,7 +1882,6 @@ struct ChatPlaygroundView: View {
             currentDraft.content += chunk
             currentDraft.revision += 1
             await MainActor.run {
-                replaceMessage(currentDraft)
                 controller.updateDraftMessage(id: currentDraft.id, content: currentDraft.content, throttle: true)
             }
             try? await Task.sleep(nanoseconds: UInt64(chunkDelay * 1_000_000_000))
@@ -1718,43 +1890,36 @@ struct ChatPlaygroundView: View {
         currentDraft.state = .final
         currentDraft.revision += 1
         await MainActor.run {
-            replaceMessage(currentDraft)
             controller.prepareLayoutTransition(anchorItemID: currentDraft.id)
             controller.replaceEntry(
                 id: currentDraft.id,
                 with: .message(chatMessage(from: currentDraft, startsAssistantLane: true))
             )
 
-            timelineItems.append(.toolGroup(turn.toolGroup.inProgressVersion))
-            prepareAppendTransition()
-            controller.appendCustomEntry(groupEntry(for: turn.toolGroup.inProgressVersion))
+            storeToolGroup(turn.toolGroup.inProgressVersion)
             if expandNewToolGroups {
                 expandedToolGroupIDs.insert(turn.toolGroup.inProgressVersion.id)
-                for call in turn.toolGroup.inProgressVersion.toolCalls {
-                    prepareAppendTransition()
-                    controller.appendCustomEntry(toolDetailEntry(for: call, group: turn.toolGroup.inProgressVersion))
-                }
             }
+            prepareAppendTransition()
+            upsertToolGroupBlock(
+                turn.toolGroup.inProgressVersion,
+                replacingExistingGroup: false,
+                scrollToBottom: controller.state.shouldAutoFollow,
+                markUnread: true
+            )
         }
 
         try? await Task.sleep(nanoseconds: UInt64(max(chunkDelay, 0.05) * 5 * 1_000_000_000))
 
         await MainActor.run {
-            replaceToolGroup(turn.toolGroup.inProgressVersion.id, with: turn.toolGroup.completedVersion)
-            controller.prepareLayoutTransition(anchorItemID: turn.toolGroup.completedVersion.id)
-            controller.replaceEntry(
-                id: turn.toolGroup.completedVersion.id,
-                with: .custom(groupEntry(for: turn.toolGroup.completedVersion))
+            storeToolGroup(turn.toolGroup.completedVersion, replacing: turn.toolGroup.inProgressVersion.id)
+            upsertToolGroupBlock(
+                turn.toolGroup.completedVersion,
+                replacingExistingGroup: true,
+                scrollToBottom: controller.state.shouldAutoFollow,
+                markUnread: false,
+                animatedAnchorID: turn.toolGroup.completedVersion.id
             )
-            if expandedToolGroupIDs.contains(turn.toolGroup.completedVersion.id) {
-                for call in turn.toolGroup.completedVersion.toolCalls {
-                    controller.prepareLayoutTransition(anchorItemID: "\(turn.toolGroup.completedVersion.id)::\(call.id)")
-                    controller.replaceEntry(
-                        id: "\(turn.toolGroup.completedVersion.id)::\(call.id)",
-                        with: .custom(toolDetailEntry(for: call, group: turn.toolGroup.completedVersion))
-                    )
-                }
-            }
         }
 
         let finalAssistant = PlaygroundChatMessage(
@@ -1766,7 +1931,6 @@ struct ChatPlaygroundView: View {
             timestamp: turn.agentFinal.timestamp
         )
         await MainActor.run {
-            timelineItems.append(.message(finalAssistant))
             prepareAppendTransition()
             controller.appendMessage(chatMessage(from: finalAssistant, startsAssistantLane: false))
         }
@@ -1776,7 +1940,6 @@ struct ChatPlaygroundView: View {
             streamedFinal.content += chunk
             streamedFinal.revision += 1
             await MainActor.run {
-                replaceMessage(streamedFinal)
                 controller.updateDraftMessage(id: streamedFinal.id, content: streamedFinal.content, throttle: true)
             }
             try? await Task.sleep(nanoseconds: UInt64(chunkDelay * 1_000_000_000))
@@ -1785,18 +1948,15 @@ struct ChatPlaygroundView: View {
         streamedFinal.state = .final
         streamedFinal.revision += 1
         await MainActor.run {
-            replaceMessage(streamedFinal)
             controller.prepareLayoutTransition(anchorItemID: streamedFinal.id)
             controller.replaceEntry(
                 id: streamedFinal.id,
                 with: .message(chatMessage(from: streamedFinal, startsAssistantLane: false))
             )
 
-            timelineItems.append(.turnSummary(turn.summary))
             prepareAppendTransition()
             controller.appendCustomEntry(turnSummaryEntry(for: turn.summary))
             if let systemMessage = turn.systemMessage, includeInterrupts {
-                timelineItems.append(.message(systemMessage))
                 prepareAppendTransition()
                 controller.appendMessage(chatMessage(from: systemMessage, startsAssistantLane: false))
             }
@@ -1804,40 +1964,9 @@ struct ChatPlaygroundView: View {
     }
 
     private func prepareAppendTransition() {
-        let anchorID = controller.entries.last?.id ?? timelineItems.last.flatMap(itemID(for:))
+        let anchorID = controller.entries.last?.id
         if let anchorID {
             controller.prepareLayoutTransition(anchorItemID: anchorID)
-        }
-    }
-
-    private func itemID(for item: PlaygroundChatTimelineItem) -> String {
-        switch item {
-        case .message(let message):
-            return message.id
-        case .toolGroup(let group):
-            return group.id
-        case .turnSummary(let summary):
-            return summary.id
-        }
-    }
-
-    private func replaceMessage(_ message: PlaygroundChatMessage) {
-        guard let index = timelineItems.firstIndex(where: { item in
-            guard case .message(let existing) = item else { return false }
-            return existing.id == message.id
-        }) else { return }
-        timelineItems[index] = .message(message)
-    }
-
-    private func replaceToolGroup(_ id: String, with group: PlaygroundToolGroup) {
-        guard let index = timelineItems.firstIndex(where: { item in
-            guard case .toolGroup(let existing) = item else { return false }
-            return existing.id == id
-        }) else { return }
-        timelineItems[index] = .toolGroup(group)
-        if expandedToolGroupIDs.contains(id) {
-            expandedToolGroupIDs.remove(id)
-            expandedToolGroupIDs.insert(group.id)
         }
     }
 
@@ -1846,17 +1975,18 @@ struct ChatPlaygroundView: View {
         if expandedToolGroupIDs.contains(entryID) {
             expandedToolGroupIDs.remove(entryID)
             hadStateChange = true
-        } else if timelineItems.contains(where: { item in
-            guard case .toolGroup(let group) = item else { return false }
-            return group.id == entryID
-        }) {
+        } else if toolGroupsByID[entryID] != nil {
             expandedToolGroupIDs.insert(entryID)
             hadStateChange = true
         } else {
             hadStateChange = false
         }
         if hadStateChange {
-            applyTimeline(scrollToBottom: false)
+            syncExpandedToolGroupEntries(
+                for: entryID,
+                scrollToBottom: controller.state.shouldAutoFollow,
+                animatedAnchorID: entryID
+            )
         }
     }
 
@@ -3268,7 +3398,16 @@ enum SampleData {
             userInsets: .init(top: 7, left: 20, bottom: 7, right: 20),
             assistantInsets: .init(top: 3, left: 20, bottom: 4, right: 20),
             systemInsets: .init(top: 15, left: 20, bottom: 15, right: 20),
-            backgroundColor: .clear
+            backgroundColor: .clear,
+            renderedCacheLimit: 12,
+            motion: .init(
+                layoutTransition: .accordion,
+                layoutAnimation: .spring(response: 0.34, dampingFraction: 0.84),
+                viewportFollowAnimation: .smooth(duration: 0.18),
+                viewportClampAnimation: .smooth(duration: 0.18),
+                jumpToLatestAnimation: .timing(duration: 0.28, easing: .easeOut),
+                updateBatchInterval: 1.0 / 90.0
+            )
         )
     }
 

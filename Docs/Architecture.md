@@ -49,6 +49,12 @@ Owns markdown domain pipeline:
 
 Owns timeline/chat presentation model and composition logic using markdown and primitives.
 
+Current direction note:
+
+- `VVChatTimeline` is being hardened around a macOS-first, Metal-only rendering model.
+- AppKit remains a thin host layer for viewport, input, and lifecycle concerns.
+- See `Docs/VVChatTimelineRework.md` for the target internal split of core, layout, render, and host responsibilities.
+
 ### Support Modules
 
 - `VVHighlighting`: Tree-sitter loading and highlighting outputs

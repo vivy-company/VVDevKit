@@ -45,6 +45,10 @@ public final class MarkdownParser: @unchecked Sendable {
 
     /// Parse complete markdown content
     public func parse(_ content: String) -> ParsedMarkdownDocument {
+        parse(content, startingBlockIndex: 0)
+    }
+
+    public func parse(_ content: String, startingBlockIndex: Int) -> ParsedMarkdownDocument {
         guard !content.isEmpty else { return .empty }
 
         var parserOptions: ParseOptions = []
@@ -53,7 +57,7 @@ public final class MarkdownParser: @unchecked Sendable {
 
         var blocks: [MarkdownBlock] = []
         var footnotes: [String: MarkdownBlock] = [:]
-        var index = 0
+        var index = startingBlockIndex
 
         // Extract $$...$$ math blocks first, then parse markdown segments
         let segments = extractMathBlocks(from: content)
@@ -142,11 +146,21 @@ public final class MarkdownParser: @unchecked Sendable {
 
     /// Parse markdown content with streaming support
     public func parseStreaming(_ content: String, isComplete: Bool) -> ParsedMarkdownDocument {
+        parseStreaming(content, isComplete: isComplete, startingBlockIndex: 0)
+    }
+
+    public func parseStreaming(
+        _ content: String,
+        isComplete: Bool,
+        startingBlockIndex: Int
+    ) -> ParsedMarkdownDocument {
         if isComplete {
-            return parse(content)
+            return parse(content, startingBlockIndex: startingBlockIndex)
         }
 
-        let (stableContent, buffer) = findStableBoundary(in: content)
+        let boundary = streamingBoundary(in: content)
+        let stableContent = boundary.stableContent
+        let buffer = boundary.buffer
 
         if stableContent.isEmpty {
             return ParsedMarkdownDocument(
@@ -157,13 +171,18 @@ public final class MarkdownParser: @unchecked Sendable {
             )
         }
 
-        let result = parse(stableContent)
+        let result = parse(stableContent, startingBlockIndex: startingBlockIndex)
         return ParsedMarkdownDocument(
             blocks: result.blocks,
             footnotes: result.footnotes,
             isComplete: false,
             streamingBuffer: buffer
         )
+    }
+
+    public func streamingBoundary(in content: String) -> MarkdownStreamingBoundary {
+        let (stableContent, buffer) = findStableBoundary(in: content)
+        return MarkdownStreamingBoundary(stableContent: stableContent, buffer: buffer)
     }
 
     // MARK: - Block Parsing

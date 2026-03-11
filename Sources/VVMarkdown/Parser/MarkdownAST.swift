@@ -24,6 +24,16 @@ public struct ParsedMarkdownDocument: Sendable {
     }
 }
 
+public struct MarkdownStreamingBoundary: Sendable {
+    public let stableContent: String
+    public let buffer: String
+
+    public init(stableContent: String, buffer: String) {
+        self.stableContent = stableContent
+        self.buffer = buffer
+    }
+}
+
 // MARK: - Markdown Block
 
 /// Markdown block with stable ID for efficient diffing

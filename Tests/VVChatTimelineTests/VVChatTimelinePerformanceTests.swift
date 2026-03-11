@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import Darwin.Mach
 @testable import VVChatTimeline
+import VVMarkdown
 import VVMetalPrimitives
 
 @MainActor
@@ -69,6 +70,138 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         }
         XCTAssertGreaterThan(after[22].frame.height, before[22].frame.height)
         XCTAssertGreaterThan(after.last?.frame.maxY ?? 0, before.last?.frame.maxY ?? 0)
+    }
+
+    func testInitialControllerRebuildKeepsHeavyRendererCachesCold() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        let snapshot = controller.debugSnapshot()
+
+        XCTAssertEqual(snapshot.renderedMessageCacheCount, 0)
+        XCTAssertEqual(snapshot.preparedMarkdownCacheCount, 0)
+        XCTAssertEqual(snapshot.sceneWindowCacheEstimatedCost, 0)
+        XCTAssertEqual(controller.debugExactLayoutCount(), 0)
+    }
+
+    func testVisibleRenderWarmsChatCachesOnDemandAfterColdRebuild() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        XCTAssertEqual(controller.debugSnapshot().renderedMessageCacheCount, 0)
+        XCTAssertEqual(controller.debugExactLayoutCount(), 0)
+
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        XCTAssertTrue(controller.hydrateExactLayouts(in: visibleRect, overscan: 900))
+        _ = controller.contentSceneArtifacts(at: 0, visibleRect: visibleRect)
+        let snapshot = controller.debugSnapshot()
+
+        XCTAssertGreaterThan(snapshot.preparedMarkdownCacheCount, 0)
+        XCTAssertGreaterThan(snapshot.sceneWindowCacheEstimatedCost, 0)
+        XCTAssertGreaterThan(controller.debugExactLayoutCount(), 0)
+    }
+
+    func testColdRebuildHydratesOnlyVisibleTranscriptSlice() {
+        let controller = makeSeededController(messageCount: 240, width: viewportSize.width)
+        XCTAssertEqual(controller.debugExactLayoutCount(), 0)
+
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        XCTAssertTrue(controller.hydrateExactLayouts(in: visibleRect, overscan: 900))
+
+        let exactCount = controller.debugExactLayoutCount()
+        XCTAssertGreaterThan(exactCount, 0)
+        XCTAssertLessThan(exactCount, controller.layoutCount)
+    }
+
+    func testScrollingDefersExactHydrationUntilIdle() {
+        let controller = makeSeededController(messageCount: 260, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.2)
+
+        let beforeScrollExactCount = controller.debugExactLayoutCount()
+        let targetY = max(0, min(controller.totalHeight - viewportSize.height, controller.totalHeight * 0.45))
+
+        controller.markUserInteraction(true)
+        view.restoreScrollPosition(CGPoint(x: 0, y: targetY))
+        drainMainRunLoop(for: 0.08)
+
+        XCTAssertEqual(controller.debugExactLayoutCount(), beforeScrollExactCount)
+
+        controller.markUserInteraction(false)
+        let resumedY = min(
+            max(0, controller.totalHeight - viewportSize.height),
+            targetY + 1
+        )
+        view.restoreScrollPosition(CGPoint(x: 0, y: resumedY))
+        drainMainRunLoop(for: 0.25)
+
+        XCTAssertGreaterThan(controller.debugExactLayoutCount(), beforeScrollExactCount)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testRenderItemDuringActiveScrollDoesNotForceExactHydration() {
+        let controller = makeSeededController(messageCount: 260, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.2)
+
+        let targetY = max(0, min(controller.totalHeight - viewportSize.height, controller.totalHeight * 0.45))
+        controller.markUserInteraction(true)
+        view.restoreScrollPosition(CGPoint(x: 0, y: targetY))
+        drainMainRunLoop(for: 0.05)
+
+        let beforeExactCount = controller.debugExactLayoutCount()
+        let visibleRect = view.viewportRect
+        for index in controller.visibleLayoutRange(in: visibleRect, overscan: 420) {
+            _ = view.renderItem(at: index, visibleRect: visibleRect)
+        }
+
+        XCTAssertEqual(controller.debugExactLayoutCount(), beforeExactCount)
+
+        controller.markUserInteraction(false)
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testStreamingDraftUpdatesReuseIncrementalPreparedState() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        let draftID = controller.beginStreamingAssistantMessage(content: "")
+
+        for step in 1...24 {
+            controller.updateDraftMessage(
+                id: draftID,
+                content: streamedMarkdown(step: step, cycle: "incremental"),
+                throttle: false
+            )
+        }
+
+        let snapshot = controller.debugSnapshot()
+        XCTAssertGreaterThan(snapshot.draftPreparedStateCount, 0)
+        XCTAssertGreaterThan(snapshot.incrementalDraftReuseCount, 0)
+        XCTAssertGreaterThan(snapshot.incrementalDraftLayoutPassCount, 0)
+    }
+
+    func testStreamingDraftLayoutPassKeepsRenderedCacheColdUntilVisibleRender() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        let draftID = controller.beginStreamingAssistantMessage(content: "")
+
+        for step in 1...12 {
+            controller.updateDraftMessage(
+                id: draftID,
+                content: streamedMarkdown(step: step, cycle: "cold-render-cache"),
+                throttle: false
+            )
+        }
+
+        let beforeVisibleRender = controller.debugSnapshot()
+        XCTAssertEqual(beforeVisibleRender.renderedMessageCacheCount, 0)
+        XCTAssertGreaterThan(beforeVisibleRender.draftPreparedStateCount, 0)
+
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        _ = controller.sceneArtifacts(at: controller.layoutCount - 1, visibleRect: visibleRect)
+        let afterVisibleRender = controller.debugSnapshot()
+        XCTAssertGreaterThan(afterVisibleRender.renderedMessageCacheCount, 0)
     }
 
     func testLongRenderedMessageProvidesVisiblePrimitiveSubset() {
@@ -221,6 +354,101 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         XCTAssertEqual(snapshot.materializedPreparedLayoutCount, 0)
     }
 
+    func testVisibleSelectionArtifactsUseBlockSubsetForLongMessage() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "selection-visible-window-message",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 220)
+        )
+
+        let rendered = renderer.renderedMessage(for: message)
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        let visibleArtifacts = renderer.selectionArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let fullArtifacts = renderer.selectionArtifacts(for: message, rendered: rendered, visibleRect: nil)
+
+        XCTAssertNotNil(visibleArtifacts)
+        XCTAssertNotNil(fullArtifacts)
+        XCTAssertLessThan(visibleArtifacts?.helper.layout.blocks.count ?? 0, fullArtifacts?.helper.layout.blocks.count ?? 0)
+        XCTAssertLessThan(visibleArtifacts?.blockRange.count ?? 0, fullArtifacts?.blockRange.count ?? 0)
+    }
+
+    func testVisibleSelectionArtifactsDoNotMaterializeResidentFullPreparedLayout() {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "selection-visible-no-full-layout",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 220)
+        )
+
+        let rendered = renderer.renderedMessage(for: message)
+        XCTAssertEqual(renderer.debugSnapshot().materializedPreparedLayoutCount, 0)
+
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        let visibleArtifacts = renderer.selectionArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let snapshot = renderer.debugSnapshot()
+
+        XCTAssertNotNil(visibleArtifacts)
+        XCTAssertGreaterThan(visibleArtifacts?.blockRange.count ?? 0, 0)
+        XCTAssertEqual(snapshot.materializedPreparedLayoutCount, 0)
+    }
+
+    func testVisibleSelectionArtifactsMatchFullSelectionRectsForSameWindow() throws {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "selection-visible-window-regression",
+            role: .assistant,
+            state: .final,
+            content: """
+            I inspected the Aizen timeline and rebuilt this transcript with the same VVDevKit presentation model:
+
+            - user messages stay in timestamped bubbles
+            - assistant output renders as an open lane
+            - tool work collapses into grouped rows with per-call detail
+            - completed turns end with a summary card
+            """
+        )
+
+        let rendered = renderer.renderedMessage(for: message)
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: 260)
+        let fullArtifacts = try XCTUnwrap(renderer.selectionArtifacts(for: message, rendered: rendered, visibleRect: nil))
+        let visibleArtifacts = try XCTUnwrap(renderer.selectionArtifacts(for: message, rendered: rendered, visibleRect: visibleRect))
+        let localStart = try XCTUnwrap(visibleArtifacts.helper.findFirstPosition())
+        let localEnd = try XCTUnwrap(visibleArtifacts.helper.findLastPosition())
+
+        let absoluteStart = MarkdownTextPosition(
+            blockIndex: visibleArtifacts.blockRange.lowerBound + localStart.blockIndex,
+            runIndex: localStart.runIndex,
+            characterOffset: localStart.characterOffset
+        )
+        let absoluteEnd = MarkdownTextPosition(
+            blockIndex: visibleArtifacts.blockRange.lowerBound + localEnd.blockIndex,
+            runIndex: localEnd.runIndex,
+            characterOffset: localEnd.characterOffset
+        )
+
+        let fullRects = fullArtifacts.helper.selectionRects(
+            from: absoluteStart,
+            to: absoluteEnd,
+            visibleYRange: visibleRect.minY...visibleRect.maxY
+        )
+        let visibleRects = visibleArtifacts.helper.selectionRects(
+            from: localStart,
+            to: localEnd,
+            visibleYRange: visibleRect.minY...visibleRect.maxY
+        )
+
+        XCTAssertEqual(visibleRects.count, fullRects.count)
+        for (visible, full) in zip(visibleRects, fullRects) {
+            XCTAssertEqual(visible.minX, full.minX, accuracy: 1.5)
+            XCTAssertEqual(visible.minY, full.minY, accuracy: 1.5)
+            XCTAssertEqual(visible.width, full.width, accuracy: 1.5)
+            XCTAssertEqual(visible.height, full.height, accuracy: 1.5)
+        }
+    }
+
     func testLargeRenderedMessagesRespectCacheCostBudgets() {
         let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
 
@@ -279,6 +507,31 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         XCTAssertLessThanOrEqual(snapshot.renderedMessageCacheEstimatedCost, snapshot.renderedMessageCacheCostLimit)
     }
 
+    func testTrimCachesDropsOffscreenChatArtifacts() {
+        let controller = makeSeededController(messageCount: 160, width: viewportSize.width)
+        for index in 0..<controller.layoutCount {
+            _ = controller.renderedMessage(at: index)
+            _ = controller.contentSceneArtifacts(at: index, visibleRect: nil)
+        }
+
+        let before = controller.debugSnapshot()
+        XCTAssertGreaterThan(before.renderedMessageCacheCount, 0)
+        XCTAssertGreaterThan(before.preparedMarkdownCacheCount, 0)
+
+        let viewport = CGRect(
+            x: 0,
+            y: max(0, controller.totalHeight - viewportSize.height),
+            width: viewportSize.width,
+            height: viewportSize.height
+        )
+        controller.trimCaches(in: viewport, overscan: 900, itemPadding: 8)
+        let after = controller.debugSnapshot()
+
+        XCTAssertLessThan(after.renderedMessageCacheCount, before.renderedMessageCacheCount)
+        XCTAssertLessThan(after.preparedMarkdownCacheCount, before.preparedMarkdownCacheCount)
+        XCTAssertLessThanOrEqual(after.sceneWindowCacheEstimatedCost, before.sceneWindowCacheEstimatedCost)
+    }
+
     func testRepeatedStreamingMemoryStabilizesAfterWarmCaches() {
         let style = VVChatTimelineStyle()
         let second = profileStreamingCycle(style: style, messageCount: 180, steps: 180, label: "second")
@@ -287,6 +540,199 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         let slack: UInt64 = 12 * 1024 * 1024
         XCTAssertLessThanOrEqual(third.retainedGrowth, second.retainedGrowth + slack)
         XCTAssertLessThanOrEqual(third.peakGrowth, second.peakGrowth + slack)
+    }
+
+    func testLayoutAnimationSnapshotsStayBoundedToVisibleWindow() {
+        let controller = makeSeededController(messageCount: 320, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+
+        let newMessage = VVChatMessage(
+            id: "snapshot-bounded-message",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 18)
+        )
+        controller.appendMessage(newMessage)
+        drainMainRunLoop(for: 0.1)
+
+        let visibleCount = max(view.debugVisibleRenderCount(), 1)
+        let snapshotCount = view.debugLayoutSnapshotCount()
+
+        XCTAssertLessThan(snapshotCount, controller.layoutCount)
+        XCTAssertLessThanOrEqual(snapshotCount, visibleCount + 64)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedViewportStaysAtBottomAcrossManyAppends() {
+        let controller = makeSeededController(messageCount: 180, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        for index in 0..<24 {
+            controller.appendMessage(
+                VVChatMessage(
+                    id: "append-\(index)",
+                    role: .assistant,
+                    state: .final,
+                    content: longMessageContent(paragraphCount: 4)
+                )
+            )
+            drainMainRunLoop(for: 0.04)
+        }
+
+        let maxOffset = max(0, controller.totalHeight - viewportSize.height)
+        let visibleOrigin = view.viewportRect.origin.y
+
+        XCTAssertTrue(controller.state.isPinnedToBottom)
+        XCTAssertEqual(visibleOrigin, maxOffset, accuracy: 2.0)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedTailAppendStartsLocalLayoutAnimationWithoutScrollAnimation() {
+        let controller = makeSeededController(messageCount: 180, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        controller.appendMessage(
+            VVChatMessage(
+                id: "tail-append-animation-check",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 8)
+            )
+        )
+        drainMainRunLoop(for: 0.05)
+
+        XCTAssertTrue(view.debugIsLayoutAnimating())
+        XCTAssertFalse(view.debugIsScrollAnimating())
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedTailAppendUsesExplicitLayoutTransitionWithoutViewportAnimation() {
+        let controller = makeSeededController(messageCount: 180, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        if let anchorID = controller.entries.last?.id {
+            controller.prepareLayoutTransition(anchorItemID: anchorID)
+        }
+        controller.appendMessage(
+            VVChatMessage(
+                id: "tail-append-explicit-transition",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 8)
+            )
+        )
+        drainMainRunLoop(for: 0.05)
+
+        XCTAssertTrue(view.debugIsLayoutAnimating())
+        XCTAssertFalse(view.debugIsScrollAnimating())
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedTailRangeReplacementUsesLocalLayoutTransitionWithoutViewportAnimation() {
+        let controller = makeSeededController(messageCount: 180, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        let groupID = "tail-tool-group"
+        let detailID = "\(groupID)::detail"
+
+        if let anchorID = controller.entries.last?.id {
+            controller.prepareLayoutTransition(anchorItemID: anchorID)
+        }
+        controller.replaceEntries(
+            in: controller.entries.count..<controller.entries.count,
+            with: [
+                .custom(VVCustomTimelineEntry(id: groupID, kind: "toolCallGroup", payload: Data("group".utf8), revision: 1)),
+                .custom(VVCustomTimelineEntry(id: detailID, kind: "toolCallDetail", payload: Data("detail".utf8), revision: 1))
+            ],
+            scrollToBottom: true,
+            markUnread: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        controller.prepareLayoutTransition(anchorItemID: groupID)
+        controller.replaceEntries(
+            in: (controller.entries.count - 2)..<controller.entries.count,
+            with: [
+                .custom(VVCustomTimelineEntry(id: groupID, kind: "toolCallGroup", payload: Data("group updated".utf8), revision: 2)),
+                .custom(VVCustomTimelineEntry(id: detailID, kind: "toolCallDetail", payload: Data("detail updated".utf8), revision: 2))
+            ],
+            scrollToBottom: true,
+            markUnread: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        let maxOffset = max(0, controller.totalHeight - viewportSize.height)
+        XCTAssertTrue(view.debugIsLayoutAnimating())
+        XCTAssertFalse(view.debugIsScrollAnimating())
+        XCTAssertEqual(view.viewportRect.origin.y, maxOffset, accuracy: 2.0)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testRenderItemUsesAnimatedSnapshotFrameDuringPinnedTailAnimation() {
+        let controller = makeSeededController(messageCount: 180, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        controller.appendMessage(
+            VVChatMessage(
+                id: "tail-append-animated-frame",
+                role: .assistant,
+                state: .final,
+                content: longMessageContent(paragraphCount: 8)
+            )
+        )
+        drainMainRunLoop(for: 0.05)
+
+        let lastIndex = controller.layoutCount - 1
+        let targetFrame = controller.itemLayout(at: lastIndex)?.frame
+        let animatedFrame = view.renderItem(at: lastIndex, visibleRect: view.viewportRect)?.frame
+
+        XCTAssertTrue(view.debugIsLayoutAnimating())
+        XCTAssertNotNil(targetFrame)
+        XCTAssertNotNil(animatedFrame)
+        if let targetFrame, let animatedFrame {
+            XCTAssertGreaterThan(abs(animatedFrame.minY - targetFrame.minY), 0.5)
+        }
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
     }
 
     func testHeadlessVisibleWindowRenderingAcrossLargeTimeline() throws {
@@ -346,6 +792,19 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
                     }
                 }
                 XCTAssertNil(renderError)
+            }
+        }
+    }
+
+    func testZBenchmarkColdControllerRebuildUsesEstimatedLayouts() {
+        measure(metrics: [XCTClockMetric()]) {
+            autoreleasepool {
+                let controller = makeSeededController(messageCount: 420, width: viewportSize.width)
+                let snapshot = controller.debugSnapshot()
+                XCTAssertEqual(snapshot.renderedMessageCacheCount, 0)
+                XCTAssertEqual(snapshot.preparedMarkdownCacheCount, 0)
+                XCTAssertEqual(controller.debugExactLayoutCount(), 0)
+                XCTAssertGreaterThan(controller.totalHeight, 0)
             }
         }
     }

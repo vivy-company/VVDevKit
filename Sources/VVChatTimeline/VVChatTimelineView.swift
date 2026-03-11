@@ -92,6 +92,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var selectionHelperCache: [SelectionHelperCacheKey: VVMarkdownSelectionHelper] = [:]
     private var selectionHelperCacheOrder: [SelectionHelperCacheKey] = []
     private let maxSelectionHelperCacheEntries = 8
+    private let layoutAnimationItemPadding = 12
+    private let layoutAnimationOverscan: CGFloat = 1400
     private var pendingEntryActivationID: String?
     private var suppressEntryActivationForCurrentClick = false
     private var didDragDuringCurrentClick = false
@@ -99,6 +101,14 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     private var pendingControllerUpdate: VVChatTimelineController.Update?
     private var hasScheduledControllerUpdateApply = false
     private var pendingControllerUpdateWorkItem: DispatchWorkItem?
+    private var pendingCacheTrimWorkItem: DispatchWorkItem?
+    private var pendingVisibleHydrationWorkItem: DispatchWorkItem?
+    private var suppressBoundsChangedDuringAnimatedScroll = false
+    private var pendingInteractiveScrollFrame = false
+    private let activeVisibleOverscan: CGFloat = 420
+    private let idleVisibleOverscan: CGFloat = 900
+    private let transitionCoordinator = VVChatTimelineTransitionCoordinator()
+    private var currentRenderSnapshot = VVChatTimelineVisibleRenderSnapshot.empty
 
     public var controller: VVChatTimelineController? {
         didSet {
@@ -129,6 +139,8 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     deinit {
         stopDisplayLink()
         pendingControllerUpdateWorkItem?.cancel()
+        pendingCacheTrimWorkItem?.cancel()
+        pendingVisibleHydrationWorkItem?.cancel()
         if let controllerObservation {
             NotificationCenter.default.removeObserver(controllerObservation)
         }
@@ -146,6 +158,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.onInteractionChange = { [weak self] isInteracting in
             self?.controller?.markUserInteraction(isInteracting)
+            if !isInteracting {
+                self?.scheduleVisibleExactHydrationIfNeeded(delay: 0.04)
+                self?.trimOffscreenCachesIfNeeded()
+            }
         }
         addSubview(scrollView)
 
@@ -181,14 +197,18 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         scrollView.frame = bounds
         updateMetalViewport()
         updateContentWidth()
-        updateVisibleRenderRange()
+        updateVisibleRenderRange(hydrateExactLayouts: shouldHydrateVisibleExactLayouts)
+        if !shouldHydrateVisibleExactLayouts {
+            scheduleVisibleExactHydrationIfNeeded()
+        }
     }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
             ensureDisplayLink()
-            updateVisibleRenderRange()
+            updateVisibleRenderRange(hydrateExactLayouts: shouldHydrateVisibleExactLayouts)
+            scheduleVisibleExactHydrationIfNeeded(delay: 0.04)
         } else {
             stopDisplayLink()
         }
@@ -198,6 +218,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         oldValue?.onUpdate = nil
         pendingControllerUpdateWorkItem?.cancel()
         pendingControllerUpdateWorkItem = nil
+        pendingCacheTrimWorkItem?.cancel()
+        pendingCacheTrimWorkItem = nil
+        pendingVisibleHydrationWorkItem?.cancel()
+        pendingVisibleHydrationWorkItem = nil
         pendingControllerUpdate = nil
         hasScheduledControllerUpdateApply = false
         didInitialScroll = false
@@ -206,6 +230,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         animatedLayoutSnapshots.removeAll(keepingCapacity: false)
         clearSelectionHelperCache()
         visibleRenderRange = 0..<0
+        currentRenderSnapshot = .empty
         isPointingCursorActive = false
         controller?.onUpdate = { [weak self] update in
             self?.enqueue(update: update)
@@ -262,8 +287,18 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     private func apply(update: VVChatTimelineController.Update) {
         guard let controller else { return }
+        pendingVisibleHydrationWorkItem?.cancel()
+        pendingVisibleHydrationWorkItem = nil
+        let wasPinnedToBottom = isViewportPinnedToBottom(
+            totalHeight: max(0, controller.totalHeight - update.heightDelta)
+        )
+        if shouldHydrateVisibleExactLayouts {
+            _ = controller.hydrateExactLayoutsSilently(
+                in: scrollView.contentView.bounds,
+                overscan: idleVisibleOverscan
+            )
+        }
         invalidateSelectionHelpers(for: update.updatedIndexes.compactMap { controller.itemLayout(at: $0)?.id })
-        let latestSnapshots = currentLayoutSnapshots()
         let style = controller.currentStyle
         if !isSameFont(style.baseFont, currentFont) {
             metalView.updateFont(style.baseFont)
@@ -271,59 +306,60 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         }
         updateDocumentHeight(controller.totalHeight)
         clampScrollIfNeeded()
-        updateVisibleRenderRange()
+        updateVisibleRenderRange(hydrateExactLayouts: false)
+        let transitionPlan = transitionCoordinator.makeUpdatePlan(
+            update: update,
+            controller: controller,
+            visibleRect: scrollView.contentView.bounds,
+            wasPinnedToBottom: wasPinnedToBottom,
+            visibleRenderRange: visibleRenderRange,
+            stableSnapshots: stableLayoutSnapshots,
+            layoutAnimationOverscan: layoutAnimationOverscan,
+            layoutAnimationItemPadding: layoutAnimationItemPadding
+        )
+        let latestSnapshots = currentLayoutSnapshots(in: transitionPlan.snapshotIndexes)
 
-        if update.heightDelta != 0,
-           let changedIndex = update.changedIndex,
-           !update.shouldScrollToBottom,
-           let layout = controller.itemLayout(at: changedIndex) {
-            compensateScrollIfNeeded(layout: layout, delta: update.heightDelta)
+        if let targetY = transitionPlan.compensatedScrollTargetY {
+            let newOrigin = CGPoint(x: scrollView.contentView.bounds.origin.x, y: targetY)
+            scrollView.contentView.scroll(to: newOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
 
-        let transition = consumePendingOrImplicitTransition(for: update, controller: controller)
-
-        if !didInitialScroll, update.totalHeight > 0 {
-            scrollToBottom(animated: false)
-            didInitialScroll = true
-        } else if update.shouldScrollToBottom, !isAnimatingJump, transition == nil {
+        if transitionPlan.shouldSuppressPinnedTailViewportMotion {
+            controller.pendingLayoutTransition = nil
+            stopScrollAnimation()
+            isAnimatingJump = false
             scrollToBottom(animated: false)
             controller.updatePinnedState(distanceFromBottom: 0)
         }
 
-        if let transition {
+        if !didInitialScroll, update.totalHeight > 0 {
+            scrollToBottom(animated: false)
+            didInitialScroll = true
+        } else if update.shouldScrollToBottom, !isAnimatingJump, transitionPlan.transition == nil {
+            scrollToBottom(animated: false)
+            controller.updatePinnedState(distanceFromBottom: 0)
+        }
+
+        if let transition = transitionPlan.transition {
             controller.pendingLayoutTransition = nil
-            let heightDelta = controller.totalHeight - transition.previousTotalHeight
-            startLayoutAnimation(
-                from: stableLayoutSnapshots,
-                to: latestSnapshots,
-                transition: transition
-            )
+            if let layoutPlan = transitionCoordinator.makeLayoutAnimationPlan(
+                previousSnapshots: stableLayoutSnapshots,
+                nextSnapshots: latestSnapshots,
+                liveSnapshots: layoutAnimator.isRunning ? layoutAnimator.state().snapshots : [:],
+                transition: transition,
+                viewportWidth: scrollView.contentView.bounds.width,
+                motion: style.motion
+            ) {
+                startLayoutAnimation(layoutPlan)
+            } else {
+                stableLayoutSnapshots = latestSnapshots
+            }
 
-            if abs(heightDelta) > 1 {
-                let visibleRect = scrollView.contentView.bounds
-                let contentHeight = max(controller.totalHeight, visibleRect.height)
-                let maxOffset = max(0, contentHeight - visibleRect.height)
-
-                if heightDelta < 0 {
-                    // Collapse: content shrank. If we're scrolled past the new max, animate to clamp.
-                    let currentY = visibleRect.origin.y
-                    let clampedY = min(currentY, maxOffset)
-                    if abs(clampedY - currentY) > 1 {
-                        isAnimatingJump = true
-                        let motion = style.motion.viewportClampAnimation
-                        animateScroll(toY: clampedY, animation: motion, token: nil) { [weak self] in
-                            self?.isAnimatingJump = false
-                        }
-                    }
-                } else {
-                    // Expand: content grew. If pinned to bottom, animate to new bottom.
-                    if controller.state.isPinnedToBottom {
-                        isAnimatingJump = true
-                        let motion = style.motion.viewportFollowAnimation
-                        animateScroll(toY: maxOffset, animation: motion, token: nil) { [weak self] in
-                            self?.isAnimatingJump = false
-                        }
-                    }
+            if let viewportAnimation = transitionPlan.viewportAnimation {
+                isAnimatingJump = true
+                animateScroll(toY: viewportAnimation.targetY, animation: viewportAnimation.animation, token: nil) { [weak self] in
+                    self?.isAnimatingJump = false
                 }
             }
         } else {
@@ -332,33 +368,10 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         }
 
         requestImagesForVisibleItems()
+        scheduleVisibleExactHydrationIfNeeded()
+        scheduleCacheTrimIfNeeded()
         metalView.setNeedsDisplay(metalView.bounds)
         onStateChange?(controller.state)
-    }
-
-    private func consumePendingOrImplicitTransition(
-        for update: VVChatTimelineController.Update,
-        controller: VVChatTimelineController
-    ) -> VVChatTimelineController.PendingLayoutTransition? {
-        if let transition = controller.pendingLayoutTransition {
-            return transition
-        }
-
-        guard update.heightDelta != 0,
-              let changedIndex = update.changedIndex,
-              let layout = controller.itemLayout(at: changedIndex) else {
-            return nil
-        }
-
-        let previousTotalHeight = max(0, controller.totalHeight - update.heightDelta)
-        let previousSnapshot = stableLayoutSnapshots[layout.id]
-        let anchorY = previousSnapshot?.frame.origin.y ?? max(0, layout.frame.origin.y - update.heightDelta)
-
-        return VVChatTimelineController.PendingLayoutTransition(
-            anchorID: layout.id,
-            anchorY: anchorY,
-            previousTotalHeight: previousTotalHeight
-        )
     }
 
     private func updateDocumentHeight(_ height: CGFloat) {
@@ -391,27 +404,24 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         }
     }
 
-    private func compensateScrollIfNeeded(layout: VVChatTimelineController.ItemLayout, delta: CGFloat) {
-        guard let controller else { return }
-        let visibleRect = scrollView.contentView.bounds
-        // Preserve viewport position only when the changed item is fully above the viewport.
-        // If the item intersects the visible region, compensating causes a perceived jump.
-        let epsilon: CGFloat = 0.5
-        if layout.frame.maxY <= visibleRect.minY + epsilon {
-            let contentHeight = max(controller.totalHeight, visibleRect.height)
-            let maxOffset = max(0, contentHeight - visibleRect.height)
-            let targetY = min(max(0, visibleRect.origin.y + delta), maxOffset)
-            let newOrigin = CGPoint(x: visibleRect.origin.x, y: targetY)
-            scrollView.contentView.scroll(to: newOrigin)
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-        }
-    }
-
     private func handleScroll() {
+        if suppressBoundsChangedDuringAnimatedScroll {
+            suppressBoundsChangedDuringAnimatedScroll = false
+            return
+        }
         guard let controller else { return }
         updateMetalViewport()
-        updateVisibleRenderRange()
+        if controller.state.userIsInteracting,
+           scrollAnimationDuration <= 0,
+           !layoutAnimator.isRunning {
+            pendingInteractiveScrollFrame = true
+            startDisplayLink()
+            return
+        }
+        updateVisibleRenderRange(hydrateExactLayouts: false)
         requestImagesForVisibleItems()
+        scheduleVisibleExactHydrationIfNeeded()
+        scheduleCacheTrimIfNeeded()
         metalView.setNeedsDisplay(metalView.bounds)
 
         // During a jump animation, skip state updates that could interfere
@@ -456,6 +466,15 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         if let controller {
             onStateChange?(controller.state)
         }
+    }
+
+    private func isViewportPinnedToBottom(totalHeight: CGFloat) -> Bool {
+        guard let controller else { return false }
+        let visibleRect = scrollView.contentView.bounds
+        let contentHeight = max(totalHeight, visibleRect.height)
+        let maxOffset = max(0, contentHeight - visibleRect.height)
+        let distanceFromBottom = max(0, maxOffset - visibleRect.origin.y)
+        return distanceFromBottom <= controller.state.pinThreshold
     }
 
     private func animateJumpToLatest() {
@@ -528,11 +547,11 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         isAnimatingJump = false
     }
 
-    private func currentLayoutSnapshots() -> [String: VVLayoutAnimationSnapshot] {
-        guard let controller else { return [:] }
+    private func currentLayoutSnapshots(in indexes: IndexSet) -> [String: VVLayoutAnimationSnapshot] {
+        guard let controller, !indexes.isEmpty else { return [:] }
         var snapshots: [String: VVLayoutAnimationSnapshot] = [:]
-        snapshots.reserveCapacity(controller.layoutCount)
-        for index in 0..<controller.layoutCount {
+        snapshots.reserveCapacity(indexes.count)
+        for index in indexes {
             guard let layout = controller.itemLayout(at: index) else { continue }
             snapshots[layout.id] = VVLayoutAnimationSnapshot(
                 id: layout.id,
@@ -543,78 +562,19 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         return snapshots
     }
 
-    private func startLayoutAnimation(
-        from previousSnapshots: [String: VVLayoutAnimationSnapshot],
-        to nextSnapshots: [String: VVLayoutAnimationSnapshot],
-        transition: VVChatTimelineController.PendingLayoutTransition
-    ) {
-        guard !nextSnapshots.isEmpty else {
-            stableLayoutSnapshots = nextSnapshots
+    private func startLayoutAnimation(_ plan: VVChatTimelineLayoutAnimationPlan) {
+        guard !plan.targetSnapshots.isEmpty else {
+            stableLayoutSnapshots = plan.targetSnapshots
             return
         }
-        let liveSnapshots = layoutAnimator.isRunning ? layoutAnimator.state().snapshots : [:]
-        let baselineSnapshots = liveSnapshots.isEmpty ? previousSnapshots : liveSnapshots
-        let anchorSnapshot = baselineSnapshots[transition.anchorID] ?? previousSnapshots[transition.anchorID]
-        let anchorFrame = anchorSnapshot?.frame ?? CGRect(x: 0, y: transition.anchorY, width: scrollView.contentView.bounds.width, height: 0)
-        var startSnapshots = baselineSnapshots
-        var targetSnapshots = nextSnapshots
-
-        for (id, nextSnapshot) in nextSnapshots where baselineSnapshots[id] == nil {
-            let insertedStartFrame = insertedItemStartFrame(for: nextSnapshot.frame, anchorFrame: anchorFrame)
-            startSnapshots[id] = VVLayoutAnimationSnapshot(
-                id: id,
-                frame: insertedStartFrame,
-                contentOffset: nextSnapshot.contentOffset,
-                transition: nextSnapshot.transition ?? controller?.currentStyle.motion.layoutTransition ?? .accordion,
-                animation: nextSnapshot.animation ?? controller?.currentStyle.motion.layoutAnimation ?? .smooth(duration: 0.2)
-            )
-            if targetSnapshots[id]?.transition == nil {
-                targetSnapshots[id]?.transition = controller?.currentStyle.motion.layoutTransition ?? .accordion
-            }
-            if targetSnapshots[id]?.animation == nil {
-                targetSnapshots[id]?.animation = controller?.currentStyle.motion.layoutAnimation ?? .smooth(duration: 0.2)
-            }
-        }
-
-        for (id, previousSnapshot) in baselineSnapshots where nextSnapshots[id] == nil {
-            let targetFrame = previousSnapshot.frame.offsetBy(dx: 0, dy: -min(max(previousSnapshot.frame.height * 0.35, 10), 24))
-            targetSnapshots[id] = VVLayoutAnimationSnapshot(
-                id: id,
-                frame: targetFrame,
-                contentOffset: previousSnapshot.contentOffset,
-                transition: previousSnapshot.transition ?? controller?.currentStyle.motion.layoutTransition ?? .accordion,
-                animation: previousSnapshot.animation ?? controller?.currentStyle.motion.layoutAnimation ?? .smooth(duration: 0.2)
-            )
-        }
-
-        let motion = controller?.currentStyle.motion ?? .init()
         layoutAnimator.start(
-            from: startSnapshots,
-            to: targetSnapshots,
-            fallbackTransition: motion.layoutTransition,
-            fallbackAnimation: motion.layoutAnimation
+            from: plan.startSnapshots,
+            to: plan.targetSnapshots,
+            fallbackTransition: plan.fallbackTransition,
+            fallbackAnimation: plan.fallbackAnimation
         )
         animatedLayoutSnapshots = layoutAnimator.state().snapshots
         startDisplayLink()
-    }
-
-    private func insertedItemStartFrame(for targetFrame: CGRect, anchorFrame: CGRect) -> CGRect {
-        let verticalShift = min(max(targetFrame.height * 0.55, 16), 42)
-        let anchorBottom = anchorFrame.maxY
-        let startY: CGFloat
-
-        if targetFrame.minY >= anchorBottom {
-            startY = max(anchorBottom - min(targetFrame.height * 0.35, 12), targetFrame.minY - verticalShift)
-        } else {
-            startY = targetFrame.minY - min(verticalShift, 28)
-        }
-
-        return CGRect(
-            x: targetFrame.origin.x,
-            y: startY,
-            width: targetFrame.width,
-            height: targetFrame.height
-        )
     }
 
     private func stopLayoutAnimation(commitTargetSnapshots: Bool = true) {
@@ -648,10 +608,11 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
         let currentY = scrollAnimationStartY + (scrollAnimationTargetY - scrollAnimationStartY) * t
         let origin = CGPoint(x: scrollView.contentView.bounds.origin.x, y: currentY)
+        suppressBoundsChangedDuringAnimatedScroll = true
         scrollView.contentView.setBoundsOrigin(origin)
         scrollView.reflectScrolledClipView(scrollView.contentView)
         updateMetalViewport()
-        updateVisibleRenderRange()
+        updateVisibleRenderRange(hydrateExactLayouts: false)
         metalView.setNeedsDisplay(metalView.bounds)
 
         if progress >= 1.0 {
@@ -698,19 +659,125 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         if layoutAnimator.isRunning {
             layoutAnimationTick(at: now)
         }
-        if scrollAnimationDuration <= 0 && !layoutAnimator.isRunning {
+        if pendingInteractiveScrollFrame {
+            flushInteractiveScrollFrame()
+        }
+        if scrollAnimationDuration <= 0 &&
+            !layoutAnimator.isRunning &&
+            !pendingInteractiveScrollFrame {
             stopDisplayLink()
+            scheduleVisibleExactHydrationIfNeeded(delay: 0.03)
         }
     }
 
-    private func updateVisibleRenderRange() {
+    private func flushInteractiveScrollFrame() {
+        pendingInteractiveScrollFrame = false
+        guard let controller else { return }
+        updateVisibleRenderRange(hydrateExactLayouts: false)
+        requestImagesForVisibleItems()
+        metalView.setNeedsDisplay(metalView.bounds)
+
+        // During a jump animation, skip state updates that could interfere
+        // with the in-flight scroll. Only update the viewport for rendering.
+        guard !isAnimatingJump else { return }
+
+        let visibleRect = scrollView.contentView.bounds
+        let contentHeight = max(controller.totalHeight, visibleRect.height)
+        let maxOffset = max(0, contentHeight - visibleRect.height)
+        let distanceFromBottom = maxOffset - visibleRect.origin.y
+        controller.updatePinnedState(distanceFromBottom: distanceFromBottom)
+        onStateChange?(controller.state)
+    }
+
+    private var shouldHydrateVisibleExactLayouts: Bool {
+        guard let controller else { return false }
+        return !controller.state.userIsInteracting && scrollAnimationDuration <= 0 && !layoutAnimator.isRunning
+    }
+
+    private func currentVisibleOverscan() -> CGFloat {
+        shouldHydrateVisibleExactLayouts ? idleVisibleOverscan : activeVisibleOverscan
+    }
+
+    private func updateVisibleRenderRange(hydrateExactLayouts: Bool) {
         guard let controller else {
             visibleRenderRange = 0..<0
+            currentRenderSnapshot = .empty
             return
         }
         let viewport = scrollView.contentView.bounds
-        let overscan: CGFloat = 900
-        visibleRenderRange = controller.visibleLayoutRange(in: viewport, overscan: overscan)
+        let overscan = currentVisibleOverscan()
+        let snapshot = controller.visibleRenderSnapshot(
+            in: viewport,
+            overscan: overscan,
+            shouldHydrateExactLayouts: hydrateExactLayouts
+        )
+        visibleRenderRange = snapshot.range
+        currentRenderSnapshot = snapshot
+    }
+
+    private func scheduleVisibleExactHydrationIfNeeded(delay: TimeInterval = 0.12) {
+        pendingVisibleHydrationWorkItem?.cancel()
+        guard controller != nil else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, let controller else {
+                self?.pendingVisibleHydrationWorkItem = nil
+                return
+            }
+            guard self.shouldHydrateVisibleExactLayouts else {
+                self.pendingVisibleHydrationWorkItem = nil
+                self.scheduleVisibleExactHydrationIfNeeded(delay: 0.08)
+                return
+            }
+            self.pendingVisibleHydrationWorkItem = nil
+            let viewport = self.scrollView.contentView.bounds
+            let overscan = self.idleVisibleOverscan
+            if controller.hydrateExactLayoutsSilently(in: viewport, overscan: overscan) {
+                self.updateDocumentHeight(controller.totalHeight)
+                self.clampScrollIfNeeded()
+                self.updateVisibleRenderRange(hydrateExactLayouts: false)
+                self.requestImagesForVisibleItems()
+                self.metalView.setNeedsDisplay(self.metalView.bounds)
+            }
+        }
+        pendingVisibleHydrationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func trimOffscreenCachesIfNeeded() {
+        guard let controller, !controller.state.userIsInteracting else { return }
+        controller.trimCaches(in: scrollView.contentView.bounds, overscan: 1200, itemPadding: 16)
+    }
+
+    private func scheduleCacheTrimIfNeeded(delay: TimeInterval = 0.22) {
+        pendingCacheTrimWorkItem?.cancel()
+        guard let controller,
+              !controller.state.userIsInteracting,
+              scrollAnimationDuration <= 0,
+              !layoutAnimator.isRunning else {
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.pendingCacheTrimWorkItem = nil
+            self?.trimOffscreenCachesIfNeeded()
+        }
+        pendingCacheTrimWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    func debugLayoutSnapshotCount() -> Int {
+        max(stableLayoutSnapshots.count, animatedLayoutSnapshots.count)
+    }
+
+    func debugVisibleRenderCount() -> Int {
+        visibleRenderRange.count
+    }
+
+    func debugIsLayoutAnimating() -> Bool {
+        layoutAnimator.isRunning
+    }
+
+    func debugIsScrollAnimating() -> Bool {
+        scrollAnimationDuration > 0
     }
 
     private func clearSelectionHelperCache() {
@@ -725,7 +792,7 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         selectionHelperCacheOrder.removeAll { ids.contains($0.messageID) }
     }
 
-    private func cachedSelectionHelper(itemIndex: Int, messageID: String, revision: Int) -> VVMarkdownSelectionHelper? {
+    private func cachedFullSelectionHelper(itemIndex: Int, messageID: String, revision: Int) -> VVMarkdownSelectionHelper? {
         let key = SelectionHelperCacheKey(messageID: messageID, revision: revision)
         if let cached = selectionHelperCache[key] {
             touchSelectionHelperCache(key)
@@ -746,6 +813,53 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         return helper
     }
 
+    private func visibleSelectionArtifacts(
+        itemIndex: Int,
+        visibleRect: CGRect
+    ) -> VVChatSelectionArtifacts? {
+        controller?.selectionArtifacts(at: itemIndex, visibleRect: visibleRect)
+    }
+
+    private func absoluteMarkdownPosition(
+        from local: MarkdownTextPosition,
+        blockRange: Range<Int>
+    ) -> MarkdownTextPosition {
+        MarkdownTextPosition(
+            blockIndex: blockRange.lowerBound + local.blockIndex,
+            runIndex: local.runIndex,
+            characterOffset: local.characterOffset
+        )
+    }
+
+    private func localMarkdownPosition(
+        from absolute: MarkdownTextPosition,
+        artifacts: VVChatSelectionArtifacts
+    ) -> MarkdownTextPosition? {
+        guard artifacts.blockRange.contains(absolute.blockIndex) else { return nil }
+        return MarkdownTextPosition(
+            blockIndex: absolute.blockIndex - artifacts.blockRange.lowerBound,
+            runIndex: absolute.runIndex,
+            characterOffset: absolute.characterOffset
+        )
+    }
+
+    private func clippedMarkdownPosition(
+        from absolute: MarkdownTextPosition,
+        artifacts: VVChatSelectionArtifacts,
+        preferLowerBound: Bool
+    ) -> MarkdownTextPosition? {
+        if let local = localMarkdownPosition(from: absolute, artifacts: artifacts) {
+            return local
+        }
+        if absolute.blockIndex < artifacts.blockRange.lowerBound {
+            return preferLowerBound ? artifacts.helper.findFirstPosition() : nil
+        }
+        if absolute.blockIndex >= artifacts.blockRange.upperBound {
+            return preferLowerBound ? nil : artifacts.helper.findLastPosition()
+        }
+        return nil
+    }
+
     private func touchSelectionHelperCache(_ key: SelectionHelperCacheKey) {
         selectionHelperCacheOrder.removeAll { $0 == key }
         selectionHelperCacheOrder.append(key)
@@ -762,51 +876,38 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     // MARK: - VVChatTimelineRenderDataSource
 
     public var renderItemCount: Int {
-        controller?.layoutCount ?? 0
+        currentRenderSnapshot.range.upperBound
     }
 
     public func visibleRenderIndexes() -> Range<Int> {
-        visibleRenderRange
+        currentRenderSnapshot.range
     }
 
     public func renderItem(at index: Int, visibleRect: CGRect) -> VVChatTimelineRenderItem? {
-        guard let controller,
-              let layout = controller.itemLayout(at: index),
-              controller.messages.indices.contains(index),
-              let rendered = controller.renderedMessage(at: index) else { return nil }
-        let snapshot = animatedLayoutSnapshots[layout.id] ?? stableLayoutSnapshots[layout.id]
-        let resolvedFrame = snapshot?.frame ?? layout.frame
-        let resolvedContentOffset = snapshot?.contentOffset ?? layout.contentOffset
-        let itemVisibleRect = visibleRect.offsetBy(
-            dx: -resolvedFrame.origin.x - resolvedContentOffset.x,
-            dy: -resolvedFrame.origin.y - resolvedContentOffset.y
+        _ = visibleRect
+        guard let item = currentRenderSnapshot.item(at: index) else { return nil }
+        guard layoutAnimator.isRunning, let snapshot = animatedLayoutSnapshots[item.id] else {
+            return item
+        }
+        let contentDelta = CGPoint(
+            x: snapshot.contentOffset.x - item.contentOffset.x,
+            y: snapshot.contentOffset.y - item.contentOffset.y
         )
-        var layers: [VVChatTimelineRenderLayer] = [
-            VVChatTimelineRenderLayer(
-                offset: resolvedContentOffset,
-                scene: rendered.chromeScene,
-                orderedPrimitiveIndices: rendered.chromeOrderedPrimitiveIndices,
-                visibilityIndex: rendered.chromeVisibilityIndex
-            )
-        ]
-        if let contentArtifacts = controller.contentSceneArtifacts(at: index, visibleRect: itemVisibleRect) {
-            layers.append(
+        return VVChatTimelineRenderItem(
+            id: item.id,
+            frame: snapshot.frame,
+            contentOffset: snapshot.contentOffset,
+            layers: item.layers.map { layer in
                 VVChatTimelineRenderLayer(
                     offset: CGPoint(
-                        x: resolvedContentOffset.x + rendered.selectionContentOffset.x,
-                        y: resolvedContentOffset.y + rendered.selectionContentOffset.y
+                        x: layer.offset.x + contentDelta.x,
+                        y: layer.offset.y + contentDelta.y
                     ),
-                    scene: contentArtifacts.scene,
-                    orderedPrimitiveIndices: contentArtifacts.orderedPrimitiveIndices,
-                    visibilityIndex: contentArtifacts.visibilityIndex
+                    scene: layer.scene,
+                    orderedPrimitiveIndices: layer.orderedPrimitiveIndices,
+                    visibilityIndex: layer.visibilityIndex
                 )
-            )
-        }
-        return VVChatTimelineRenderItem(
-            id: layout.id,
-            frame: resolvedFrame,
-            contentOffset: resolvedContentOffset,
-            layers: layers
+            }
         )
     }
 
@@ -828,12 +929,9 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func requestImagesForVisibleItems() {
-        guard let controller, let imageStore else { return }
-        for index in visibleRenderRange {
-            guard let rendered = controller.renderedMessage(at: index) else { continue }
-            for url in rendered.imageURLs {
-                imageStore.ensureImage(url: url)
-            }
+        guard let imageStore else { return }
+        for url in currentRenderSnapshot.imageURLs {
+            imageStore.ensureImage(url: url)
         }
     }
 
@@ -852,31 +950,67 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
 
     public func selectionQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] {
         guard let selection = selectionController.selection else { return [] }
-        guard let controller else { return [] }
-        guard index < controller.messages.count else { return [] }
-
-        guard let layout = controller.itemLayout(at: index) else { return [] }
-        guard let rendered = controller.renderedMessage(at: index) else { return [] }
+        guard let resolvedItem = controller?.resolvedRenderItem(
+            at: index,
+            hydrateExactLayoutIfNeeded: true
+        ) else {
+            return []
+        }
 
         let (start, end) = selection.ordered
         guard start.itemIndex <= index && end.itemIndex >= index else { return [] }
 
-        guard let helper = cachedSelectionHelper(itemIndex: index, messageID: layout.id, revision: rendered.revision) else {
+        let contentOffset = resolvedItem.rendered.selectionContentOffset
+        let localVisibleYRange = (viewportRect.minY - itemOffset.y - contentOffset.y)...(viewportRect.maxY - itemOffset.y - contentOffset.y)
+        let localVisibleRect = CGRect(
+            x: 0,
+            y: localVisibleYRange.lowerBound,
+            width: max(1, viewportRect.width),
+            height: max(1, localVisibleYRange.upperBound - localVisibleYRange.lowerBound)
+        )
+        guard let artifacts = visibleSelectionArtifacts(itemIndex: index, visibleRect: localVisibleRect) else {
             return []
         }
+        let helper = artifacts.helper
 
         // Map chat positions to markdown positions for the item
         let mdStart: MarkdownTextPosition
         let mdEnd: MarkdownTextPosition
         if start.itemIndex == index && end.itemIndex == index {
-            mdStart = start.markdownPosition
-            mdEnd = end.markdownPosition
+            guard let localStart = clippedMarkdownPosition(
+                from: start.markdownPosition,
+                artifacts: artifacts,
+                preferLowerBound: true
+            ), let localEnd = clippedMarkdownPosition(
+                from: end.markdownPosition,
+                artifacts: artifacts,
+                preferLowerBound: false
+            ) else {
+                return []
+            }
+            mdStart = localStart
+            mdEnd = localEnd
         } else if start.itemIndex == index {
-            mdStart = start.markdownPosition
-            mdEnd = helper.findLastPosition() ?? start.markdownPosition
+            guard let localStart = clippedMarkdownPosition(
+                from: start.markdownPosition,
+                artifacts: artifacts,
+                preferLowerBound: true
+            ) else {
+                return []
+            }
+            mdStart = localStart
+            mdEnd = helper.findLastPosition() ?? localStart
         } else if end.itemIndex == index {
-            mdStart = helper.findFirstPosition() ?? end.markdownPosition
-            mdEnd = end.markdownPosition
+            guard let first = helper.findFirstPosition() else { return [] }
+            mdStart = first
+            guard let localEnd = clippedMarkdownPosition(
+                from: end.markdownPosition,
+                artifacts: artifacts,
+                preferLowerBound: false
+            ) else {
+                return []
+            }
+            mdEnd = localEnd
         } else {
             // Entire item is selected
             guard let first = helper.findFirstPosition(), let last = helper.findLastPosition() else { return [] }
@@ -884,8 +1018,6 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
             mdEnd = last
         }
 
-        let contentOffset = rendered.selectionContentOffset
-        let localVisibleYRange = (viewportRect.minY - itemOffset.y - contentOffset.y)...(viewportRect.maxY - itemOffset.y - contentOffset.y)
         let rects = helper.selectionRects(from: mdStart, to: mdEnd, visibleYRange: localVisibleYRange)
         return rects.map { rect in
             VVQuadPrimitive(
@@ -897,18 +1029,16 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     public func hoverQuads(forItemAt index: Int, itemOffset: CGPoint) -> [VVQuadPrimitive] {
-        guard let controller,
-              let hoveredInteractiveRegionKey,
-              let layout = controller.itemLayout(at: index),
-              let rendered = controller.renderedMessage(at: index) else {
+        guard let hoveredInteractiveRegionKey,
+              let resolvedItem = controller?.resolvedRenderItem(at: index) else {
             return []
         }
 
-        return rendered.interactiveRegions.compactMap { region in
+        return resolvedItem.rendered.interactiveRegions.compactMap { region in
             guard let hoverFillColor = region.hoverFillColor else {
                 return nil
             }
-            let key = interactiveRegionKey(messageID: layout.id, regionID: region.id)
+            let key = interactiveRegionKey(messageID: resolvedItem.layout.id, regionID: region.id)
             guard key == hoveredInteractiveRegionKey else { return nil }
             return VVQuadPrimitive(
                 frame: region.frame.offsetBy(dx: itemOffset.x, dy: itemOffset.y),
@@ -941,12 +1071,13 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         var result: [String] = []
 
         for itemIndex in start.itemIndex...min(end.itemIndex, controller.layoutCount - 1) {
-            guard itemIndex < controller.messages.count else { continue }
+            guard let resolvedItem = controller.resolvedRenderItem(at: itemIndex) else { continue }
 
-            guard let layout = controller.itemLayout(at: itemIndex),
-                  let rendered = controller.renderedMessage(at: itemIndex) else { continue }
-
-            guard let helper = cachedSelectionHelper(itemIndex: itemIndex, messageID: layout.id, revision: rendered.revision) else {
+            guard let helper = cachedFullSelectionHelper(
+                itemIndex: itemIndex,
+                messageID: resolvedItem.layout.id,
+                revision: resolvedItem.rendered.revision
+            ) else {
                 continue
             }
 
@@ -1001,10 +1132,12 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         // Find first valid position
         var firstPos: ChatTextPosition?
         for i in 0..<controller.layoutCount {
-            guard i < controller.messages.count else { continue }
-            guard let layout = controller.itemLayout(at: i),
-                  let rendered = controller.renderedMessage(at: i) else { continue }
-            guard let helper = cachedSelectionHelper(itemIndex: i, messageID: layout.id, revision: rendered.revision) else {
+            guard let resolvedItem = controller.resolvedRenderItem(at: i) else { continue }
+            guard let helper = cachedFullSelectionHelper(
+                itemIndex: i,
+                messageID: resolvedItem.layout.id,
+                revision: resolvedItem.rendered.revision
+            ) else {
                 continue
             }
             if let pos = helper.findFirstPosition() {
@@ -1016,10 +1149,12 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
         // Find last valid position
         var lastPos: ChatTextPosition?
         for i in stride(from: controller.layoutCount - 1, through: 0, by: -1) {
-            guard i < controller.messages.count else { continue }
-            guard let layout = controller.itemLayout(at: i),
-                  let rendered = controller.renderedMessage(at: i) else { continue }
-            guard let helper = cachedSelectionHelper(itemIndex: i, messageID: layout.id, revision: rendered.revision) else {
+            guard let resolvedItem = controller.resolvedRenderItem(at: i) else { continue }
+            guard let helper = cachedFullSelectionHelper(
+                itemIndex: i,
+                messageID: resolvedItem.layout.id,
+                revision: resolvedItem.rendered.revision
+            ) else {
                 continue
             }
             if let pos = helper.findLastPosition() {
@@ -1109,25 +1244,28 @@ private extension VVChatTimelineView {
     private func interactionContext(at point: CGPoint) -> TimelineInteractionContext? {
         guard let controller else { return nil }
         let documentPoint = viewPointToDocumentPoint(point)
-        guard let itemIndex = itemIndex(containingDocumentPoint: documentPoint),
-              let layout = controller.itemLayout(at: itemIndex),
-              controller.messages.indices.contains(itemIndex),
-              let rendered = controller.renderedMessage(at: itemIndex) else {
+        guard let itemIndex = itemIndex(containingDocumentPoint: documentPoint) else {
+            return nil
+        }
+        guard let resolvedItem = controller.resolvedRenderItem(
+            at: itemIndex,
+            hydrateExactLayoutIfNeeded: true
+        ) else {
             return nil
         }
 
-        let contentOffset = rendered.selectionContentOffset
+        let contentOffset = resolvedItem.rendered.selectionContentOffset
         let localPoint = CGPoint(
-            x: documentPoint.x - layout.frame.origin.x - layout.contentOffset.x - contentOffset.x,
-            y: documentPoint.y - layout.frame.origin.y - layout.contentOffset.y - contentOffset.y
+            x: documentPoint.x - resolvedItem.layout.frame.origin.x - resolvedItem.layout.contentOffset.x - contentOffset.x,
+            y: documentPoint.y - resolvedItem.layout.frame.origin.y - resolvedItem.layout.contentOffset.y - contentOffset.y
         )
 
         return TimelineInteractionContext(
             documentPoint: documentPoint,
             itemIndex: itemIndex,
-            layout: layout,
-            message: controller.messages[itemIndex],
-            rendered: rendered,
+            layout: resolvedItem.layout,
+            message: resolvedItem.item.message,
+            rendered: resolvedItem.rendered,
             localPoint: localPoint
         )
     }
@@ -1143,14 +1281,19 @@ private extension VVChatTimelineView {
     }
 
     private func linkURL(in context: TimelineInteractionContext) -> String? {
-        guard let helper = cachedSelectionHelper(
+        let localVisibleRect = CGRect(
+            x: 0,
+            y: viewportRect.minY - context.layout.frame.origin.y - context.layout.contentOffset.y - context.rendered.selectionContentOffset.y,
+            width: max(1, viewportRect.width),
+            height: max(1, viewportRect.height)
+        )
+        guard let artifacts = visibleSelectionArtifacts(
             itemIndex: context.itemIndex,
-            messageID: context.layout.id,
-            revision: context.rendered.revision
+            visibleRect: localVisibleRect
         ) else {
             return nil
         }
-        return helper.linkURL(at: context.localPoint)
+        return artifacts.helper.linkURL(at: context.localPoint)
     }
 
     private func interactiveRegionHit(in context: TimelineInteractionContext) -> (messageID: String, region: VVChatInteractiveRegion)? {
@@ -1272,29 +1415,39 @@ extension VVChatTimelineView: VVTextHitTestable {
             targetItemIndex = itemIndex(containingDocumentPoint: docPoint)
         }
         guard let targetItemIndex,
-              let layout = controller.itemLayout(at: targetItemIndex),
-              let rendered = controller.renderedMessage(at: targetItemIndex) else { return nil }
+              let resolvedItem = controller.resolvedRenderItem(
+                at: targetItemIndex,
+                hydrateExactLayoutIfNeeded: true
+              ) else { return nil }
 
         // Convert to item-local coordinates
-        let contentOffset = rendered.selectionContentOffset
+        let contentOffset = resolvedItem.rendered.selectionContentOffset
         let localPoint = CGPoint(
-            x: docPoint.x - layout.frame.origin.x - layout.contentOffset.x - contentOffset.x,
-            y: docPoint.y - layout.frame.origin.y - layout.contentOffset.y - contentOffset.y
+            x: docPoint.x - resolvedItem.layout.frame.origin.x - resolvedItem.layout.contentOffset.x - contentOffset.x,
+            y: docPoint.y - resolvedItem.layout.frame.origin.y - resolvedItem.layout.contentOffset.y - contentOffset.y
         )
 
-        guard let helper = cachedSelectionHelper(itemIndex: targetItemIndex, messageID: layout.id, revision: rendered.revision) else {
+        let localVisibleRect = CGRect(
+            x: 0,
+            y: viewportRect.minY - resolvedItem.layout.frame.origin.y - resolvedItem.layout.contentOffset.y - contentOffset.y,
+            width: max(1, viewportRect.width),
+            height: max(1, viewportRect.height)
+        )
+        guard let artifacts = visibleSelectionArtifacts(itemIndex: targetItemIndex, visibleRect: localVisibleRect) else {
             return nil
         }
+        let helper = artifacts.helper
         let markdownPosition = preferNearest
             ? helper.nearestTextPosition(to: localPoint)
             : helper.hitTest(at: localPoint)
         guard let mdPos = markdownPosition else { return nil }
+        let absolute = absoluteMarkdownPosition(from: mdPos, blockRange: artifacts.blockRange)
 
         return ChatTextPosition(
             itemIndex: targetItemIndex,
-            blockIndex: mdPos.blockIndex,
-            runIndex: mdPos.runIndex,
-            characterOffset: mdPos.characterOffset
+            blockIndex: absolute.blockIndex,
+            runIndex: absolute.runIndex,
+            characterOffset: absolute.characterOffset
         )
     }
 }
