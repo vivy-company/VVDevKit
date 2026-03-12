@@ -21,19 +21,42 @@ public struct VVDiffRenderResult: Sendable {
     }
 }
 
+public enum VVDiffChangeIndicatorStyle: String, CaseIterable, Hashable, Sendable {
+    case bars
+    case classic
+    case none
+}
+
+public enum VVDiffInlineHighlightStyle: String, CaseIterable, Hashable, Sendable {
+    case word
+    case off
+}
+
 public struct VVDiffRenderOptions: Hashable, Sendable {
     public var showsFileHeaders: Bool
     public var showsMetadata: Bool
     public var showsHunkHeaders: Bool
+    public var showsLineNumbers: Bool
+    public var showsBackgrounds: Bool
+    public var changeIndicatorStyle: VVDiffChangeIndicatorStyle
+    public var inlineHighlightStyle: VVDiffInlineHighlightStyle
 
     public init(
         showsFileHeaders: Bool = true,
         showsMetadata: Bool = true,
-        showsHunkHeaders: Bool = true
+        showsHunkHeaders: Bool = true,
+        showsLineNumbers: Bool = true,
+        showsBackgrounds: Bool = true,
+        changeIndicatorStyle: VVDiffChangeIndicatorStyle = .bars,
+        inlineHighlightStyle: VVDiffInlineHighlightStyle = .word
     ) {
         self.showsFileHeaders = showsFileHeaders
         self.showsMetadata = showsMetadata
         self.showsHunkHeaders = showsHunkHeaders
+        self.showsLineNumbers = showsLineNumbers
+        self.showsBackgrounds = showsBackgrounds
+        self.changeIndicatorStyle = changeIndicatorStyle
+        self.inlineHighlightStyle = inlineHighlightStyle
     }
 
     public static let full = VVDiffRenderOptions()
@@ -435,6 +458,10 @@ private func makeRenderCacheKey(
     hasher.combine(options.showsFileHeaders)
     hasher.combine(options.showsMetadata)
     hasher.combine(options.showsHunkHeaders)
+    hasher.combine(options.showsLineNumbers)
+    hasher.combine(options.showsBackgrounds)
+    hasher.combine(options.changeIndicatorStyle)
+    hasher.combine(options.inlineHighlightStyle)
     hasher.combine(theme.codeColor.x)
     hasher.combine(theme.codeColor.y)
     hasher.combine(theme.codeColor.z)
@@ -588,6 +615,9 @@ private func makeSplitRows(from rows: [ParsedDiffRow]) -> [ParsedDiffSplitRow] {
                 i += 1
             }
             var j = i
+            while j < rows.count, rows[j].kind == .metadata {
+                j += 1
+            }
             while j < rows.count, rows[j].kind == .added {
                 addedRows.append(rows[j])
                 j += 1
@@ -804,6 +834,20 @@ private typealias MDLayoutGlyph = LayoutGlyph
 private typealias MDFontVariant = FontVariant
 
 private final class DiffSceneBuilder {
+    private struct EmptyPaneHatchCacheKey: Hashable {
+        let widthKey: Int
+        let heightKey: Int
+        let phaseKey: Int
+        let thicknessKey: Int
+        let spacingKey: Int
+    }
+
+    private struct CachedEmptyPaneHatchGeometry {
+        let vertices: [VVPathVertex]
+        let fillVertexCount: Int
+        let bounds: CGRect
+    }
+
     private struct LineNumberGlyphCacheKey: Hashable {
         let text: String
         let color: SIMD4<Float>
@@ -824,6 +868,8 @@ private final class DiffSceneBuilder {
     let codeInsetX: CGFloat = 10
     let highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
     private var lineNumberGlyphCache: [LineNumberGlyphCacheKey: [MDLayoutGlyph]] = [:]
+    private static let emptyPaneHatchCacheLock = NSLock()
+    private static var emptyPaneHatchCache: [EmptyPaneHatchCacheKey: CachedEmptyPaneHatchGeometry] = [:]
 
     var textColor: SIMD4<Float>
     var backgroundColor: SIMD4<Float>
@@ -869,12 +915,15 @@ private final class DiffSceneBuilder {
         self.deletedBgColor = isLight
             ? SIMD4<Float>(0.98, 0.90, 0.90, 1.0)
             : SIMD4<Float>(0.27, 0.12, 0.13, 0.92)
+        let emptyPaneTint = isLight
+            ? blended(theme.codeBackgroundColor, theme.codeGutterTextColor, 0.18)
+            : blended(theme.codeBackgroundColor, theme.codeGutterTextColor, 0.24)
         self.emptyPaneBgColor = isLight
-            ? blended(theme.codeBackgroundColor, theme.codeGutterBackgroundColor, 0.52)
-            : blended(theme.codeBackgroundColor, theme.codeHeaderBackgroundColor, 0.32)
+            ? blended(theme.codeBackgroundColor, emptyPaneTint, 0.16)
+            : blended(theme.codeBackgroundColor, emptyPaneTint, 0.18)
         self.emptyPaneGuideColor = isLight
-            ? blended(emptyPaneBgColor, theme.codeHeaderDividerColor, 0.72)
-            : blended(emptyPaneBgColor, theme.codeBorderColor, 0.78)
+            ? withAlpha(blended(emptyPaneTint, theme.codeGutterTextColor, 0.24), 0.24)
+            : withAlpha(blended(emptyPaneTint, theme.codeGutterTextColor, 0.32), 0.28)
         self.addedMarkerColor = isLight
             ? SIMD4<Float>(0.11, 0.57, 0.25, 1.0)
             : SIMD4<Float>(0.43, 0.86, 0.56, 1.0)
@@ -932,23 +981,41 @@ private final class DiffSceneBuilder {
                 )
             }
 
-            for (paneX, isEmpty) in [
-                (CGFloat(0), { (item: CollectedSplit) in item.splitRow.left == nil }),
-                (layout.metrics.columnWidth, { (item: CollectedSplit) in item.splitRow.right == nil })
+            func emptySegment(
+                for item: CollectedSplit,
+                wrappedLineCount: Int,
+                hasCell: Bool
+            ) -> (startY: CGFloat, endY: CGFloat)? {
+                let logicalLineCount = max(1, max(item.leftWrappedLines.count, item.rightWrappedLines.count))
+                let occupiedLineCount = hasCell ? wrappedLineCount : 0
+                guard occupiedLineCount < logicalLineCount else { return nil }
+                return (
+                    startY: item.y + CGFloat(occupiedLineCount) * lineHeight,
+                    endY: item.y + item.height
+                )
+            }
+
+            for (paneX, segmentForItem) in [
+                (CGFloat(0), { (item: CollectedSplit) in
+                    emptySegment(for: item, wrappedLineCount: item.leftWrappedLines.count, hasCell: item.splitRow.left != nil)
+                }),
+                (layout.metrics.columnWidth, { (item: CollectedSplit) in
+                    emptySegment(for: item, wrappedLineCount: item.rightWrappedLines.count, hasCell: item.splitRow.right != nil)
+                })
             ] {
                 var runStartY: CGFloat?
                 var runEndY: CGFloat?
                 for item in collectedSplits {
-                    if isEmpty(item) {
+                    if let segment = segmentForItem(item) {
                         if runStartY == nil {
-                            runStartY = item.y
-                            runEndY = item.y + item.height
-                        } else if let endY = runEndY, abs(item.y - endY) < 0.5 {
-                            runEndY = item.y + item.height
+                            runStartY = segment.startY
+                            runEndY = segment.endY
+                        } else if let endY = runEndY, abs(segment.startY - endY) < 0.5 {
+                            runEndY = segment.endY
                         } else {
                             emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
-                            runStartY = item.y
-                            runEndY = item.y + item.height
+                            runStartY = segment.startY
+                            runEndY = segment.endY
                         }
                     } else {
                         emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
@@ -1001,6 +1068,7 @@ private final class DiffSceneBuilder {
                         y: block.y,
                         width: layout.metrics.totalWidth,
                         height: block.height,
+                        options: options,
                         gutterColWidth: layout.metrics.gutterColWidth,
                         markerWidth: layout.metrics.markerWidth,
                         codeStartX: layout.metrics.codeStartX,
@@ -1044,11 +1112,11 @@ private final class DiffSceneBuilder {
                 // across contiguous runs after block collection.
                 buildSplitCellBackground(
                     cell: splitRow.left, y: block.y, paneX: 0,
-                    paneWidth: layout.metrics.columnWidth, height: block.height, builder: &builder
+                    paneWidth: layout.metrics.columnWidth, height: block.height, options: options, builder: &builder
                 )
                 buildSplitCellBackground(
                     cell: splitRow.right, y: block.y, paneX: layout.metrics.columnWidth,
-                    paneWidth: layout.metrics.columnWidth, height: block.height, builder: &builder
+                    paneWidth: layout.metrics.columnWidth, height: block.height, options: options, builder: &builder
                 )
 
                 collectedSplits.append(CollectedSplit(
@@ -1075,6 +1143,7 @@ private final class DiffSceneBuilder {
                     buildSplitCellContent(
                         cell: cell, wrappedLines: item.leftWrappedLines,
                         y: item.y, paneX: 0, paneWidth: columnWidth, height: item.height,
+                        options: options,
                         gutterColWidth: layout.metrics.gutterColWidth,
                         markerWidth: layout.metrics.markerWidth,
                         codeStartX: layout.metrics.codeStartX, builder: &builder
@@ -1089,6 +1158,7 @@ private final class DiffSceneBuilder {
                     buildSplitCellContent(
                         cell: cell, wrappedLines: item.rightWrappedLines,
                         y: item.y, paneX: columnWidth, paneWidth: columnWidth, height: item.height,
+                        options: options,
                         gutterColWidth: layout.metrics.gutterColWidth,
                         markerWidth: layout.metrics.markerWidth,
                         codeStartX: layout.metrics.codeStartX, builder: &builder
@@ -1158,6 +1228,7 @@ private final class DiffSceneBuilder {
                         y: y,
                         width: width,
                         height: rowHeight,
+                        options: options,
                         gutterColWidth: gutterColWidth,
                         markerWidth: markerWidth,
                         codeStartX: codeStartX,
@@ -1216,23 +1287,41 @@ private final class DiffSceneBuilder {
                 )
             }
 
-            for (paneX, isEmpty) in [
-                (CGFloat(0), { (item: CollectedSplit) in item.leftCell == nil }),
-                (columnWidth, { (item: CollectedSplit) in item.rightCell == nil })
+            func emptySegment(
+                for item: CollectedSplit,
+                wrappedLineCount: Int,
+                hasCell: Bool
+            ) -> (startY: CGFloat, endY: CGFloat)? {
+                let logicalLineCount = max(1, max(item.leftWrappedLines.count, item.rightWrappedLines.count))
+                let occupiedLineCount = hasCell ? wrappedLineCount : 0
+                guard occupiedLineCount < logicalLineCount else { return nil }
+                return (
+                    startY: item.y + CGFloat(occupiedLineCount) * lineHeight,
+                    endY: item.y + item.height
+                )
+            }
+
+            for (paneX, segmentForItem) in [
+                (CGFloat(0), { (item: CollectedSplit) in
+                    emptySegment(for: item, wrappedLineCount: item.leftWrappedLines.count, hasCell: item.leftCell != nil)
+                }),
+                (columnWidth, { (item: CollectedSplit) in
+                    emptySegment(for: item, wrappedLineCount: item.rightWrappedLines.count, hasCell: item.rightCell != nil)
+                })
             ] {
                 var runStartY: CGFloat?
                 var runEndY: CGFloat?
                 for item in collectedSplits {
-                    if isEmpty(item) {
+                    if let segment = segmentForItem(item) {
                         if runStartY == nil {
-                            runStartY = item.y
-                            runEndY = item.y + item.height
-                        } else if let endY = runEndY, abs(item.y - endY) < 0.5 {
-                            runEndY = item.y + item.height
+                            runStartY = segment.startY
+                            runEndY = segment.endY
+                        } else if let endY = runEndY, abs(segment.startY - endY) < 0.5 {
+                            runEndY = segment.endY
                         } else {
                             emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
-                            runStartY = item.y
-                            runEndY = item.y + item.height
+                            runStartY = segment.startY
+                            runEndY = segment.endY
                         }
                     } else {
                         emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
@@ -1292,8 +1381,8 @@ private final class DiffSceneBuilder {
                     // across contiguous runs after row collection.
                     let leftCell = includesLeft ? splitRow.left : nil
                     let rightCell = includesRight ? splitRow.right : nil
-                    buildSplitCellBackground(cell: leftCell, y: y, paneX: 0, paneWidth: columnWidth, height: rowHeight, builder: &builder)
-                    buildSplitCellBackground(cell: rightCell, y: y, paneX: columnWidth, paneWidth: columnWidth, height: rowHeight, builder: &builder)
+                    buildSplitCellBackground(cell: leftCell, y: y, paneX: 0, paneWidth: columnWidth, height: rowHeight, options: options, builder: &builder)
+                    buildSplitCellBackground(cell: rightCell, y: y, paneX: columnWidth, paneWidth: columnWidth, height: rowHeight, options: options, builder: &builder)
 
                     collectedSplits.append(CollectedSplit(
                         splitRow: splitRow, y: y, height: rowHeight,
@@ -1319,6 +1408,7 @@ private final class DiffSceneBuilder {
                     buildSplitCellContent(
                         cell: cell, wrappedLines: item.leftWrappedLines,
                         y: item.y, paneX: 0, paneWidth: columnWidth, height: item.height,
+                        options: options,
                         gutterColWidth: gutterColWidth, markerWidth: markerWidth,
                         codeStartX: paneCodeStartX, builder: &builder
                     )
@@ -1332,6 +1422,7 @@ private final class DiffSceneBuilder {
                     buildSplitCellContent(
                         cell: cell, wrappedLines: item.rightWrappedLines,
                         y: item.y, paneX: columnWidth, paneWidth: columnWidth, height: item.height,
+                        options: options,
                         gutterColWidth: gutterColWidth, markerWidth: markerWidth,
                         codeStartX: paneCodeStartX, builder: &builder
                     )
@@ -1352,6 +1443,7 @@ private final class DiffSceneBuilder {
         y: CGFloat,
         width: CGFloat,
         height: CGFloat,
+        options: VVDiffRenderOptions,
         gutterColWidth: CGFloat,
         markerWidth: CGFloat,
         codeStartX: CGFloat,
@@ -1367,7 +1459,7 @@ private final class DiffSceneBuilder {
             kind: .quad(
                 VVQuadPrimitive(
                     frame: CGRect(x: 0, y: y, width: width, height: height),
-                    color: rowBackgroundColor(for: row.kind)
+                    color: rowBackgroundColor(for: row.kind, options: options)
                 )
             ),
             zIndex: -1
@@ -1376,19 +1468,27 @@ private final class DiffSceneBuilder {
         let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
         let lineNumberColor = lineNumberColor(for: row.kind)
 
-        if let oldNum = row.oldLineNumber {
+        if options.showsLineNumbers, let oldNum = row.oldLineNumber {
             let glyphs = lineNumberGlyphs(text: String(oldNum), color: lineNumberColor)
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             addTextGlyphs(glyphs, offsetX: gutterColWidth - width - 4, baselineY: firstBaselineY, builder: &builder)
         }
 
-        if let newNum = row.newLineNumber {
+        if options.showsLineNumbers, let newNum = row.newLineNumber {
             let glyphs = lineNumberGlyphs(text: String(newNum), color: lineNumberColor)
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             addTextGlyphs(glyphs, offsetX: gutterColWidth * 2 - width - 4, baselineY: firstBaselineY, builder: &builder)
         }
 
-        buildMarkerIndicator(kind: row.kind, x: 0, y: y, width: markerWidth, height: height, builder: &builder)
+        buildMarkerIndicator(
+            kind: row.kind,
+            x: 0,
+            y: y,
+            width: markerWidth,
+            height: height,
+            options: options,
+            builder: &builder
+        )
 
         if row.kind.isCode || row.kind == .metadata {
             let codeColor = row.kind == .metadata ? gutterTextColor : textColor
@@ -1557,28 +1657,51 @@ private final class DiffSceneBuilder {
         y: CGFloat,
         width: CGFloat,
         height: CGFloat,
+        options: VVDiffRenderOptions,
         builder: inout VVSceneBuilder
     ) {
-        let barWidth: CGFloat = min(width, 6)
-        switch kind {
-        case .added:
-            builder.add(kind: .quad(VVQuadPrimitive(frame: CGRect(x: x, y: y, width: barWidth, height: height), color: addedMarkerColor)), zIndex: 1)
-        case .deleted:
-            let dashHeight: CGFloat = 1
-            let gapHeight: CGFloat = 1
-            let period = dashHeight + gapHeight
-            let phase = y.truncatingRemainder(dividingBy: period)
-            var dashY = y - phase
-            while dashY < y + height {
-                let top = max(dashY, y)
-                let bottom = min(dashY + dashHeight, y + height)
-                if bottom > top {
-                    builder.add(kind: .quad(VVQuadPrimitive(frame: CGRect(x: x, y: top, width: barWidth, height: bottom - top), color: deletedMarkerColor)), zIndex: 1)
+        switch options.changeIndicatorStyle {
+        case .none:
+            return
+        case .bars:
+            let barWidth: CGFloat = min(width, 6)
+            switch kind {
+            case .added:
+                builder.add(kind: .quad(VVQuadPrimitive(frame: CGRect(x: x, y: y, width: barWidth, height: height), color: addedMarkerColor)), zIndex: 1)
+            case .deleted:
+                let dashHeight: CGFloat = 1
+                let gapHeight: CGFloat = 1
+                let period = dashHeight + gapHeight
+                let phase = y.truncatingRemainder(dividingBy: period)
+                var dashY = y - phase
+                while dashY < y + height {
+                    let top = max(dashY, y)
+                    let bottom = min(dashY + dashHeight, y + height)
+                    if bottom > top {
+                        builder.add(kind: .quad(VVQuadPrimitive(frame: CGRect(x: x, y: top, width: barWidth, height: bottom - top), color: deletedMarkerColor)), zIndex: 1)
+                    }
+                    dashY += period
                 }
-                dashY += period
+            default:
+                break
             }
-        default:
-            break
+        case .classic:
+            let symbol: String
+            let color: SIMD4<Float>
+            switch kind {
+            case .added:
+                symbol = "+"
+                color = addedMarkerColor
+            case .deleted:
+                symbol = "-"
+                color = deletedMarkerColor
+            default:
+                return
+            }
+            let glyphs = layoutEngine.layoutTextGlyphs(symbol, variant: .monospace, at: .zero, color: color)
+            let glyphWidth = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
+            let baselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+            addTextGlyphs(glyphs, offsetX: x + max(0, (width - glyphWidth) * 0.5), baselineY: baselineY, builder: &builder)
         }
     }
 
@@ -1590,18 +1713,19 @@ private final class DiffSceneBuilder {
         paneX: CGFloat,
         paneWidth: CGFloat,
         height: CGFloat,
+        options: VVDiffRenderOptions,
         builder: inout VVSceneBuilder
     ) {
         let paneRect = CGRect(x: paneX, y: y, width: paneWidth, height: height)
         let background: SIMD4<Float>
         if let cell {
             switch cell.kind {
-            case .added: background = addedBgColor
-            case .deleted: background = deletedBgColor
+            case .added: background = options.showsBackgrounds ? addedBgColor : backgroundColor
+            case .deleted: background = options.showsBackgrounds ? deletedBgColor : backgroundColor
             default: background = backgroundColor
             }
         } else {
-            background = emptyPaneBgColor
+            background = backgroundColor
         }
         builder.add(
             kind: .quad(VVQuadPrimitive(frame: paneRect, color: background)),
@@ -1618,15 +1742,24 @@ private final class DiffSceneBuilder {
         paneX: CGFloat,
         paneWidth: CGFloat,
         height: CGFloat,
+        options: VVDiffRenderOptions,
         gutterColWidth: CGFloat,
         markerWidth: CGFloat,
         codeStartX: CGFloat,
         builder: inout VVSceneBuilder
     ) {
         let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-        buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
+        buildMarkerIndicator(
+            kind: cell.kind,
+            x: paneX,
+            y: y,
+            width: markerWidth,
+            height: height,
+            options: options,
+            builder: &builder
+        )
 
-        if let lineNumber = cell.lineNumber {
+        if options.showsLineNumbers, let lineNumber = cell.lineNumber {
             let glyphs = lineNumberGlyphs(text: String(lineNumber), color: lineNumberColor(for: cell.kind))
             let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
             let numX = paneX + markerWidth + gutterColWidth - width - 8
@@ -1639,25 +1772,27 @@ private final class DiffSceneBuilder {
             let baseGlyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: textColor)
             let highlightRanges = clippedHighlightRanges(for: cell.rowID, segment: lineText)
 
-            for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
-                let startX = glyphXForCharIndex(range.start, in: baseGlyphs)
-                let endX = glyphXForCharIndex(range.end, in: baseGlyphs)
-                let highlightWidth = endX - startX
-                if highlightWidth > 0 {
-                    builder.add(
-                        kind: .quad(
-                            VVQuadPrimitive(
-                                frame: CGRect(
-                                    x: paneX + codeStartX + codeInsetX + startX,
-                                    y: y + CGFloat(lineIndex) * lineHeight,
-                                    width: highlightWidth,
-                                    height: lineHeight
-                                ),
-                                color: inlineHighlightColor
-                            )
-                        ),
-                        zIndex: -1
-                    )
+            if options.inlineHighlightStyle != .off {
+                for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
+                    let startX = glyphXForCharIndex(range.start, in: baseGlyphs)
+                    let endX = glyphXForCharIndex(range.end, in: baseGlyphs)
+                    let highlightWidth = endX - startX
+                    if highlightWidth > 0 {
+                        builder.add(
+                            kind: .quad(
+                                VVQuadPrimitive(
+                                    frame: CGRect(
+                                        x: paneX + codeStartX + codeInsetX + startX,
+                                        y: y + CGFloat(lineIndex) * lineHeight,
+                                        width: highlightWidth,
+                                        height: lineHeight
+                                    ),
+                                    color: inlineHighlightColor
+                                )
+                            ),
+                            zIndex: -1
+                        )
+                    }
                 }
             }
 
@@ -1679,13 +1814,61 @@ private final class DiffSceneBuilder {
         guard paneRect.width > 12, paneRect.height > 6 else { return }
 
         let stripeColor = emptyPaneGuideColor
-        let stripeThickness: CGFloat = max(4, floor(lineHeight * 0.28))
-        let stripeSpacing: CGFloat = max(14, floor(lineHeight * 0.92))
-        let stripeTravel = max(paneRect.width + paneRect.height, 24)
+        let stripeThickness: CGFloat = max(2, floor(lineHeight * 0.11))
+        let stripeSpacing: CGFloat = max(12, floor(lineHeight * 0.60))
         let phaseShift = paneRect.minY.truncatingRemainder(dividingBy: stripeSpacing)
-        let startX = paneRect.minX - stripeTravel - stripeSpacing - phaseShift
-        let endX = paneRect.maxX + stripeSpacing
+        let geometry = cachedEmptyPaneHatchGeometry(
+            width: paneRect.width,
+            height: paneRect.height,
+            phaseShift: phaseShift,
+            stripeThickness: stripeThickness,
+            stripeSpacing: stripeSpacing
+        )
+        guard !geometry.vertices.isEmpty else { return }
 
+        builder.add(
+            kind: .path(
+                VVPathPrimitive(
+                    vertices: geometry.vertices,
+                    fill: stripeColor,
+                    fillVertexCount: geometry.fillVertexCount,
+                    bounds: geometry.bounds
+                )
+            ),
+            zIndex: -2,
+            transform: VVTransform2D.identity.translated(by: paneRect.origin)
+        )
+    }
+
+    private func cachedEmptyPaneHatchGeometry(
+        width: CGFloat,
+        height: CGFloat,
+        phaseShift: CGFloat,
+        stripeThickness: CGFloat,
+        stripeSpacing: CGFloat
+    ) -> CachedEmptyPaneHatchGeometry {
+        let key = EmptyPaneHatchCacheKey(
+            widthKey: Int((width * 2).rounded()),
+            heightKey: Int((height * 2).rounded()),
+            phaseKey: Int((phaseShift * 4).rounded()),
+            thicknessKey: Int((stripeThickness * 4).rounded()),
+            spacingKey: Int((stripeSpacing * 4).rounded())
+        )
+
+        Self.emptyPaneHatchCacheLock.lock()
+        if let cached = Self.emptyPaneHatchCache[key] {
+            Self.emptyPaneHatchCacheLock.unlock()
+            return cached
+        }
+        Self.emptyPaneHatchCacheLock.unlock()
+
+        let originRect = CGRect(x: 0, y: 0, width: width, height: height)
+        let stripeTravel = max(originRect.width + originRect.height, 24)
+        let startX = -stripeTravel - stripeSpacing - phaseShift
+        let endX = originRect.maxX + stripeSpacing
+
+        var vertices: [VVPathVertex] = []
+        var fillVertexCount = 0
         var x = startX
         while x <= endX {
             let dx = stripeTravel
@@ -1693,25 +1876,34 @@ private final class DiffSceneBuilder {
             let invLength = 1 / max(1, hypot(dx, dy))
             let normalX = -dy * invLength * stripeThickness * 0.5
             let normalY = dx * invLength * stripeThickness * 0.5
-            let p0 = CGPoint(x: round(x), y: round(paneRect.maxY))
-            let p1 = CGPoint(x: round(x + dx), y: round(paneRect.maxY - dy))
+            let p0 = CGPoint(x: round(x), y: 0)
+            let p1 = CGPoint(x: round(x + dx), y: round(dy))
             let polygon = [
                 CGPoint(x: p0.x + normalX, y: p0.y + normalY),
                 CGPoint(x: p0.x - normalX, y: p0.y - normalY),
                 CGPoint(x: p1.x - normalX, y: p1.y - normalY),
                 CGPoint(x: p1.x + normalX, y: p1.y + normalY)
             ]
-            let clipped = clipPolygon(polygon, to: paneRect)
+            let clipped = clipPolygon(polygon, to: originRect)
             if clipped.count >= 3 {
                 var path = VVPathBuilder()
                 path.addPolygon(clipped)
-                builder.add(
-                    kind: .path(path.build(fill: stripeColor)),
-                    zIndex: -2
-                )
+                let primitive = path.build(fill: emptyPaneGuideColor)
+                vertices.append(contentsOf: primitive.vertices)
+                fillVertexCount += primitive.fillVertexCount
             }
             x += stripeSpacing
         }
+
+        let geometry = CachedEmptyPaneHatchGeometry(
+            vertices: vertices,
+            fillVertexCount: fillVertexCount,
+            bounds: originRect
+        )
+        Self.emptyPaneHatchCacheLock.lock()
+        Self.emptyPaneHatchCache[key] = geometry
+        Self.emptyPaneHatchCacheLock.unlock()
+        return geometry
     }
 
     private func clipPolygon(_ polygon: [CGPoint], to rect: CGRect) -> [CGPoint] {
@@ -1978,10 +2170,13 @@ private final class DiffSceneBuilder {
         return glyphs
     }
 
-    private func rowBackgroundColor(for kind: ParsedDiffRow.Kind) -> SIMD4<Float> {
+    private func rowBackgroundColor(
+        for kind: ParsedDiffRow.Kind,
+        options: VVDiffRenderOptions
+    ) -> SIMD4<Float> {
         switch kind {
-        case .added: return addedBgColor
-        case .deleted: return deletedBgColor
+        case .added: return options.showsBackgrounds ? addedBgColor : backgroundColor
+        case .deleted: return options.showsBackgrounds ? deletedBgColor : backgroundColor
         case .hunkHeader: return hunkBgColor
         case .metadata: return metadataBgColor
         case .context: return backgroundColor

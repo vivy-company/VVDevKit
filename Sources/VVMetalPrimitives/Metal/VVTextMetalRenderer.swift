@@ -1,7 +1,7 @@
-//  MarkdownMetalRenderer.swift
-//  VVMarkdown
+//  VVTextMetalRenderer.swift
+//  VVMetalPrimitives
 //
-//  Metal renderer for markdown content
+//  Metal renderer for shared text and primitive content
 
 import Foundation
 import Metal
@@ -16,9 +16,9 @@ import AppKit
 import UIKit
 #endif
 
-// MARK: - Markdown Uniforms
+// MARK: - Text Uniforms
 
-public struct MarkdownUniforms {
+public struct VVTextRenderUniforms {
     public var projectionMatrix: simd_float4x4
     public var scrollOffset: SIMD2<Float>
     public var viewportSize: SIMD2<Float>
@@ -47,7 +47,7 @@ public struct MarkdownUniforms {
 
 // MARK: - Instance Structures
 
-public struct MarkdownGlyphInstance {
+public struct VVTextGlyphInstance {
     public var position: SIMD2<Float>
     public var size: SIMD2<Float>
     public var uvOrigin: SIMD2<Float>
@@ -260,14 +260,14 @@ public struct PieSliceInstance {
     }
 }
 
-// MARK: - Markdown Metal Renderer
+// MARK: - Text Metal Renderer
 
-/// Metal renderer for markdown content.
+/// Metal renderer for shared text and primitive content.
 ///
 /// When created with a shared ``VVMetalContext``, the renderer is a lightweight
 /// per-view wrapper holding only triple-buffered uniform state.  All pipeline
 /// states, samplers, and the glyph atlas are owned by the context.
-public final class MarkdownMetalRenderer {
+public final class VVTextMetalRenderer {
 
     // MARK: - Properties
 
@@ -275,7 +275,7 @@ public final class MarkdownMetalRenderer {
     public let context: VVMetalContext
 
     /// Shared glyph atlas (cached by scale factor in VVMetalContext).
-    public let glyphAtlas: MarkdownGlyphAtlas
+    public let glyphAtlas: VVTextGlyphAtlas
 
     /// The base font this renderer was created with, used for variant-based glyph lookups.
     public let baseFont: VVFont
@@ -290,7 +290,7 @@ public final class MarkdownMetalRenderer {
     private let uniformBufferCount = 3
 
     // Current uniforms
-    public var uniforms = MarkdownUniforms()
+    public var uniforms = VVTextRenderUniforms()
     private var transientFrameBuffers: [MTLBuffer] = []
     private let transientFrameBuffersLock = NSLock()
 
@@ -308,16 +308,16 @@ public final class MarkdownMetalRenderer {
     /// Legacy convenience: uses the process-wide shared ``VVMetalContext``.
     public convenience init(device: MTLDevice, baseFont: VVFont, scaleFactor: CGFloat = 2.0) throws {
         guard let ctx = VVMetalContext.shared else {
-            throw MarkdownRendererError.failedToCreateCommandQueue
+            throw VVMetalRendererError.failedToCreateCommandQueue
         }
         self.init(context: ctx, baseFont: baseFont, scaleFactor: scaleFactor)
     }
 
     private func setupUniformBuffers() {
-        let size = MemoryLayout<MarkdownUniforms>.stride
+        let size = MemoryLayout<VVTextRenderUniforms>.stride
         for _ in 0..<uniformBufferCount {
             if let buffer = context.device.makeBuffer(length: size, options: .storageModeShared) {
-                buffer.label = "Markdown Uniform Buffer"
+                buffer.label = "VV Text Uniform Buffer"
                 uniformBuffers.append(buffer)
             }
         }
@@ -328,16 +328,16 @@ public final class MarkdownMetalRenderer {
     public func beginFrame(viewportSize: CGSize, scrollOffset: CGPoint) {
         uniforms.viewportSize = SIMD2<Float>(Float(viewportSize.width), Float(viewportSize.height))
         uniforms.scrollOffset = SIMD2<Float>(Float(scrollOffset.x), Float(scrollOffset.y))
-        uniforms.projectionMatrix = MarkdownUniforms.orthographic(
+        uniforms.projectionMatrix = VVTextRenderUniforms.orthographic(
             width: Float(viewportSize.width),
             height: Float(viewportSize.height)
         )
         uniforms.time = Float(CACurrentMediaTime().truncatingRemainder(dividingBy: 2.0))
-        uniforms.atlasSize = SIMD2<Float>(Float(MarkdownGlyphAtlas.atlasSize), Float(MarkdownGlyphAtlas.atlasSize))
+        uniforms.atlasSize = SIMD2<Float>(Float(VVTextGlyphAtlas.atlasSize), Float(VVTextGlyphAtlas.atlasSize))
 
         currentUniformBufferIndex = (currentUniformBufferIndex + 1) % uniformBufferCount
         let buffer = uniformBuffers[currentUniformBufferIndex]
-        memcpy(buffer.contents(), &uniforms, MemoryLayout<MarkdownUniforms>.stride)
+        memcpy(buffer.contents(), &uniforms, MemoryLayout<VVTextRenderUniforms>.stride)
     }
 
     public func recycleTransientBuffers(after commandBuffer: MTLCommandBuffer?) {
@@ -544,7 +544,7 @@ public final class MarkdownMetalRenderer {
 
 // MARK: - Errors
 
-public enum MarkdownRendererError: Error {
+public enum VVMetalRendererError: Error {
     case failedToCreateCommandQueue
     case failedToLoadShaderLibrary
     case failedToCreateShaderFunction(String)

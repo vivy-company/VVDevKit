@@ -11,6 +11,9 @@ import VVMetalPrimitives
 // MARK: - Data Model
 
 public typealias VVDiffRenderStyle = VVMarkdown.VVDiffRenderStyle
+public typealias VVDiffRenderOptions = VVMarkdown.VVDiffRenderOptions
+public typealias VVDiffChangeIndicatorStyle = VVMarkdown.VVDiffChangeIndicatorStyle
+public typealias VVDiffInlineHighlightStyle = VVMarkdown.VVDiffInlineHighlightStyle
 public typealias VVDiffRow = VVMarkdown.VVDiffRow
 public typealias VVDiffInlineRenderResult = VVMarkdown.VVDiffRenderResult
 
@@ -27,14 +30,14 @@ public enum VVDiffInlineRenderer {
         VVDiffSceneRenderer.render(
             unifiedDiff: unifiedDiff,
             width: width,
-            theme: markdownTheme(from: theme),
+            theme: diffMetalTheme(from: theme),
             baseFont: configuration.font,
             style: .inline
         )
     }
 }
 
-private func markdownTheme(from theme: VVTheme) -> MarkdownTheme {
+func diffMetalTheme(from theme: VVTheme) -> MarkdownTheme {
     var mdTheme: MarkdownTheme = theme.backgroundColor.brightnessComponent < 0.5 ? .dark : .light
     mdTheme.textColor = theme.textColor.simdColor
     mdTheme.codeColor = theme.textColor.simdColor
@@ -119,12 +122,12 @@ struct VVDiffViewDebugMetrics {
     let contentHeight: CGFloat
     let totalDisplayBlockCount: Int
     let visibleDisplayBlockRange: Range<Int>
-    let cachedSceneBlockRange: Range<Int>
-    let cachedScenePrimitiveCount: Int
+    let cachedRenderBlockRange: Range<Int>
+    let cachedRenderDrawCallCount: Int
 
     var sceneCoversVisibleBlocks: Bool {
-        cachedSceneBlockRange.lowerBound <= visibleDisplayBlockRange.lowerBound &&
-        cachedSceneBlockRange.upperBound >= visibleDisplayBlockRange.upperBound
+        cachedRenderBlockRange.lowerBound <= visibleDisplayBlockRange.lowerBound &&
+        cachedRenderBlockRange.upperBound >= visibleDisplayBlockRange.upperBound
     }
 }
 
@@ -251,6 +254,7 @@ enum VVDiffViewDebug {
         style: VVDiffRenderStyle,
         theme: VVTheme = .defaultDark,
         configuration: VVConfiguration = .default,
+        renderOptions: VVDiffRenderOptions = .full,
         language: VVLanguage? = nil,
         syntaxHighlightingEnabled: Bool = true,
         viewportSize: CGSize = CGSize(width: 1100, height: 760),
@@ -264,6 +268,7 @@ enum VVDiffViewDebug {
             style: style,
             theme: theme,
             configuration: configuration,
+            renderOptions: renderOptions,
             language: language,
             syntaxHighlightingEnabled: syntaxHighlightingEnabled,
             onFileHeaderActivate: nil
@@ -277,91 +282,7 @@ enum VVDiffViewDebug {
     }
 }
 
-// MARK: - VVDiffRenderer
-
-private typealias MDLayoutGlyph = VVMarkdown.LayoutGlyph
-private typealias MDFontVariant = VVMarkdown.FontVariant
-
-/// Builds a VVScene from diff data using VVMetalPrimitives.
-private final class VVDiffRenderer {
-    let font: NSFont
-    let lineHeight: CGFloat
-    let charWidth: CGFloat
-    let headerHeight: CGFloat
-    let codeInsetX: CGFloat = 10
-
-    var textColor: SIMD4<Float> = .gray(0.83)
-    var backgroundColor: SIMD4<Float> = .gray(0.12)
-    var gutterTextColor: SIMD4<Float> = .gray50
-    var gutterBgColor: SIMD4<Float> = .gray(0.12)
-    var addedBgColor: SIMD4<Float> = .rgba(0, 0.5, 0, 0.13)
-    var deletedBgColor: SIMD4<Float> = .rgba(0.5, 0, 0, 0.13)
-    var hunkBgColor: SIMD4<Float> = .gray20.withOpacity(0.88)
-    var headerBgColor: SIMD4<Float> = .gray(0.15, opacity: 0.99)
-    var metadataBgColor: SIMD4<Float> = .gray(0.15, opacity: 0.58)
-    var addedMarkerColor: SIMD4<Float> = .rgba(0, 0.8, 0)
-    var deletedMarkerColor: SIMD4<Float> = .rgba(0.8, 0, 0)
-    var modifiedColor: SIMD4<Float> = .rgba(0, 0.5, 1)
-    var addedInlineBg: SIMD4<Float> = .rgba(0, 0.5, 0, 0.22)
-    var deletedInlineBg: SIMD4<Float> = .rgba(0.5, 0, 0, 0.22)
-    var emptyPaneBg: SIMD4<Float> = .gray(0.15, opacity: 0.30)
-
-    var layoutEngine: MarkdownLayoutEngine
-
-    init(font: NSFont, theme: VVTheme, contentWidth: CGFloat) {
-        self.font = font
-        self.lineHeight = ceil(font.pointSize * 1.6)
-        self.headerHeight = ceil(font.pointSize * 1.6 * 1.5)
-
-        // Compute monospace char width from CTFont
-        let ctFont = font as CTFont
-        var glyphID: CGGlyph = 0
-        var char: UniChar = 0x004D // 'M'
-        CTFontGetGlyphsForCharacters(ctFont, &char, &glyphID, 1)
-        var advance = CGSize.zero
-        CTFontGetAdvancesForGlyphs(ctFont, .horizontal, &glyphID, &advance, 1)
-        self.charWidth = advance.width > 0 ? advance.width : font.pointSize * 0.6
-
-        // Create layout engine with a minimal markdown theme
-        var mdTheme = MarkdownTheme.dark
-        mdTheme.textColor = theme.textColor.simdColor
-        mdTheme.contentPadding = 0
-        mdTheme.paragraphSpacing = 0
-        self.layoutEngine = MarkdownLayoutEngine(baseFont: font, theme: mdTheme, contentWidth: contentWidth)
-
-        updateThemeColors(theme)
-    }
-
-    func updateThemeColors(_ theme: VVTheme) {
-        textColor = theme.textColor.simdColor
-        backgroundColor = theme.backgroundColor.simdColor
-        gutterTextColor = theme.gutterTextColor.simdColor
-        gutterBgColor = theme.gutterBackgroundColor.simdColor
-        addedBgColor = withAlpha(theme.gitAddedColor.simdColor, 0.13)
-        deletedBgColor = withAlpha(theme.gitDeletedColor.simdColor, 0.13)
-        hunkBgColor = withAlpha(theme.currentLineColor.simdColor, 0.88)
-        headerBgColor = withAlpha(theme.gutterBackgroundColor.simdColor, 0.99)
-        metadataBgColor = withAlpha(theme.gutterBackgroundColor.simdColor, 0.58)
-        addedMarkerColor = theme.gitAddedColor.simdColor
-        deletedMarkerColor = theme.gitDeletedColor.simdColor
-        modifiedColor = theme.gitModifiedColor.simdColor
-        addedInlineBg = withAlpha(theme.gitAddedColor.simdColor, 0.22)
-        deletedInlineBg = withAlpha(theme.gitDeletedColor.simdColor, 0.22)
-        emptyPaneBg = withAlpha(theme.gutterBackgroundColor.simdColor, 0.30)
-    }
-
-    func updateContentWidth(_ width: CGFloat) {
-        layoutEngine.updateContentWidth(width)
-    }
-
-    // Shared scene construction lives in VVDiffSceneRenderer.
-    // This wrapper-local renderer now exists only for diff metrics and colors that
-    // are still needed for sizing, geometry, and selection math.
-
-    private func withAlpha(_ color: SIMD4<Float>, _ alpha: Float) -> SIMD4<Float> {
-        SIMD4(color.x, color.y, color.z, alpha)
-    }
-}
+// MARK: - VVDiffDisplayMetrics
 
 // MARK: - VVDiffMetalView
 
@@ -394,9 +315,8 @@ private final class VVDiffMetalView: NSView {
     private var scrollView: NSScrollView!
     private var documentView: DiffDocumentView!
     private var metalView: DiffMTKView!
-    private var renderer: MarkdownMetalRenderer?
-    private var sceneRenderer: MarkdownScenePrimitiveRenderer?
-    private var diffRenderer: VVDiffRenderer?
+    private var renderer: VVTextMetalRenderer?
+    private var diffMetrics: VVDiffDisplayMetrics?
     var metalContext: VVMetalContext?
 
     private var rows: [VVDiffRow] = []
@@ -407,16 +327,13 @@ private final class VVDiffMetalView: NSView {
     private var renderStyle: VVDiffRenderStyle = .inline
     private var theme: VVTheme = .defaultDark
     private var configuration: VVConfiguration = .default
+    private var renderOptions: VVDiffRenderOptions = .full
     private var language: VVLanguage?
     private var syntaxHighlightingEnabled: Bool = true
     private var onFileHeaderActivate: ((String) -> Void)?
 
-    private var cachedScene: VVScene?
-    private var cachedSceneKey: ViewportSceneCacheKey?
-    private var cachedOrderedPrimitiveIndices: [Int] = []
-    private var cachedSceneVisibilityIndex: VVPrimitiveVisibilityIndex?
-    private var cachedVisibleBucketRange: ClosedRange<Int>?
-    private var cachedVisiblePrimitiveIndices: [Int] = []
+    private var cachedRenderArtifacts: VVDiffRenderArtifacts?
+    private var cachedRenderKey: ViewportSceneCacheKey?
     private var sceneBuildGeneration: Int = 0
     private var sceneBuildInFlightKey: ViewportSceneCacheKey?
     private var contentHeight: CGFloat = 0
@@ -528,7 +445,7 @@ private final class VVDiffMetalView: NSView {
         scrollView.addSubview(metalView)
 
         if let ctx = metalContext {
-            renderer = MarkdownMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: NSScreen.main?.backingScaleFactor ?? 2.0)
+            renderer = VVTextMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: NSScreen.main?.backingScaleFactor ?? 2.0)
             renderer?.glyphAtlas.preloadASCII(fontSize: baseFont.pointSize, baseFont: baseFont)
         } else {
             renderer = nil
@@ -656,14 +573,10 @@ private final class VVDiffMetalView: NSView {
     private func invalidateSceneCache(clearScene: Bool) {
         sceneBuildGeneration &+= 1
         sceneBuildInFlightKey = nil
-        cachedSceneKey = nil
-        cachedVisibleBucketRange = nil
-        cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+        cachedRenderKey = nil
 
         if clearScene {
-            cachedScene = nil
-            cachedOrderedPrimitiveIndices.removeAll(keepingCapacity: true)
-            cachedSceneVisibilityIndex = nil
+            cachedRenderArtifacts = nil
         }
     }
 
@@ -738,6 +651,7 @@ private final class VVDiffMetalView: NSView {
         style: VVDiffRenderStyle,
         theme: VVTheme,
         configuration: VVConfiguration,
+        renderOptions: VVDiffRenderOptions,
         language: VVLanguage?,
         syntaxHighlightingEnabled: Bool,
         onFileHeaderActivate: ((String) -> Void)?
@@ -753,14 +667,16 @@ private final class VVDiffMetalView: NSView {
         let themeChanged = self.theme != theme
         let fontChanged = self.configuration.font != configuration.font
         let wrapsChanged = self.configuration.wrapLines != configuration.wrapLines
+        let renderOptionsChanged = self.renderOptions != renderOptions
         let langChanged = self.language?.identifier != language?.identifier
         let syntaxHighlightingChanged = self.syntaxHighlightingEnabled != effectiveSyntaxHighlightingEnabled
-        let effectiveWrapChanged = wrapsChanged || styleChanged || fastPlainModeChanged
+        let effectiveWrapChanged = wrapsChanged || styleChanged || fastPlainModeChanged || renderOptionsChanged
 
         if !rowsChanged,
            !styleChanged,
            !themeChanged,
            !fontChanged,
+           !renderOptionsChanged,
            !langChanged,
            !syntaxHighlightingChanged,
            !effectiveWrapChanged,
@@ -773,6 +689,7 @@ private final class VVDiffMetalView: NSView {
         self.renderStyle = style
         self.theme = theme
         self.configuration = configuration
+        self.renderOptions = renderOptions
         self.language = language
         self.syntaxHighlightingEnabled = effectiveSyntaxHighlightingEnabled
         analyzedDocument = analysis
@@ -793,10 +710,9 @@ private final class VVDiffMetalView: NSView {
             baseFont = configuration.font
             let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
             if let ctx = metalContext {
-                renderer = MarkdownMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: scale)
+                renderer = VVTextMetalRenderer(context: ctx, baseFont: baseFont, scaleFactor: scale)
                 renderer?.glyphAtlas.preloadASCII(fontSize: baseFont.pointSize, baseFont: baseFont)
             }
-            sceneRenderer = nil
         }
 
         if rowsChanged || styleChanged {
@@ -807,7 +723,7 @@ private final class VVDiffMetalView: NSView {
         }
 
         if themeChanged || fontChanged {
-            diffRenderer = nil
+            diffMetrics = nil
         }
 
         let shouldResetHighlighting = rowsChanged || langChanged || fontChanged || themeChanged || syntaxHighlightingChanged
@@ -821,18 +737,16 @@ private final class VVDiffMetalView: NSView {
         metalView?.setNeedsDisplay(metalView.bounds)
     }
 
-    private func ensureDiffRenderer() -> VVDiffRenderer {
-        if let existing = diffRenderer { return existing }
-        let width = scrollView?.bounds.width ?? bounds.width
-        let r = VVDiffRenderer(font: configuration.font, theme: theme, contentWidth: width)
-        diffRenderer = r
-        return r
+    private func ensureDiffMetrics() -> VVDiffDisplayMetrics {
+        if let existing = diffMetrics { return existing }
+        let metrics = VVDiffDisplayMetrics(font: configuration.font, theme: theme)
+        diffMetrics = metrics
+        return metrics
     }
 
     private func updateContentSize() {
         let width = scrollView?.bounds.width ?? bounds.width
-        let dr = ensureDiffRenderer()
-        dr.updateContentWidth(width)
+        let dr = ensureDiffMetrics()
         let previousContentHeight = contentHeight
         let previousDocumentFrame = documentView.frame
         buildLayoutIfNeeded(width: width)
@@ -878,7 +792,7 @@ private final class VVDiffMetalView: NSView {
             abs(previousDocumentFrame.width - docWidth) > 0.5 ||
             abs(previousDocumentFrame.height - docHeight) > 0.5
         let contentHeightChanged = abs(previousContentHeight - contentHeight) > 0.5
-        if documentSizeChanged || contentHeightChanged || cachedScene == nil {
+        if documentSizeChanged || contentHeightChanged || cachedRenderArtifacts == nil {
             invalidateSceneCache(clearScene: false)
         }
         documentView.frame = CGRect(x: 0, y: 0, width: docWidth, height: docHeight)
@@ -909,7 +823,7 @@ private final class VVDiffMetalView: NSView {
             return
         }
 
-        let dr = ensureDiffRenderer()
+        let dr = ensureDiffMetrics()
         let layoutWidth = desiredLayoutWidth(viewportWidth: width, renderer: dr)
         let plan = VVDiffLayoutBuilder.makeLayout(
             document: analyzedDocument,
@@ -928,7 +842,7 @@ private final class VVDiffMetalView: NSView {
         rowGeometryCacheKey = cacheKey
     }
 
-    private func desiredLayoutWidth(viewportWidth: CGFloat, renderer: VVDiffRenderer) -> CGFloat {
+    private func desiredLayoutWidth(viewportWidth: CGFloat, renderer: VVDiffDisplayMetrics) -> CGFloat {
         guard renderStyle == .sideBySide else { return viewportWidth }
         guard !wrapsUnified else { return max(viewportWidth, 840) }
 
@@ -1298,19 +1212,17 @@ private final class VVDiffMetalView: NSView {
             let refreshSceneKey = makeHighlightRefreshSceneCacheKey(renderWidth: renderWidth)
             let refreshBlockRange = refreshSceneKey.startBlockIndex..<refreshSceneKey.endBlockIndex
             if refreshBlockRange.lowerBound < refreshBlockRange.upperBound {
-                let artifacts = Self.buildSceneArtifacts(
+                let artifacts = Self.buildRenderArtifacts(
                     layoutPlan: layoutPlan,
                     blockRange: refreshBlockRange,
-                    theme: markdownTheme(from: theme),
+                    renderer: renderer,
+                    theme: theme,
                     baseFont: configuration.font,
+                    options: renderOptions,
                     highlightedRanges: highlightedRanges
                 )
-                cachedScene = artifacts.scene
-                cachedSceneKey = refreshSceneKey
-                cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
-                cachedSceneVisibilityIndex = artifacts.visibilityIndex
-                cachedVisibleBucketRange = nil
-                cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+                cachedRenderArtifacts = artifacts
+                cachedRenderKey = refreshSceneKey
                 sceneBuildInFlightKey = nil
 
                 let paddedSceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
@@ -1337,38 +1249,36 @@ private final class VVDiffMetalView: NSView {
         return geometryRange(visibleGeometryRange(in: visibleRect), intersects: rowIDs)
     }
 
-    private static func buildSceneArtifacts(
+    private static func buildRenderArtifacts(
         layoutPlan: VVDiffLayoutPlan,
         blockRange: Range<Int>,
-        theme: MarkdownTheme,
+        renderer: VVTextMetalRenderer?,
+        theme: VVTheme,
         baseFont: NSFont,
+        options: VVDiffRenderOptions,
         highlightedRanges: [Int: [(NSRange, SIMD4<Float>)]]
-    ) -> (scene: VVScene, orderedPrimitiveIndices: [Int], visibilityIndex: VVPrimitiveVisibilityIndex) {
+    ) -> VVDiffRenderArtifacts {
         autoreleasepool {
-            let result = VVDiffSceneRenderer.render(
+            guard let renderer else {
+                return VVDiffRenderArtifacts(quads: [], roundedQuads: [], paths: [], textPasses: [], contentHeight: layoutPlan.contentHeight)
+            }
+            return VVDiffPaneRenderer.buildArtifacts(
                 layout: layoutPlan,
+                blockRange: blockRange,
                 theme: theme,
                 baseFont: baseFont,
-                options: .full,
-                highlightedRangesOverride: highlightedRanges,
-                blockRange: blockRange
+                options: options,
+                highlightedRanges: highlightedRanges,
+                metalRenderer: renderer
             )
-            let scene = result.scene
-            let orderedPrimitiveIndices = scene.orderedPrimitiveIndices()
-            let visibilityIndex = VVPrimitiveVisibilityIndex(
-                scene: scene,
-                orderedPrimitiveIndices: orderedPrimitiveIndices,
-                bucketHeight: 192
-            )
-            return (scene, orderedPrimitiveIndices, visibilityIndex)
         }
     }
 
     private func scheduleSceneBuildIfNeeded(renderWidth: CGFloat, sceneKey: ViewportSceneCacheKey) {
         guard let layoutPlan else { return }
         let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
-        if let cachedSceneKey,
-           cachedSceneKey.contains(
+        if let cachedRenderKey,
+           cachedRenderKey.contains(
             renderWidth: renderWidth,
             highlightVersion: highlightSceneVersion,
             requiredBlockRange: requiredBlockRange
@@ -1378,17 +1288,20 @@ private final class VVDiffMetalView: NSView {
         guard sceneBuildInFlightKey != sceneKey else { return }
 
         let generation = sceneBuildGeneration
-        let theme = markdownTheme(from: theme)
+        let theme = theme
         let baseFont = configuration.font
+        let renderOptions = renderOptions
         let highlightedRanges = highlightedRanges
 
         sceneBuildInFlightKey = sceneKey
         Self.sceneBuildQueue.async { [weak self] in
-            let artifacts = Self.buildSceneArtifacts(
+            let artifacts = Self.buildRenderArtifacts(
                 layoutPlan: layoutPlan,
                 blockRange: requiredBlockRange,
+                renderer: self?.renderer,
                 theme: theme,
                 baseFont: baseFont,
+                options: renderOptions,
                 highlightedRanges: highlightedRanges
             )
 
@@ -1403,13 +1316,9 @@ private final class VVDiffMetalView: NSView {
                 }
                 guard self.sceneBuildInFlightKey == sceneKey else { return }
 
-                print("[DiffScene] async build complete blocks=\(sceneKey.startBlockIndex)..<\(sceneKey.endBlockIndex) prims=\(artifacts.scene.primitives.count)")
-                self.cachedScene = artifacts.scene
-                self.cachedSceneKey = sceneKey
-                self.cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
-                self.cachedSceneVisibilityIndex = artifacts.visibilityIndex
-                self.cachedVisibleBucketRange = nil
-                self.cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+                print("[DiffRender] async build complete blocks=\(sceneKey.startBlockIndex)..<\(sceneKey.endBlockIndex) calls=\(artifacts.drawCallCount)")
+                self.cachedRenderArtifacts = artifacts
+                self.cachedRenderKey = sceneKey
                 self.staleHighlightedRowIDs.removeAll(keepingCapacity: true)
                 self.sceneBuildInFlightKey = nil
                 self.metalView?.setNeedsDisplay(self.metalView.bounds)
@@ -1491,7 +1400,7 @@ extension VVDiffMetalView: MTKViewDelegate {
               let drawable = view.currentDrawable else { return }
         let tDrawable = CACurrentMediaTime()
 
-        let dr = ensureDiffRenderer()
+        let dr = ensureDiffMetrics()
         let bg = dr.backgroundColor
 
         let commandBuffer = renderer.commandQueue.makeCommandBuffer()
@@ -1521,98 +1430,59 @@ extension VVDiffMetalView: MTKViewDelegate {
         let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
 
         // Tight visible block range (no prefetch padding) — used for partial
-        // cache hit test so the scene's built-in padding acts as hysteresis.
+        // cache hit test so the cached render packet padding acts as hysteresis.
         let tightVisibleRange = visibleDisplayBlockRange(in: visibleRect)
 
-        var scene: VVScene?
-        var orderedPrimitiveIndices: [Int]
-        var visibilityIndex: VVPrimitiveVisibilityIndex?
+        var renderArtifacts: VVDiffRenderArtifacts?
         var sceneCachePath = "hit"
         // During active scrolling, accept stale highlights — don't let highlight
-        // version changes trigger expensive synchronous scene rebuilds in draw().
+        // version changes trigger expensive synchronous packet rebuilds in draw().
         // Highlights will be applied when scrolling stops.
         let effectiveHighlightVersion = isActivelyScrolling
-            ? (cachedSceneKey?.highlightVersion ?? highlightSceneVersion)
+            ? (cachedRenderKey?.highlightVersion ?? highlightSceneVersion)
             : highlightSceneVersion
-        if let cached = cachedScene,
-           let cachedSceneKey,
-           cachedSceneKey.contains(
+        if let cached = cachedRenderArtifacts,
+           let cachedRenderKey,
+           cachedRenderKey.contains(
             renderWidth: renderWidth,
             highlightVersion: effectiveHighlightVersion,
             requiredBlockRange: tightVisibleRange
            ) {
-            scene = cached
-            orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
-            visibilityIndex = cachedSceneVisibilityIndex
+            renderArtifacts = cached
         } else if let layoutPlan {
-            // Scene doesn't cover visible blocks — must build synchronously.
+            // Cache doesn't cover visible blocks — must build synchronously.
             sceneCachePath = "REBUILD[\(requiredBlockRange.count)blk]"
-            let artifacts = Self.buildSceneArtifacts(
+            let artifacts = Self.buildRenderArtifacts(
                 layoutPlan: layoutPlan,
                 blockRange: requiredBlockRange,
-                theme: markdownTheme(from: theme),
+                renderer: renderer,
+                theme: theme,
                 baseFont: configuration.font,
+                options: renderOptions,
                 highlightedRanges: highlightedRanges
             )
-            scene = artifacts.scene
-            orderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
-            visibilityIndex = artifacts.visibilityIndex
-            cachedScene = artifacts.scene
-            cachedSceneKey = sceneKey
-            cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
-            cachedSceneVisibilityIndex = artifacts.visibilityIndex
-            cachedVisibleBucketRange = nil
-            cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+            renderArtifacts = artifacts
+            cachedRenderArtifacts = artifacts
+            cachedRenderKey = sceneKey
             staleHighlightedRowIDs.removeAll(keepingCapacity: true)
             sceneBuildInFlightKey = nil
         } else {
-            scene = cachedScene
-            orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
-            visibilityIndex = cachedSceneVisibilityIndex
+            renderArtifacts = cachedRenderArtifacts
         }
 
         let tScene = CACurrentMediaTime()
 
-        let visiblePrimitiveIndicesForDraw: [Int]
-        if let visibilityIndex,
-           let bucketRange = visibilityIndex.bucketRange(for: visibleRect) {
-            if cachedVisibleBucketRange == bucketRange {
-                visiblePrimitiveIndicesForDraw = cachedVisiblePrimitiveIndices
-            } else {
-                let visiblePrimitiveIndices = visibilityIndex.visiblePrimitiveIndices(
-                    inBucketRange: bucketRange,
-                    from: orderedPrimitiveIndices
-                )
-                cachedVisibleBucketRange = bucketRange
-                cachedVisiblePrimitiveIndices = visiblePrimitiveIndices
-                visiblePrimitiveIndicesForDraw = visiblePrimitiveIndices
-            }
-        } else {
-            visiblePrimitiveIndicesForDraw = orderedPrimitiveIndices
-        }
-
-        let tCull = CACurrentMediaTime()
-
-        if let scene {
-            let sceneRenderer = self.sceneRenderer ?? MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
-            self.sceneRenderer = sceneRenderer
-            sceneRenderer.resetFrameDiagnostics()
-            sceneRenderer.updateBehavior(
-                MarkdownSceneRenderingBehavior(
-                    imageTextureProvider: nil,
-                    shouldUnderlineLinkRun: { _ in false },
-                    missingImageBehavior: .skip
-                )
-            )
-            sceneRenderer.renderScene(
-                scene,
-                orderedPrimitiveIndices: visiblePrimitiveIndicesForDraw,
-                visibleRect: nil,
-                visibilityIndex: nil,
+        if let renderArtifacts {
+            VVDiffPaneRenderer.render(
+                renderArtifacts,
                 encoder: encoder,
                 renderer: renderer,
-                scissorRectForClip: { [weak self] in self?.scissorRect(for: $0) ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) },
-                fullScissorRect: { [weak self] in self?.fullScissorRect() ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0) }
+                scissorRectForClip: { [weak self] in
+                    self?.scissorRect(for: $0) ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0)
+                },
+                fullScissorRect: { [weak self] in
+                    self?.fullScissorRect() ?? MTLScissorRect(x: 0, y: 0, width: 0, height: 0)
+                }
             )
         }
 
@@ -1648,16 +1518,11 @@ extension VVDiffMetalView: MTKViewDelegate {
         if totalMs > 8 || drawFrameCounter % 300 == 0 {
             let drawableMs = (tDrawable - t0) * 1000
             let sceneMs = (tScene - tDrawable) * 1000
-            let cullMs = (tCull - tScene) * 1000
-            let renderMs = (tRender - tCull) * 1000
+            let renderMs = (tRender - tScene) * 1000
             let commitMs = (tEnd - tRender) * 1000
-            let primCount = visiblePrimitiveIndicesForDraw.count
-            let totalPrimCount = scene?.primitives.count ?? 0
+            let drawCalls = renderArtifacts?.drawCallCount ?? 0
             let viewSize = view.bounds.size
-            let hits = sceneRenderer?.lastFrameTextRunCacheHits ?? 0
-            let misses = sceneRenderer?.lastFrameTextRunCacheMisses ?? 0
-            let cacheSize = sceneRenderer?.preparedTextRunCacheCount ?? 0
-            print("[DiffDraw] total=\(String(format: "%.1f", totalMs))ms drw=\(String(format: "%.1f", drawableMs))ms scn=\(String(format: "%.1f", sceneMs))ms cull=\(String(format: "%.1f", cullMs))ms rnd=\(String(format: "%.1f", renderMs))ms cmt=\(String(format: "%.1f", commitMs))ms p=\(primCount)/\(totalPrimCount) txt=\(hits)h/\(misses)m/\(cacheSize)c \(sceneCachePath) \(Int(viewSize.width))x\(Int(viewSize.height))")
+            print("[DiffDraw] total=\(String(format: "%.1f", totalMs))ms drw=\(String(format: "%.1f", drawableMs))ms prep=\(String(format: "%.1f", sceneMs))ms rnd=\(String(format: "%.1f", renderMs))ms cmt=\(String(format: "%.1f", commitMs))ms calls=\(drawCalls) \(sceneCachePath) \(Int(viewSize.width))x\(Int(viewSize.height))")
         }
         drawFrameCounter += 1
     }
@@ -1777,10 +1642,10 @@ extension VVDiffMetalView: MTKViewDelegate {
     }
 
     fileprivate func debugMetrics() -> VVDiffViewDebugMetrics {
-        debugBuildCurrentSceneIfNeeded()
+        debugBuildCurrentRenderArtifactsIfNeeded()
         let visibleBlockRange = visibleDisplayBlockRange(in: scrollView.contentView.bounds)
-        let cachedSceneBlockRange = if let cachedSceneKey {
-            cachedSceneKey.startBlockIndex..<cachedSceneKey.endBlockIndex
+        let cachedRenderBlockRange = if let cachedRenderKey {
+            cachedRenderKey.startBlockIndex..<cachedRenderKey.endBlockIndex
         } else {
             0..<0
         }
@@ -1794,36 +1659,34 @@ extension VVDiffMetalView: MTKViewDelegate {
             contentHeight: contentHeight,
             totalDisplayBlockCount: displayBlocks.count,
             visibleDisplayBlockRange: visibleBlockRange,
-            cachedSceneBlockRange: cachedSceneBlockRange,
-            cachedScenePrimitiveCount: cachedScene?.primitives.count ?? 0
+            cachedRenderBlockRange: cachedRenderBlockRange,
+            cachedRenderDrawCallCount: cachedRenderArtifacts?.drawCallCount ?? 0
         )
     }
 
-    private func debugBuildCurrentSceneIfNeeded() {
+    private func debugBuildCurrentRenderArtifactsIfNeeded() {
         let renderWidth = currentRenderWidth()
         let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
         let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
         guard let layoutPlan else { return }
-        guard cachedScene == nil || !(cachedSceneKey?.contains(
+        guard cachedRenderArtifacts == nil || !(cachedRenderKey?.contains(
             renderWidth: renderWidth,
             highlightVersion: highlightSceneVersion,
             requiredBlockRange: requiredBlockRange
         ) ?? false) else {
             return
         }
-        let artifacts = Self.buildSceneArtifacts(
+        let artifacts = Self.buildRenderArtifacts(
             layoutPlan: layoutPlan,
             blockRange: requiredBlockRange,
-            theme: markdownTheme(from: theme),
+            renderer: renderer,
+            theme: theme,
             baseFont: configuration.font,
+            options: renderOptions,
             highlightedRanges: highlightedRanges
         )
-        cachedScene = artifacts.scene
-        cachedSceneKey = sceneKey
-        cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
-        cachedSceneVisibilityIndex = artifacts.visibilityIndex
-        cachedVisibleBucketRange = nil
-        cachedVisiblePrimitiveIndices.removeAll(keepingCapacity: true)
+        cachedRenderArtifacts = artifacts
+        cachedRenderKey = sceneKey
     }
 
     fileprivate func debugScrollTo(y: CGFloat) {
@@ -2043,7 +1906,7 @@ extension VVDiffMetalView: VVTextHitTestable {
             return DiffTextPosition(rowIndex: geo.rowIndex, charOffset: 0, paneX: geo.paneX)
         }
 
-        let dr = ensureDiffRenderer()
+        let dr = ensureDiffMetrics()
 
         // Convert X to character offset (monospace: relativeX / charWidth)
         let relativeX = docPoint.x - geo.paneX - geo.codeStartX - codeInsetX
@@ -2058,7 +1921,7 @@ extension VVDiffMetalView: VVTextHitTestable {
 extension VVDiffMetalView: VVTextSelectionRenderer {
     func selectionQuads(from start: DiffTextPosition, to end: DiffTextPosition, color: SIMD4<Float>) -> [VVQuadPrimitive] {
         var quads: [VVQuadPrimitive] = []
-        let dr = ensureDiffRenderer()
+        let dr = ensureDiffMetrics()
         let selectionPane = start.paneX
         let geometries = materializedRowGeometries(for: start.rowIndex..<(end.rowIndex + 1))
 
@@ -2168,6 +2031,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
     let language: VVLanguage?
     let theme: VVTheme
     let configuration: VVConfiguration
+    let renderOptions: VVDiffRenderOptions
     let renderStyle: VVDiffRenderStyle
     let syntaxHighlightingEnabled: Bool
     let onFileHeaderActivate: ((String) -> Void)?
@@ -2226,6 +2090,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
             style: renderStyle,
             theme: theme,
             configuration: configuration,
+            renderOptions: renderOptions,
             language: language,
             syntaxHighlightingEnabled: syntaxHighlightingEnabled,
             onFileHeaderActivate: onFileHeaderActivate
@@ -2238,6 +2103,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
                 style: renderStyle,
                 theme: theme,
                 configuration: configuration,
+                renderOptions: renderOptions,
                 language: language,
                 syntaxHighlightingEnabled: syntaxHighlightingEnabled,
                 onFileHeaderActivate: onFileHeaderActivate
@@ -2254,6 +2120,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
                 style: renderStyle,
                 theme: theme,
                 configuration: configuration,
+                renderOptions: renderOptions,
                 language: language,
                 syntaxHighlightingEnabled: syntaxHighlightingEnabled,
                 onFileHeaderActivate: onFileHeaderActivate
@@ -2265,6 +2132,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
                 style: renderStyle,
                 theme: theme,
                 configuration: configuration,
+                renderOptions: renderOptions,
                 language: language,
                 syntaxHighlightingEnabled: syntaxHighlightingEnabled,
                 onFileHeaderActivate: onFileHeaderActivate
@@ -2277,6 +2145,7 @@ private struct VVDiffViewRepresentable: NSViewRepresentable {
                     style: renderStyle,
                     theme: theme,
                     configuration: configuration,
+                    renderOptions: renderOptions,
                     language: language,
                     syntaxHighlightingEnabled: syntaxHighlightingEnabled,
                     onFileHeaderActivate: onFileHeaderActivate
@@ -2294,6 +2163,7 @@ public struct VVDiffView: View {
     private var language: VVLanguage?
     private var theme: VVTheme
     private var configuration: VVConfiguration
+    private var renderOptions: VVDiffRenderOptions
     private var renderStyle: VVDiffRenderStyle
     private var syntaxHighlightingEnabled: Bool
     private var onFileHeaderActivate: ((String) -> Void)?
@@ -2303,6 +2173,7 @@ public struct VVDiffView: View {
         self.language = nil
         self.theme = .defaultDark
         self.configuration = .default
+        self.renderOptions = .full
         self.renderStyle = .inline
         self.syntaxHighlightingEnabled = true
         self.onFileHeaderActivate = nil
@@ -2314,6 +2185,7 @@ public struct VVDiffView: View {
             language: language,
             theme: theme,
             configuration: configuration,
+            renderOptions: renderOptions,
             renderStyle: renderStyle,
             syntaxHighlightingEnabled: syntaxHighlightingEnabled,
             onFileHeaderActivate: onFileHeaderActivate
@@ -2343,10 +2215,52 @@ extension VVDiffView {
         return view
     }
 
+    /// Set rendering options for diff-specific chrome and highlighting.
+    public func renderOptions(_ renderOptions: VVDiffRenderOptions) -> VVDiffView {
+        var view = self
+        view.renderOptions = renderOptions
+        return view
+    }
+
     /// Select inline or side-by-side rendering.
     public func renderStyle(_ style: VVDiffRenderStyle) -> VVDiffView {
         var view = self
         view.renderStyle = style
+        return view
+    }
+
+    /// Show or hide diff line numbers without changing the surrounding layout.
+    public func showsLineNumbers(_ showsLineNumbers: Bool) -> VVDiffView {
+        var view = self
+        view.renderOptions.showsLineNumbers = showsLineNumbers
+        return view
+    }
+
+    /// Show or hide added/deleted row background fills.
+    public func showsBackgrounds(_ showsBackgrounds: Bool) -> VVDiffView {
+        var view = self
+        view.renderOptions.showsBackgrounds = showsBackgrounds
+        return view
+    }
+
+    /// Choose how diff markers are drawn for changed rows.
+    public func changeIndicatorStyle(_ style: VVDiffChangeIndicatorStyle) -> VVDiffView {
+        var view = self
+        view.renderOptions.changeIndicatorStyle = style
+        return view
+    }
+
+    /// Control whether inline word-level highlights are shown inside paired changes.
+    public func inlineHighlightStyle(_ style: VVDiffInlineHighlightStyle) -> VVDiffView {
+        var view = self
+        view.renderOptions.inlineHighlightStyle = style
+        return view
+    }
+
+    /// Toggle diff line wrapping.
+    public func wrapLines(_ wrapLines: Bool) -> VVDiffView {
+        var view = self
+        view.configuration = view.configuration.with(wrapLines: wrapLines)
         return view
     }
 
@@ -2369,5 +2283,177 @@ extension VVDiffView {
         var view = self
         view.onFileHeaderActivate = handler
         return view
+    }
+}
+
+public struct VVDiffControlsState: Equatable {
+    public var renderStyle: VVDiffRenderStyle
+    public var wrapLines: Bool
+    public var showsLineNumbers: Bool
+    public var showsBackgrounds: Bool
+    public var changeIndicatorStyle: VVDiffChangeIndicatorStyle
+    public var inlineHighlightStyle: VVDiffInlineHighlightStyle
+
+    public init(
+        renderStyle: VVDiffRenderStyle = .sideBySide,
+        wrapLines: Bool = true,
+        showsLineNumbers: Bool = true,
+        showsBackgrounds: Bool = true,
+        changeIndicatorStyle: VVDiffChangeIndicatorStyle = .bars,
+        inlineHighlightStyle: VVDiffInlineHighlightStyle = .word
+    ) {
+        self.renderStyle = renderStyle
+        self.wrapLines = wrapLines
+        self.showsLineNumbers = showsLineNumbers
+        self.showsBackgrounds = showsBackgrounds
+        self.changeIndicatorStyle = changeIndicatorStyle
+        self.inlineHighlightStyle = inlineHighlightStyle
+    }
+}
+
+public enum VVDiffControlsStyle: Sendable {
+    case toolbar
+    case sidebar
+}
+
+extension VVDiffView {
+    public func controlsState(_ state: VVDiffControlsState) -> VVDiffView {
+        renderStyle(state.renderStyle)
+            .wrapLines(state.wrapLines)
+            .showsLineNumbers(state.showsLineNumbers)
+            .showsBackgrounds(state.showsBackgrounds)
+            .changeIndicatorStyle(state.changeIndicatorStyle)
+            .inlineHighlightStyle(state.inlineHighlightStyle)
+    }
+}
+
+public struct VVDiffControls: View {
+    @Binding private var state: VVDiffControlsState
+    private let style: VVDiffControlsStyle
+
+    public init(
+        state: Binding<VVDiffControlsState>,
+        style: VVDiffControlsStyle = .toolbar
+    ) {
+        self._state = state
+        self.style = style
+    }
+
+    public var body: some View {
+        Group {
+            switch style {
+            case .toolbar:
+                toolbarLayout
+            case .sidebar:
+                sidebarLayout
+            }
+        }
+    }
+
+    private var toolbarLayout: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Layout", selection: $state.renderStyle) {
+                Text("Inline").tag(VVDiffRenderStyle.inline)
+                Text("Side By Side").tag(VVDiffRenderStyle.sideBySide)
+            }
+            .pickerStyle(.segmented)
+
+            HStack(spacing: 12) {
+                Picker("Indicators", selection: $state.changeIndicatorStyle) {
+                    Text("Bars").tag(VVDiffChangeIndicatorStyle.bars)
+                    Text("Classic").tag(VVDiffChangeIndicatorStyle.classic)
+                    Text("None").tag(VVDiffChangeIndicatorStyle.none)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 360)
+
+                Picker("Inline", selection: $state.inlineHighlightStyle) {
+                    Text("Word").tag(VVDiffInlineHighlightStyle.word)
+                    Text("Off").tag(VVDiffInlineHighlightStyle.off)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 110)
+
+                Toggle("Backgrounds", isOn: $state.showsBackgrounds)
+                    .toggleStyle(.switch)
+
+                Toggle("Wrapping", isOn: $state.wrapLines)
+                    .toggleStyle(.switch)
+
+                Toggle("Line Numbers", isOn: $state.showsLineNumbers)
+                    .toggleStyle(.switch)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.82))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private var sidebarLayout: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sidebarControlBlock("Layout") {
+                Picker("", selection: $state.renderStyle) {
+                    Text("Inline").tag(VVDiffRenderStyle.inline)
+                    Text("Side By Side").tag(VVDiffRenderStyle.sideBySide)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            sidebarControlBlock("Indicators") {
+                Picker("", selection: $state.changeIndicatorStyle) {
+                    Text("Bars").tag(VVDiffChangeIndicatorStyle.bars)
+                    Text("Classic").tag(VVDiffChangeIndicatorStyle.classic)
+                    Text("None").tag(VVDiffChangeIndicatorStyle.none)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            sidebarControlBlock("Inline Highlights") {
+                Picker("", selection: $state.inlineHighlightStyle) {
+                    Text("Word").tag(VVDiffInlineHighlightStyle.word)
+                    Text("Off").tag(VVDiffInlineHighlightStyle.off)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            sidebarControlBlock("Options") {
+                VStack(spacing: 8) {
+                    sidebarToggleRow("Backgrounds", isOn: $state.showsBackgrounds)
+                    sidebarToggleRow("Wrapping", isOn: $state.wrapLines)
+                    sidebarToggleRow("Line Numbers", isOn: $state.showsLineNumbers)
+                }
+            }
+        }
+    }
+
+    private func sidebarControlBlock<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sidebarToggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+        }
+        .toggleStyle(.switch)
     }
 }

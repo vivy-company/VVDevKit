@@ -1,7 +1,7 @@
-//  MarkdownGlyphAtlas.swift
-//  VVMarkdown
+//  VVTextGlyphAtlas.swift
+//  VVMetalPrimitives
 //
-//  Glyph atlas manager for markdown text rendering
+//  Glyph atlas manager for shared text rendering
 
 import Foundation
 import Metal
@@ -17,9 +17,9 @@ import UIKit
 
 // MARK: - Cached Glyph
 
-public struct MarkdownCachedGlyph {
+public struct VVTextCachedGlyph {
     public let glyphID: CGGlyph
-    public let fontVariant: FontVariant
+    public let fontVariant: VVFontVariant
     public let atlasIndex: Int
     public let uvRect: CGRect          // UV coordinates in pixel space
     public let size: CGSize            // Size in screen coordinates
@@ -29,7 +29,7 @@ public struct MarkdownCachedGlyph {
 
     public init(
         glyphID: CGGlyph,
-        fontVariant: FontVariant,
+        fontVariant: VVFontVariant,
         atlasIndex: Int,
         uvRect: CGRect,
         size: CGSize,
@@ -52,7 +52,7 @@ public struct MarkdownCachedGlyph {
 
 private struct GlyphKey: Hashable {
     let glyphID: CGGlyph
-    let fontVariant: FontVariant
+    let fontVariant: VVFontVariant
     let fontSize: Int  // Scaled font size for cache key
     let baseFontName: String  // Distinguishes same variant with different base fonts
 }
@@ -69,14 +69,14 @@ private struct FontGlyphKey: Hashable {
 
 private struct VariantFontKey: Hashable {
     let baseFontName: String
-    let variant: FontVariant
+    let variant: VVFontVariant
     let size: Int
 }
 
-// MARK: - Markdown Glyph Atlas
+// MARK: - Text Glyph Atlas
 
-/// Manages glyph texture atlases for markdown Metal text rendering
-public final class MarkdownGlyphAtlas {
+/// Manages glyph texture atlases for shared Metal text rendering.
+public final class VVTextGlyphAtlas {
 
     // MARK: - Constants
 
@@ -88,8 +88,8 @@ public final class MarkdownGlyphAtlas {
     private let device: MTLDevice
     private var atlasPages: [MTLTexture] = []
     private var colorAtlasPages: [MTLTexture] = []
-    private var glyphCache: [GlyphKey: MarkdownCachedGlyph] = [:]
-    private var fontGlyphCache: [FontGlyphKey: MarkdownCachedGlyph] = [:]
+    private var glyphCache: [GlyphKey: VVTextCachedGlyph] = [:]
+    private var fontGlyphCache: [FontGlyphKey: VVTextCachedGlyph] = [:]
     private var variantFontCache: [VariantFontKey: CTFont] = [:]
     private var fontCache: [FontKey: CTFont] = [:]
 
@@ -106,7 +106,7 @@ public final class MarkdownGlyphAtlas {
     private var colorPackingY = 0
     private var colorRowHeight = 0
 
-    private let queue = DispatchQueue(label: "com.vvmarkdown.glyphatlas")
+    private let queue = DispatchQueue(label: "com.vvdevkit.textglyphatlas")
 
     // MARK: - Initialization
 
@@ -122,7 +122,7 @@ public final class MarkdownGlyphAtlas {
         }
     }
 
-    private func fontFor(variant: FontVariant, size: CGFloat, baseFont override: VVFont? = nil) -> CTFont {
+    private func fontFor(variant: VVFontVariant, size: CGFloat, baseFont override: VVFont? = nil) -> CTFont {
         let resolvedBase = override ?? self.baseFont
         let scaledSize = size * scaleFactor
         let intSize = Int(scaledSize)
@@ -272,7 +272,7 @@ public final class MarkdownGlyphAtlas {
 
     /// Get or create a cached glyph for rendering.
     /// Pass `baseFont` to correctly derive font variants when the atlas is shared across views with different base fonts.
-    public func glyph(for glyphID: CGGlyph, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+    public func glyph(for glyphID: CGGlyph, variant: VVFontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> VVTextCachedGlyph? {
         let resolvedBase = baseFont ?? self.baseFont
         let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
         let intSize = Int(fontSize * scaleFactor)
@@ -287,7 +287,7 @@ public final class MarkdownGlyphAtlas {
         }
     }
 
-    private func glyphUnsafe(for glyphID: CGGlyph, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+    private func glyphUnsafe(for glyphID: CGGlyph, variant: VVFontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> VVTextCachedGlyph? {
         let resolvedBase = baseFont ?? self.baseFont
         let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
         let intSize = Int(fontSize * scaleFactor)
@@ -301,7 +301,7 @@ public final class MarkdownGlyphAtlas {
         return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant, fontSize: fontSize, baseFontName: baseName)
     }
 
-    public func glyph(for glyphID: CGGlyph, font: CTFont, variant: FontVariant = .regular) -> MarkdownCachedGlyph? {
+    public func glyph(for glyphID: CGGlyph, font: CTFont, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
         let fontName = CTFontCopyPostScriptName(font) as String
         let intSize = Int(CTFontGetSize(font) * scaleFactor)
         let key = FontGlyphKey(glyphID: glyphID, fontKey: FontKey(name: fontName, size: intSize))
@@ -320,19 +320,19 @@ public final class MarkdownGlyphAtlas {
         }
     }
 
-    public func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, variant: FontVariant = .regular) -> MarkdownCachedGlyph? {
+    public func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
         let font = fontFor(name: fontName, size: fontSize)
         return glyph(for: glyphID, font: font, variant: variant)
     }
 
     /// Get glyph for a character
-    public func glyph(for character: Character, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+    public func glyph(for character: Character, variant: VVFontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> VVTextCachedGlyph? {
         return queue.sync {
             glyphUnsafe(for: character, variant: variant, fontSize: fontSize, baseFont: baseFont)
         }
     }
 
-    private func glyphUnsafe(for character: Character, variant: FontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> MarkdownCachedGlyph? {
+    private func glyphUnsafe(for character: Character, variant: VVFontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> VVTextCachedGlyph? {
         let resolvedBase = baseFont ?? self.baseFont
         let font = fontFor(variant: variant, size: fontSize, baseFont: resolvedBase)
 
@@ -358,10 +358,10 @@ public final class MarkdownGlyphAtlas {
     private func glyphUnsafe(
         for glyphID: CGGlyph,
         font: CTFont,
-        variant: FontVariant,
+        variant: VVFontVariant,
         fontKey: FontKey,
         fontSize: CGFloat
-    ) -> MarkdownCachedGlyph? {
+    ) -> VVTextCachedGlyph? {
         let key = FontGlyphKey(glyphID: glyphID, fontKey: fontKey)
         if let cached = fontGlyphCache[key] {
             return cached
@@ -387,7 +387,7 @@ public final class MarkdownGlyphAtlas {
         queue.async { [weak self] in
             guard let self = self else { return }
 
-        for variant in [FontVariant.regular, .bold, .monospace] {
+        for variant in [VVFontVariant.regular, .bold, .monospace] {
             for codePoint in 32..<127 {
                 if let scalar = Unicode.Scalar(codePoint) {
                     _ = self.glyphUnsafe(for: Character(scalar), variant: variant, fontSize: fontSize, baseFont: resolvedBase)
@@ -493,7 +493,7 @@ public final class MarkdownGlyphAtlas {
         colorRowHeight = 0
     }
 
-    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: FontVariant, fontSize: CGFloat, storeInVariantCache: Bool = true, baseFontName: String? = nil) -> MarkdownCachedGlyph? {
+    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: VVFontVariant, fontSize: CGFloat, storeInVariantCache: Bool = true, baseFontName: String? = nil) -> VVTextCachedGlyph? {
         var glyph = glyphID
         var boundingRect = CGRect.zero
         CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &boundingRect, 1)
@@ -520,7 +520,7 @@ public final class MarkdownGlyphAtlas {
         let glyphHeight = Int(ceil(boundingRect.height + padding * 2))
 
         guard glyphWidth > 0 && glyphHeight > 0 else {
-            return MarkdownCachedGlyph(
+            return VVTextCachedGlyph(
                 glyphID: glyphID,
                 fontVariant: variant,
                 atlasIndex: currentAtlasIndex,
@@ -639,7 +639,7 @@ public final class MarkdownGlyphAtlas {
         let screenWidth = CGFloat(glyphWidth) / scaleFactor
         let screenHeight = CGFloat(glyphHeight) / scaleFactor
 
-        let cached = MarkdownCachedGlyph(
+        let cached = VVTextCachedGlyph(
             glyphID: glyphID,
             fontVariant: variant,
             atlasIndex: atlasIndex,

@@ -17,6 +17,7 @@ Owns low-level, reusable rendering building blocks:
 - Primitive models (`VVQuadPrimitive`, `VVTextRunPrimitive`, paths, lines, images, table lines, etc.)
 - Scene graph and scene building (`VVNode`, `VVScene`, `VVSceneBuilder`)
 - Rendering/layout composition DSL (`VVView`, stacks, modifiers, components)
+- Shared low-level Metal text/atlas/rendering infrastructure (`VVMetalContext`, glyph atlases, text renderer)
 - Generic text layout/selection data structures and protocols
 - Cross-module value types (`VVColor`, shared geometry/style tokens)
 

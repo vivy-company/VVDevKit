@@ -2107,13 +2107,16 @@ let package = Package(
             ]
         ),
 
-        // Markdown rendering with Metal
+        // Shared rendering substrate
         .target(
             name: "VVMetalPrimitives",
-            dependencies: []
+            dependencies: [],
+            resources: [
+                .process("Metal/VVTextShaders.metal")
+            ]
         ),
 
-        // Markdown rendering with Metal
+        // Markdown rendering
         .target(
             name: "VVMarkdown",
             dependencies: [
@@ -2124,9 +2127,6 @@ let package = Package(
             ],
             exclude: [
                 "Docs"
-            ],
-            resources: [
-                .process("Metal/MarkdownShaders.metal")
             ]
         ),
         .target(

@@ -22,7 +22,7 @@ public final class MetalTextView: MTKView {
 
     // MARK: - Properties
 
-    public private(set) var renderer: MarkdownMetalRenderer!
+    public private(set) var renderer: VVTextMetalRenderer!
     public private(set) var layoutEngine: TextLayoutEngine!
     public var metalContext: VVMetalContext?
 
@@ -452,9 +452,9 @@ public final class MetalTextView: MTKView {
 
         // Initialize primitive renderer
         if let ctx = metalContext {
-            renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: layerScale)
+            renderer = VVTextMetalRenderer(context: ctx, baseFont: font, scaleFactor: layerScale)
         } else {
-            print("Failed to initialize MarkdownMetalRenderer: no VVMetalContext available")
+            print("Failed to initialize VVTextMetalRenderer: no VVMetalContext available")
             return
         }
 
@@ -1156,10 +1156,10 @@ public final class MetalTextView: MTKView {
         }
     }
 
-    private func renderScene(_ scene: VVScene, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
+    private func renderScene(_ scene: VVScene, encoder: MTLRenderCommandEncoder, renderer: VVTextMetalRenderer) {
         var currentClip: CGRect? = nil
-        var glyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
-        var colorGlyphInstances: [Int: [MarkdownGlyphInstance]] = [:]
+        var glyphInstances: [Int: [VVTextGlyphInstance]] = [:]
+        var colorGlyphInstances: [Int: [VVTextGlyphInstance]] = [:]
         var underlines: [LineInstance] = []
         var strikethroughs: [LineInstance] = []
 
@@ -1207,7 +1207,7 @@ public final class MetalTextView: MTKView {
         updateClip(nil)
     }
 
-    private func renderPrimitive(_ primitive: VVPrimitive, encoder: MTLRenderCommandEncoder, renderer: MarkdownMetalRenderer) {
+    private func renderPrimitive(_ primitive: VVPrimitive, encoder: MTLRenderCommandEncoder, renderer: VVTextMetalRenderer) {
         let transform = primitive.transform
         switch primitive.kind {
         case .quad(let quad):
@@ -1339,7 +1339,7 @@ public final class MetalTextView: MTKView {
         _ gradient: VVGradientQuadPrimitive,
         transform: VVTransform2D? = nil,
         encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
+        renderer: VVTextMetalRenderer
     ) {
         let frame = transformed(rect: gradient.frame, by: transform).integral
         guard frame.width > 0, frame.height > 0 else { return }
@@ -1368,7 +1368,7 @@ public final class MetalTextView: MTKView {
         _ quad: VVQuadPrimitive,
         transform: VVTransform2D?,
         encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
+        renderer: VVTextMetalRenderer
     ) {
         let frame = transformed(rect: quad.frame, by: transform)
         guard frame.width > 0, frame.height > 0 else { return }
@@ -1407,7 +1407,7 @@ public final class MetalTextView: MTKView {
         _ line: VVLinePrimitive,
         transform: VVTransform2D?,
         encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
+        renderer: VVTextMetalRenderer
     ) {
         let transformedLine = VVLinePrimitive(
             start: transformed(point: line.start, by: transform),
@@ -1438,7 +1438,7 @@ public final class MetalTextView: MTKView {
         _ path: VVPathPrimitive,
         inheritedTransform: VVTransform2D?,
         encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer
+        renderer: VVTextMetalRenderer
     ) {
         let combinedTransform: VVTransform2D
         switch (inheritedTransform, path.transform.isIdentity ? nil : path.transform) {
@@ -1599,9 +1599,9 @@ public final class MetalTextView: MTKView {
 
     private func appendTextPrimitive(
         _ run: VVTextRunPrimitive,
-        renderer: MarkdownMetalRenderer,
-        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
-        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]],
+        renderer: VVTextMetalRenderer,
+        glyphInstances: inout [Int: [VVTextGlyphInstance]],
+        colorGlyphInstances: inout [Int: [VVTextGlyphInstance]],
         underlines: inout [LineInstance],
         strikethroughs: inout [LineInstance]
     ) {
@@ -1642,37 +1642,23 @@ public final class MetalTextView: MTKView {
         }
     }
 
-    private func cachedGlyph(for glyph: VVTextGlyph, renderer: MarkdownMetalRenderer) -> MarkdownCachedGlyph? {
-        let layoutVariant = toLayoutFontVariant(glyph.fontVariant)
+    private func cachedGlyph(for glyph: VVTextGlyph, renderer: VVTextMetalRenderer) -> VVTextCachedGlyph? {
         let cgGlyph = CGGlyph(glyph.glyphID)
         if let fontName = glyph.fontName {
-            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
+            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: glyph.fontVariant)
         }
-        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
-    }
-
-    private func toLayoutFontVariant(_ variant: VVFontVariant) -> VVMarkdown.FontVariant {
-        switch variant {
-        case .regular: return .regular
-        case .semibold: return .semibold
-        case .semiboldItalic: return .semiboldItalic
-        case .bold: return .bold
-        case .italic: return .italic
-        case .boldItalic: return .boldItalic
-        case .monospace: return .monospace
-        case .emoji: return .emoji
-        }
+        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: glyph.fontVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
     private func appendGlyphInstance(
         _ glyph: VVTextGlyph,
-        renderer: MarkdownMetalRenderer,
-        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
-        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]]
+        renderer: VVTextMetalRenderer,
+        glyphInstances: inout [Int: [VVTextGlyphInstance]],
+        colorGlyphInstances: inout [Int: [VVTextGlyphInstance]]
     ) {
         guard let cached = cachedGlyph(for: glyph, renderer: renderer) else { return }
         let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
-        let instance = MarkdownGlyphInstance(
+        let instance = VVTextGlyphInstance(
             position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x), Float(glyph.position.y + cached.bearing.y)),
             size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
             uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
@@ -1689,9 +1675,9 @@ public final class MetalTextView: MTKView {
     }
 
     private func renderGlyphBatches(
-        _ batches: [Int: [MarkdownGlyphInstance]],
+        _ batches: [Int: [VVTextGlyphInstance]],
         encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer,
+        renderer: VVTextMetalRenderer,
         isColor: Bool
     ) {
         guard !batches.isEmpty else { return }
@@ -1814,7 +1800,7 @@ public final class MetalTextView: MTKView {
 
     private func rebuildRenderer(for font: NSFont) {
         if let ctx = metalContext {
-            renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: backingScaleFactor)
+            renderer = VVTextMetalRenderer(context: ctx, baseFont: font, scaleFactor: backingScaleFactor)
         }
     }
 
@@ -3570,7 +3556,7 @@ public final class MetalTextView: MTKView {
         return name.hasPrefix(".SF") || name.hasPrefix(".AppleSystem") || name.hasPrefix(".")
     }
 
-    private func glyphAdvance(for character: Character, fontSize: CGFloat, variant: VVMarkdown.FontVariant = .monospace) -> CGFloat {
+    private func glyphAdvance(for character: Character, fontSize: CGFloat, variant: VVFontVariant = .monospace) -> CGFloat {
         guard let cached = renderer?.glyphAtlas.glyph(for: character, variant: variant, fontSize: fontSize, baseFont: renderer?.baseFont) else {
             return estimatedCharWidth
         }
@@ -3984,7 +3970,7 @@ public final class MetalTextView: MTKView {
                         if ex <= sx {
                             let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
                                 for: Character(" "),
-                                variant: .regular,
+                                variant: VVFontVariant.regular,
                                 fontSize: currentFont.pointSize,
                                 baseFont: renderer?.baseFont
                             )?.advance ?? 8
@@ -4002,7 +3988,7 @@ public final class MetalTextView: MTKView {
                     if endX <= startX {
                         let spaceWidth: CGFloat = renderer?.glyphAtlas.glyph(
                             for: Character(" "),
-                            variant: .regular,
+                            variant: VVFontVariant.regular,
                             fontSize: currentFont.pointSize,
                             baseFont: renderer?.baseFont
                         )?.advance ?? 8

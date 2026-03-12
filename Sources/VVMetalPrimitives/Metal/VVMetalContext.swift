@@ -1,5 +1,5 @@
 //  VVMetalContext.swift
-//  VVMarkdown
+//  VVMetalPrimitives
 //
 //  Shared Metal resources (device, command queue, pipelines, samplers, glyph atlas)
 //  that can be reused across multiple views to avoid redundant GPU allocations.
@@ -19,11 +19,11 @@ import UIKit
 // MARK: - VVMetalContext
 
 /// Holds shared, immutable Metal resources: device, command queue, shader library,
-/// pipeline states, and samplers.  Multiple ``MarkdownMetalRenderer`` instances can
+/// pipeline states, and samplers.  Multiple ``VVTextMetalRenderer`` instances can
 /// reference one context so pipelines are compiled only once.
 ///
 /// The glyph atlas is intentionally **not** shared here because each view may use
-/// a different base font (e.g. proportional for markdown, monospace for code).
+/// a different base font.
 public final class VVMetalContext {
 
     // MARK: - Shared Singleton
@@ -69,7 +69,7 @@ public final class VVMetalContext {
         self.device = device
 
         guard let queue = device.makeCommandQueue() else {
-            throw MarkdownRendererError.failedToCreateCommandQueue
+            throw VVMetalRendererError.failedToCreateCommandQueue
         }
         self.commandQueue = queue
 
@@ -77,11 +77,11 @@ public final class VVMetalContext {
         let library = try Self.loadLibrary(device: device)
 
         // Create all pipeline states
-        glyphPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownGlyphFragmentShader", label: "Markdown Glyph")
-        colorGlyphPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownColorGlyphFragmentShader", label: "Markdown Color Glyph", premultipliedAlpha: true)
-        quadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownQuadVertexShader", fragment: "markdownQuadFragmentShader", label: "Markdown Quad")
-        roundedQuadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownQuadVertexShader", fragment: "markdownRoundedQuadFragmentShader", label: "Markdown Rounded Quad")
-        gradientQuadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGradientQuadVertexShader", fragment: "markdownGradientQuadFragmentShader", label: "Markdown Gradient Quad")
+        glyphPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownGlyphFragmentShader", label: "Text Glyph")
+        colorGlyphPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGlyphVertexShader", fragment: "markdownColorGlyphFragmentShader", label: "Text Color Glyph", premultipliedAlpha: true)
+        quadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownQuadVertexShader", fragment: "markdownQuadFragmentShader", label: "Quad")
+        roundedQuadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownQuadVertexShader", fragment: "markdownRoundedQuadFragmentShader", label: "Rounded Quad")
+        gradientQuadPipeline = try Self.createPipeline(device: device, library: library, vertex: "markdownGradientQuadVertexShader", fragment: "markdownGradientQuadFragmentShader", label: "Gradient Quad")
         bulletPipeline = try Self.createPipeline(device: device, library: library, vertex: "bulletVertexShader", fragment: "bulletFragmentShader", label: "Bullet")
         checkboxPipeline = try Self.createPipeline(device: device, library: library, vertex: "checkboxVertexShader", fragment: "checkboxFragmentShader", label: "Checkbox")
         thematicBreakPipeline = try Self.createPipeline(device: device, library: library, vertex: "thematicBreakVertexShader", fragment: "thematicBreakFragmentShader", label: "Thematic Break")
@@ -101,7 +101,7 @@ public final class VVMetalContext {
         nearestDesc.sAddressMode = .clampToEdge
         nearestDesc.tAddressMode = .clampToEdge
         guard let nearest = device.makeSamplerState(descriptor: nearestDesc) else {
-            throw MarkdownRendererError.failedToCreatePipelineState
+            throw VVMetalRendererError.failedToCreatePipelineState
         }
         self.samplerState = nearest
 
@@ -112,27 +112,27 @@ public final class VVMetalContext {
         linearDesc.sAddressMode = .clampToEdge
         linearDesc.tAddressMode = .clampToEdge
         guard let linear = device.makeSamplerState(descriptor: linearDesc) else {
-            throw MarkdownRendererError.failedToCreatePipelineState
+            throw VVMetalRendererError.failedToCreatePipelineState
         }
         self.imageSamplerState = linear
     }
 
     // MARK: - Glyph Atlas Cache
 
-    private var atlasCache: [Int: MarkdownGlyphAtlas] = [:]  // scaleFactor (tenths) -> atlas
+    private var atlasCache: [Int: VVTextGlyphAtlas] = [:]  // scaleFactor (tenths) -> atlas
     private let atlasCacheLock = NSLock()
 
     /// Returns the shared glyph atlas for a given scale factor.
     /// All views at the same scale share one atlas (~80MB GPU memory), regardless of font.
     /// The atlas handles multiple fonts internally via font-name-based glyph lookups.
-    public func sharedAtlas(baseFont: VVFont, scaleFactor: CGFloat) -> MarkdownGlyphAtlas {
+    public func sharedAtlas(baseFont: VVFont, scaleFactor: CGFloat) -> VVTextGlyphAtlas {
         let key = Int(scaleFactor * 10)
         atlasCacheLock.lock()
         defer { atlasCacheLock.unlock() }
         if let cached = atlasCache[key] {
             return cached
         }
-        let atlas = MarkdownGlyphAtlas(device: device, baseFont: baseFont, scaleFactor: scaleFactor)
+        let atlas = VVTextGlyphAtlas(device: device, baseFont: baseFont, scaleFactor: scaleFactor)
         atlasCache[key] = atlas
         return atlas
     }
@@ -283,7 +283,7 @@ public final class VVMetalContext {
         if let defaultLibrary = device.makeDefaultLibrary() {
             return defaultLibrary
         }
-        throw MarkdownRendererError.failedToLoadShaderLibrary
+        throw VVMetalRendererError.failedToLoadShaderLibrary
     }
 
     private static func loadShaderSource() -> String? {
@@ -293,7 +293,7 @@ public final class VVMetalContext {
         let bundle = Bundle(for: VVMetalContext.self)
         #endif
 
-        guard let url = bundle.url(forResource: "MarkdownShaders", withExtension: "metal") else {
+        guard let url = bundle.url(forResource: "VVTextShaders", withExtension: "metal") else {
             return nil
         }
         return try? String(contentsOf: url, encoding: .utf8)
@@ -315,7 +315,7 @@ public final class VVMetalContext {
     private static func createPipeline(device: MTLDevice, library: MTLLibrary, vertex: String, fragment: String, label: String, premultipliedAlpha: Bool = false) throws -> MTLRenderPipelineState {
         guard let vertexFn = library.makeFunction(name: vertex),
               let fragmentFn = library.makeFunction(name: fragment) else {
-            throw MarkdownRendererError.failedToCreateShaderFunction(vertex)
+            throw VVMetalRendererError.failedToCreateShaderFunction(vertex)
         }
 
         let descriptor = MTLRenderPipelineDescriptor()

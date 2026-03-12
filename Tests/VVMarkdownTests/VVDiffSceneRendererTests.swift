@@ -40,6 +40,32 @@ final class VVDiffSceneRendererTests: XCTestCase {
         XCTAssertFalse(pairedChange.right?.inlineChanges.isEmpty ?? true)
     }
 
+    func testAnalyzePairsReplacementAcrossMetadataMarker() throws {
+        let diff = """
+        diff --git a/file.txt b/file.txt
+        index 1111111..2222222 100644
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        \\ No newline at end of file
+        +new
+        """
+
+        let document = VVDiffSceneRenderer.analyze(unifiedDiff: diff)
+
+        let pairedChange = try XCTUnwrap(document.splitRows.first {
+            $0.left?.kind == .deleted && $0.right?.kind == .added
+        })
+
+        XCTAssertEqual(pairedChange.left?.text, "old")
+        XCTAssertEqual(pairedChange.right?.text, "new")
+        XCTAssertFalse(document.splitRows.contains {
+            ($0.left?.text == "old" && $0.right == nil) ||
+            ($0.left == nil && $0.right?.text == "new")
+        })
+    }
+
     func testCompactInlineRenderIsShorterThanFullRender() throws {
         let theme = MarkdownTheme.dark
         let font = try makeFont()
@@ -181,21 +207,16 @@ final class VVDiffSceneRendererTests: XCTestCase {
         )
 
         let paneWidth = max(CGFloat(420), floor(CGFloat(960) / 2))
-        // Stripes are batched into a single path whose bounds extend beyond the pane
-        // (the clip rect handles visual containment), so filter by clip rect instead.
-        let emptyStripePrimitives = result.scene.primitives.filter { primitive in
-            guard case .path = primitive.kind else { return false }
-            guard let clip = primitive.clipRect, clip.maxX <= paneWidth + 1 else { return false }
-            return true
+        let leftPaneRect = CGRect(x: 0, y: 0, width: paneWidth, height: ceil(result.contentHeight))
+        let emptyStripeBounds = result.scene.primitives.reduce(into: CGRect.null) { partialResult, primitive in
+            guard case let .path(path) = primitive.kind else { return }
+            let candidateBounds = primitive.clipRect ?? path.bounds
+            let clippedBounds = candidateBounds.intersection(leftPaneRect)
+            guard !clippedBounds.isNull, clippedBounds.height > 0.5 else { return }
+            partialResult = partialResult.union(clippedBounds)
         }
 
-        XCTAssertFalse(emptyStripePrimitives.isEmpty)
-
-        let emptyStripeBounds = emptyStripePrimitives.reduce(into: CGRect.null) { partialResult, primitive in
-            if let clip = primitive.clipRect {
-                partialResult = partialResult.union(clip)
-            }
-        }
+        XCTAssertFalse(emptyStripeBounds.isNull)
 
         let texture = try renderDiffScene(result.scene, viewportSize: CGSize(width: 960, height: ceil(result.contentHeight)), font: font)
         let sampleRect = CGRect(
@@ -307,6 +328,63 @@ final class VVDiffSceneRendererTests: XCTestCase {
         )
         let uniqueColors = try uniqueBGRAColors(in: texture, sampleRect: sampleRect, step: 1)
         XCTAssertGreaterThan(uniqueColors.count, 2)
+        #else
+        throw XCTSkip("Metal is unavailable on this platform.")
+        #endif
+    }
+
+    func testSideBySideWrappedShorterPaneStillShowsHatchBelowContent() throws {
+        #if canImport(Metal)
+        let theme = MarkdownTheme.dark
+        let font = try makeFont()
+        let repeated = String(repeating: "wrapped_segment ", count: 24)
+        let diff = """
+        diff --git a/Sources/Feature.swift b/Sources/Feature.swift
+        index 1111111..2222222 100644
+        --- a/Sources/Feature.swift
+        +++ b/Sources/Feature.swift
+        @@ -10,1 +10,1 @@
+        -let value = 1
+        +let value = "\(repeated)"
+        """
+
+        let document = VVDiffSceneRenderer.analyze(unifiedDiff: diff)
+        let layout = VVDiffLayoutBuilder.makeLayout(
+            document: document,
+            width: 840,
+            baseFont: font,
+            style: .sideBySide,
+            wrapLines: true
+        )
+        let result = VVDiffSceneRenderer.render(
+            layout: layout,
+            theme: theme,
+            baseFont: font,
+            options: .full
+        )
+
+        let splitBlock = try XCTUnwrap(layout.blocks.first {
+            if case .splitRow = $0.kind {
+                return true
+            }
+            return false
+        })
+        XCTAssertGreaterThan(splitBlock.height, layout.metrics.lineHeight)
+
+        let sampleRect = CGRect(
+            x: 0,
+            y: splitBlock.y + layout.metrics.lineHeight + 2,
+            width: layout.metrics.columnWidth,
+            height: max(1, splitBlock.height - layout.metrics.lineHeight - 4)
+        )
+        let texture = try renderDiffScene(
+            result.scene,
+            viewportSize: CGSize(width: layout.metrics.totalWidth, height: ceil(result.contentHeight)),
+            font: font
+        )
+        let uniqueColors = try uniqueBGRAColors(in: texture, sampleRect: sampleRect, step: 1)
+
+        XCTAssertGreaterThan(uniqueColors.count, 1)
         #else
         throw XCTSkip("Metal is unavailable on this platform.")
         #endif
@@ -435,7 +513,7 @@ private extension VVDiffSceneRendererTests {
         }
 
         let context = try VVMetalContext(device: device)
-        let renderer = MarkdownMetalRenderer(context: context, baseFont: font, scaleFactor: 2.0)
+        let renderer = VVTextMetalRenderer(context: context, baseFont: font, scaleFactor: 2.0)
         let sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: font)
 
         let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(

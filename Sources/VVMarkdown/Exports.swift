@@ -28,6 +28,7 @@
 //   - MarkdownLayoutEngine
 //
 // Metal Rendering:
+//   - Shared primitives/text renderer are owned by VVMetalPrimitives and re-exported here.
 //   - VVMetalContext (shared Metal resources + SwiftUI EnvironmentKey: \.vvMetalContext)
 //   - MarkdownUniforms
 //   - MarkdownGlyphInstance, QuadInstance

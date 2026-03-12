@@ -6,7 +6,7 @@ import XCTest
 import VVMetalPrimitives
 
 final class HeadlessSceneStressHarness {
-    private let renderer: MarkdownMetalRenderer
+    private let renderer: VVTextMetalRenderer
     private let viewportSize: CGSize
 
     init(baseFont: VVFont, viewportSize: CGSize) throws {
@@ -14,7 +14,7 @@ final class HeadlessSceneStressHarness {
             throw XCTSkip("Metal is unavailable on this machine")
         }
         let context = try VVMetalContext(device: device)
-        self.renderer = MarkdownMetalRenderer(context: context, baseFont: baseFont, scaleFactor: 2.0)
+        self.renderer = VVTextMetalRenderer(context: context, baseFont: baseFont, scaleFactor: 2.0)
         self.viewportSize = viewportSize
     }
 
@@ -305,15 +305,15 @@ final class HeadlessSceneStressHarness {
 
     private func appendTextPrimitive(
         _ run: VVTextRunPrimitive,
-        glyphInstances: inout [Int: [MarkdownGlyphInstance]],
-        colorGlyphInstances: inout [Int: [MarkdownGlyphInstance]],
+        glyphInstances: inout [Int: [VVTextGlyphInstance]],
+        colorGlyphInstances: inout [Int: [VVTextGlyphInstance]],
         underlines: inout [LineInstance],
         strikethroughs: inout [LineInstance]
     ) {
         for glyph in run.glyphs {
             guard let cached = cachedGlyph(for: glyph) else { continue }
             let glyphColor = cached.isColor ? SIMD4<Float>(1, 1, 1, glyph.color.w) : glyph.color
-            let instance = MarkdownGlyphInstance(
+            let instance = VVTextGlyphInstance(
                 position: SIMD2<Float>(Float(glyph.position.x + cached.bearing.x), Float(glyph.position.y + cached.bearing.y)),
                 size: SIMD2<Float>(Float(cached.size.width), Float(cached.size.height)),
                 uvOrigin: SIMD2<Float>(Float(cached.uvRect.origin.x), Float(cached.uvRect.origin.y)),
@@ -356,27 +356,15 @@ final class HeadlessSceneStressHarness {
         }
     }
 
-    private func cachedGlyph(for glyph: VVTextGlyph) -> MarkdownCachedGlyph? {
+    private func cachedGlyph(for glyph: VVTextGlyph) -> VVTextCachedGlyph? {
         let cgGlyph = CGGlyph(glyph.glyphID)
-        let variant: FontVariant
-        switch glyph.fontVariant {
-        case .regular: variant = .regular
-        case .semibold: variant = .semibold
-        case .semiboldItalic: variant = .semiboldItalic
-        case .bold: variant = .bold
-        case .italic: variant = .italic
-        case .boldItalic: variant = .boldItalic
-        case .monospace: variant = .monospace
-        case .emoji: variant = .emoji
-        }
-
         if let fontName = glyph.fontName {
-            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: variant)
+            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: glyph.fontVariant)
         }
-        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: variant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
+        return renderer.glyphAtlas.glyph(for: cgGlyph, variant: glyph.fontVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
 
-    private func renderGlyphBatches(_ batches: [Int: [MarkdownGlyphInstance]], encoder: MTLRenderCommandEncoder, isColor: Bool) {
+    private func renderGlyphBatches(_ batches: [Int: [VVTextGlyphInstance]], encoder: MTLRenderCommandEncoder, isColor: Bool) {
         let textures = isColor ? renderer.glyphAtlas.allColorAtlasTextures : renderer.glyphAtlas.allAtlasTextures
         for atlasIndex in batches.keys.sorted() {
             guard atlasIndex >= 0 && atlasIndex < textures.count else { continue }

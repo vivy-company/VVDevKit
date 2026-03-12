@@ -51,7 +51,7 @@ final class VVDiffViewPerformanceTests: XCTestCase {
         XCTAssertEqual(metrics.storedTextCharacterCount, 0)
     }
 
-    func testHeavySplitDiffViewportSceneWindowCoversVisibleBlocks() {
+    func testHeavySplitDiffViewportRenderWindowCoversVisibleBlocks() {
         var configuration = VVConfiguration.default
         configuration.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
@@ -80,8 +80,8 @@ final class VVDiffViewPerformanceTests: XCTestCase {
 
         for metrics in [topMetrics, midMetrics, deepMetrics] {
             XCTAssertTrue(metrics.sceneCoversVisibleBlocks)
-            XCTAssertGreaterThan(metrics.cachedScenePrimitiveCount, 0)
-            XCTAssertLessThan(metrics.cachedSceneBlockRange.count, metrics.totalDisplayBlockCount)
+            XCTAssertGreaterThan(metrics.cachedRenderDrawCallCount, 0)
+            XCTAssertLessThan(metrics.cachedRenderBlockRange.count, metrics.totalDisplayBlockCount)
         }
     }
 

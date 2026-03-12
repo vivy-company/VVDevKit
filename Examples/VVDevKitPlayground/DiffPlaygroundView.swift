@@ -4,11 +4,17 @@ import SwiftUI
 import VVCode
 
 struct DiffPlaygroundView: View {
-    @State private var selectedSampleID: String = DiffSamples.swiftRefactor.id
-    @State private var renderStyle: VVDiffRenderStyle = .sideBySide
+    @State private var selectedSampleID: String = DiffSamples.asymmetricGaps.id
+    @State private var diffControls = VVDiffControlsState(
+        renderStyle: .sideBySide,
+        wrapLines: true,
+        showsLineNumbers: true,
+        showsBackgrounds: true,
+        changeIndicatorStyle: .bars,
+        inlineHighlightStyle: .word
+    )
     @State private var useDarkTheme = true
     @State private var syntaxHighlightingEnabled = true
-    @State private var wrapLinesEnabled = true
     @State private var fontSize: Double = 13
 
     private var theme: VVTheme {
@@ -20,7 +26,7 @@ struct DiffPlaygroundView: View {
         config.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         config.showLineNumbers = true
         config.showGutter = true
-        config.wrapLines = wrapLinesEnabled
+        config.wrapLines = diffControls.wrapLines
         return config
     }
 
@@ -38,15 +44,18 @@ struct DiffPlaygroundView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Style", selection: $renderStyle) {
-                    Text("Side By Side").tag(VVDiffRenderStyle.sideBySide)
-                    Text("Inline").tag(VVDiffRenderStyle.inline)
-                }
-                .pickerStyle(.segmented)
+                Text("Choose how changes are styled")
+                    .font(.headline)
+                Text("Switch layout, markers, backgrounds, wrapping, line numbers, and inline word highlights.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                VVDiffControls(state: $diffControls, style: .sidebar)
+
+                Divider()
 
                 Toggle("Dark Theme", isOn: $useDarkTheme)
                 Toggle("Syntax Highlighting", isOn: $syntaxHighlightingEnabled)
-                Toggle("Wrap Lines", isOn: $wrapLinesEnabled)
 
                 HStack {
                     Text("Font")
@@ -110,7 +119,7 @@ struct DiffPlaygroundView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(renderStyle == .sideBySide ? "Side-by-side diff" : "Inline diff")
+                    Text(diffControls.renderStyle == .sideBySide ? "Side-by-side diff" : "Inline diff")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(syntaxHighlightingEnabled ? "Highlighting on" : "Highlighting off")
@@ -125,11 +134,11 @@ struct DiffPlaygroundView: View {
             Divider()
 
             VVDiffView(unifiedDiff: selectedSample.diff)
-                .renderStyle(renderStyle)
                 .language(selectedSample.language)
                 .syntaxHighlighting(syntaxHighlightingEnabled)
                 .theme(theme)
                 .configuration(configuration)
+                .controlsState(diffControls)
         }
     }
 }
@@ -168,6 +177,7 @@ private struct DiffSample: Identifiable {
 
 private enum DiffSamples {
     static let all: [DiffSample] = [
+        asymmetricGaps,
         heavySwiftStress,
         swiftRefactor,
         multiFileChange,
@@ -193,6 +203,51 @@ private enum DiffSamples {
             isStressSample: true
         )
     }()
+
+    static let asymmetricGaps = DiffSample(
+        id: "asymmetric-gaps",
+        title: "Asymmetric Gaps",
+        subtitle: "Visible empty-pane hatch demo",
+        language: .typescript,
+        diff: """
+        diff --git a/utils.ts b/code_utils.ts
+        index 1111111..2222222 100644
+        --- a/utils.ts
+        +++ b/code_utils.ts
+        @@ -12,11 +12,15 @@
+          ThemesType,
+        } from '../types';
+
+        -export function createSpanFromToken(token: ThemedToken) {
+        -  const element = document.createElement('div');
+        -  const style = getTokenStyleObject(token);
+        +export function createSpanFromToken(token: ThemedToken) {
+        +  const element = document.createElement('span');
+        +  const style = token.htmlStyle ?? getTokenStyleObject(token);
+           element.style = stringifyTokenStyle(style);
+        +  element.textContent = token.content;
+        +  element.dataset.span = '';
+
+           return element;
+         }
+
+         export function createRow(line: number) {
+           const row = document.createElement('div');
+           row.dataset.line = `${line}`;
+
+        -  const lineColumn = document.createElement('div');
+        -  lineColumn.dataset.columnNumber = '';
+        -  lineColumn.textContent = `${line}`;
+        -
+           const content = document.createElement('div');
+           content.dataset.columnContent = '';
+
+        -  row.appendChild(lineColumn);
+           row.appendChild(content);
+           return { row, content };
+         }
+        """
+    )
 
     static let swiftRefactor = DiffSample(
         id: "swift-refactor",

@@ -77,7 +77,7 @@ public final class VVChatTimelineMetalView: MTKView {
     public weak var renderDataSource: VVChatTimelineRenderDataSource?
     public weak var selectionDelegate: VVChatTimelineSelectionDelegate?
 
-    private var renderer: MarkdownMetalRenderer?
+    private var renderer: VVTextMetalRenderer?
     private var sceneRenderer: MarkdownScenePrimitiveRenderer?
     private var currentDrawableSize: CGSize = .zero
     private var currentScrollOffset: CGPoint = .zero
@@ -169,7 +169,7 @@ public final class VVChatTimelineMetalView: MTKView {
         enableSetNeedsDisplay = true
         isPaused = true
         if let ctx = metalContext {
-            renderer = MarkdownMetalRenderer(context: ctx, baseFont: font, scaleFactor: window?.backingScaleFactor ?? 2.0)
+            renderer = VVTextMetalRenderer(context: ctx, baseFont: font, scaleFactor: window?.backingScaleFactor ?? 2.0)
             sceneRenderer = MarkdownScenePrimitiveRenderer(baseFont: font)
         } else {
             renderer = nil
@@ -317,7 +317,7 @@ public final class VVChatTimelineMetalView: MTKView {
         visibilityIndex: VVPrimitiveVisibilityIndex,
         visibleRect: CGRect,
         encoder: MTLRenderCommandEncoder,
-        renderer: MarkdownMetalRenderer,
+        renderer: VVTextMetalRenderer,
         imageProvider: VVChatTimelineRenderDataSource,
         itemOffset: CGPoint = .zero
     ) {

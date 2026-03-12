@@ -1,14 +1,14 @@
-//  MarkdownShaders.metal
-//  VVMarkdown
+//  VVTextShaders.metal
+//  VVMetalPrimitives
 //
-//  Metal shaders for markdown rendering
+//  Metal shaders for shared text and primitive rendering
 
 #include <metal_stdlib>
 using namespace metal;
 
 // MARK: - Shared Structures
 
-struct MarkdownUniforms {
+struct VVTextRenderUniforms {
     float4x4 projectionMatrix;
     float2 scrollOffset;
     float2 viewportSize;
@@ -39,7 +39,7 @@ vertex GlyphVertexOut markdownGlyphVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant GlyphInstance* instances [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -118,7 +118,7 @@ vertex QuadVertexOut markdownQuadVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant QuadInstance* quads [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -201,7 +201,7 @@ vertex GradientQuadVertexOut markdownGradientQuadVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant GradientQuadInstance* gradients [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -269,7 +269,7 @@ vertex PieSliceVertexOut pieSliceVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant PieSliceInstance* slices [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -341,7 +341,7 @@ vertex BlockQuoteBorderOut blockQuoteBorderVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant BlockQuoteBorder* borders [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -391,7 +391,7 @@ vertex ThematicBreakOut thematicBreakVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant ThematicBreak* breaks [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -441,7 +441,7 @@ vertex BulletOut bulletVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant BulletInstance* bullets [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -508,7 +508,7 @@ vertex CheckboxOut checkboxVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant CheckboxInstance* checkboxes [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -587,7 +587,7 @@ vertex TableGridOut tableGridVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant TableGridLine* lines [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     TableGridLine line = lines[instanceID];
 
@@ -635,7 +635,7 @@ vertex LinkUnderlineOut linkUnderlineVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant LinkUnderline* underlines [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -680,7 +680,7 @@ vertex StrikethroughOut strikethroughVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant Strikethrough* lines [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -732,7 +732,7 @@ vertex ImageVertexOut imageVertexShader(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]],
     constant ImageInstance* images [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]]
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]]
 ) {
     const float2 quadPositions[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
@@ -812,7 +812,7 @@ struct PathVertexOut {
 vertex PathVertexOut pathVertexShader(
     uint vertexID [[vertex_id]],
     constant PathVertex* vertices [[buffer(0)]],
-    constant MarkdownUniforms& uniforms [[buffer(1)]],
+    constant VVTextRenderUniforms& uniforms [[buffer(1)]],
     constant PathUniforms& pathUniforms [[buffer(2)]]
 ) {
     PathVertex pathVertex = vertices[vertexID];
