@@ -438,7 +438,7 @@ private final class VVDiffMetalView: NSView {
         metalView.delegate = self
         metalView.layer?.isOpaque = true
         if let metalLayer = metalView.layer as? CAMetalLayer {
-            metalLayer.maximumDrawableCount = 2
+            metalLayer.maximumDrawableCount = 3
         }
 
         addSubview(scrollView)
@@ -1450,22 +1450,28 @@ extension VVDiffMetalView: MTKViewDelegate {
            ) {
             renderArtifacts = cached
         } else if let layoutPlan {
-            // Cache doesn't cover visible blocks — must build synchronously.
-            sceneCachePath = "REBUILD[\(requiredBlockRange.count)blk]"
-            let artifacts = Self.buildRenderArtifacts(
-                layoutPlan: layoutPlan,
-                blockRange: requiredBlockRange,
-                renderer: renderer,
-                theme: theme,
-                baseFont: configuration.font,
-                options: renderOptions,
-                highlightedRanges: highlightedRanges
-            )
-            renderArtifacts = artifacts
-            cachedRenderArtifacts = artifacts
-            cachedRenderKey = sceneKey
-            staleHighlightedRowIDs.removeAll(keepingCapacity: true)
-            sceneBuildInFlightKey = nil
+            if isActivelyScrolling, let staleArtifacts = cachedRenderArtifacts {
+                sceneCachePath = "stale[\(requiredBlockRange.count)blk]"
+                scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
+                renderArtifacts = staleArtifacts
+            } else {
+                // Cache doesn't cover visible blocks — must build synchronously.
+                sceneCachePath = "REBUILD[\(requiredBlockRange.count)blk]"
+                let artifacts = Self.buildRenderArtifacts(
+                    layoutPlan: layoutPlan,
+                    blockRange: requiredBlockRange,
+                    renderer: renderer,
+                    theme: theme,
+                    baseFont: configuration.font,
+                    options: renderOptions,
+                    highlightedRanges: highlightedRanges
+                )
+                renderArtifacts = artifacts
+                cachedRenderArtifacts = artifacts
+                cachedRenderKey = sceneKey
+                staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+                sceneBuildInFlightKey = nil
+            }
         } else {
             renderArtifacts = cachedRenderArtifacts
         }

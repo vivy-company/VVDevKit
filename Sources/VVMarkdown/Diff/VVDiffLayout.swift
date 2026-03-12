@@ -70,6 +70,7 @@ package struct VVDiffLayoutPlan: Sendable {
     package let metrics: VVDiffLayoutMetrics
     package let totalVisualLineCount: Int
     package let blocks: [VVDiffLayoutBlock]
+    package let materializedBlocks: [VVDiffLayoutMaterializedBlock]
     package let contentHeight: CGFloat
 }
 
@@ -183,6 +184,8 @@ package enum VVDiffLayoutBuilder {
     ) -> VVDiffLayoutPlan {
         var blocks: [VVDiffLayoutBlock] = []
         blocks.reserveCapacity(document.rows.count)
+        var materializedBlocks: [VVDiffLayoutMaterializedBlock] = []
+        materializedBlocks.reserveCapacity(document.rows.count)
         let rowIndexByID = Dictionary(uniqueKeysWithValues: document.rows.enumerated().map { ($0.element.id, $0.offset) })
 
         var y: CGFloat = 0
@@ -201,6 +204,7 @@ package enum VVDiffLayoutBuilder {
                         kind: .unifiedFileHeader(sectionIndex: sectionIndex, rowID: header.id)
                     )
                 )
+                materializedBlocks.append(.unifiedFileHeader(sectionIndex: sectionIndex, rowID: header.id))
                 y += metrics.headerHeight
                 visualLineIndex += 1
             }
@@ -209,11 +213,12 @@ package enum VVDiffLayoutBuilder {
                 if row.kind == .metadata && !includesMetadata {
                     continue
                 }
-                let wrappedLineCount = wrappedTextDescriptorCount(
-                    unifiedRow: row,
+                let wrappedLines = wrappedDescriptors(
+                    for: row,
                     wrapLines: wrapLines,
                     maxChars: maxCharsPerVisualLine
                 )
+                let wrappedLineCount = wrappedLines.count
                 let blockY = y
                 let blockHeight = metrics.lineHeight * CGFloat(wrappedLineCount)
                 guard let rowIndex = rowIndexByID[row.id] else { continue }
@@ -229,6 +234,7 @@ package enum VVDiffLayoutBuilder {
                         kind: .unifiedRow(rowIndex: rowIndex)
                     )
                 )
+                materializedBlocks.append(.unifiedRow(rowIndex: rowIndex, wrappedLines: wrappedLines))
                 y += blockHeight
                 visualLineIndex += wrappedLineCount
             }
@@ -242,6 +248,7 @@ package enum VVDiffLayoutBuilder {
             metrics: metrics,
             totalVisualLineCount: visualLineIndex,
             blocks: blocks,
+            materializedBlocks: materializedBlocks,
             contentHeight: y
         )
     }
@@ -255,6 +262,8 @@ package enum VVDiffLayoutBuilder {
     ) -> VVDiffLayoutPlan {
         var blocks: [VVDiffLayoutBlock] = []
         blocks.reserveCapacity(document.splitRows.count)
+        var materializedBlocks: [VVDiffLayoutMaterializedBlock] = []
+        materializedBlocks.reserveCapacity(document.splitRows.count)
         let rowIndexByID = Dictionary(uniqueKeysWithValues: document.rows.enumerated().map { ($0.element.id, $0.offset) })
 
         var y: CGFloat = 0
@@ -262,11 +271,17 @@ package enum VVDiffLayoutBuilder {
 
         for (splitRowIndex, splitRow) in document.splitRows.enumerated() {
             if let header = splitRow.header {
-                let wrappedLineCount = wrappedTextDescriptorCount(
-                    headerRow: header,
-                    wrapLines: wrapLines,
-                    maxChars: headerMaxCharsPerVisualLine
-                )
+                let wrappedLines: [VVDiffWrappedTextDescriptor]
+                if header.kind == .fileHeader {
+                    wrappedLines = [VVDiffWrappedTextDescriptor(start: 0, length: header.text.count)]
+                } else {
+                    wrappedLines = wrappedDescriptors(
+                        forHeader: header,
+                        wrapLines: wrapLines,
+                        maxChars: headerMaxCharsPerVisualLine
+                    )
+                }
+                let wrappedLineCount = wrappedLines.count
                 let rowHeight = header.kind == .fileHeader
                     ? metrics.headerHeight
                     : metrics.lineHeight * CGFloat(wrappedLineCount)
@@ -287,17 +302,26 @@ package enum VVDiffLayoutBuilder {
                         )
                     )
                 )
+                materializedBlocks.append(
+                    .splitHeader(
+                        rowIndex: headerRowIndex,
+                        isFileHeader: header.kind == .fileHeader,
+                        wrappedLines: wrappedLines
+                    )
+                )
                 y += rowHeight
                 visualLineIndex += header.kind == .fileHeader ? 1 : wrappedLineCount
                 continue
             }
 
-            let leftWrappedLineCount = splitRow.left.map {
-                wrappedTextDescriptorCount(splitCell: $0, wrapLines: wrapLines, maxChars: paneMaxCharsPerVisualLine)
-            } ?? 0
-            let rightWrappedLineCount = splitRow.right.map {
-                wrappedTextDescriptorCount(splitCell: $0, wrapLines: wrapLines, maxChars: paneMaxCharsPerVisualLine)
-            } ?? 0
+            let leftWrappedLines = splitRow.left.map {
+                wrappedDescriptors(forSplitCell: $0, wrapLines: wrapLines, maxChars: paneMaxCharsPerVisualLine)
+            } ?? []
+            let rightWrappedLines = splitRow.right.map {
+                wrappedDescriptors(forSplitCell: $0, wrapLines: wrapLines, maxChars: paneMaxCharsPerVisualLine)
+            } ?? []
+            let leftWrappedLineCount = leftWrappedLines.count
+            let rightWrappedLineCount = rightWrappedLines.count
             let logicalVisualLineCount = max(1, max(leftWrappedLineCount, rightWrappedLineCount))
             let paneCount = (splitRow.left != nil ? 1 : 0) + (splitRow.right != nil ? 1 : 0)
             let blockVisualLineCount = max(1, logicalVisualLineCount * max(1, paneCount))
@@ -324,6 +348,13 @@ package enum VVDiffLayoutBuilder {
                     kind: .splitRow(splitRowIndex: splitRowIndex)
                 )
             )
+            materializedBlocks.append(
+                .splitRow(
+                    splitRowIndex: splitRowIndex,
+                    leftWrappedLines: leftWrappedLines,
+                    rightWrappedLines: rightWrappedLines
+                )
+            )
             y += rowHeight
             visualLineIndex += blockVisualLineCount
         }
@@ -336,6 +367,7 @@ package enum VVDiffLayoutBuilder {
             metrics: metrics,
             totalVisualLineCount: visualLineIndex,
             blocks: blocks,
+            materializedBlocks: materializedBlocks,
             contentHeight: y
         )
     }
@@ -344,68 +376,8 @@ package enum VVDiffLayoutBuilder {
         _ block: VVDiffLayoutBlock,
         in layout: VVDiffLayoutPlan
     ) -> VVDiffLayoutMaterializedBlock? {
-        let rows = layout.document.rows
-        let splitRows = layout.document.splitRows
-        switch block.kind {
-        case let .unifiedFileHeader(sectionIndex, rowID):
-            return .unifiedFileHeader(sectionIndex: sectionIndex, rowID: rowID)
-
-        case let .unifiedRow(rowIndex):
-            guard rows.indices.contains(rowIndex) else { return nil }
-            let row = rows[rowIndex]
-            let wrappedLines = wrappedDescriptors(
-                for: row,
-                wrapLines: layout.wrapLines,
-                maxChars: wrapCapacity(
-                    totalWidth: layout.metrics.totalWidth,
-                    codeStartX: layout.metrics.codeStartX,
-                    codeInsetX: 10,
-                    charWidth: layout.metrics.charWidth
-                )
-            )
-            return .unifiedRow(rowIndex: rowIndex, wrappedLines: wrappedLines)
-
-        case let .splitHeader(rowIndex, isFileHeader):
-            guard rows.indices.contains(rowIndex) else { return nil }
-            let row = rows[rowIndex]
-            let wrappedLines: [VVDiffWrappedTextDescriptor]
-            if isFileHeader {
-                wrappedLines = [VVDiffWrappedTextDescriptor(start: 0, length: row.text.count)]
-            } else {
-                wrappedLines = wrappedDescriptors(
-                    forHeader: row,
-                    wrapLines: layout.wrapLines,
-                    maxChars: wrapCapacity(
-                        totalWidth: layout.metrics.totalWidth,
-                        codeStartX: 12,
-                        codeInsetX: 0,
-                        charWidth: layout.metrics.charWidth
-                    )
-                )
-            }
-            return .splitHeader(rowIndex: rowIndex, isFileHeader: isFileHeader, wrappedLines: wrappedLines)
-
-        case let .splitRow(splitRowIndex):
-            guard splitRows.indices.contains(splitRowIndex) else { return nil }
-            let splitRow = splitRows[splitRowIndex]
-            let paneMaxChars = wrapCapacity(
-                totalWidth: layout.metrics.columnWidth,
-                codeStartX: layout.metrics.codeStartX,
-                codeInsetX: 10,
-                charWidth: layout.metrics.charWidth
-            )
-            let leftWrappedLines = splitRow.left.map {
-                wrappedDescriptors(forSplitCell: $0, wrapLines: layout.wrapLines, maxChars: paneMaxChars)
-            } ?? []
-            let rightWrappedLines = splitRow.right.map {
-                wrappedDescriptors(forSplitCell: $0, wrapLines: layout.wrapLines, maxChars: paneMaxChars)
-            } ?? []
-            return .splitRow(
-                splitRowIndex: splitRowIndex,
-                leftWrappedLines: leftWrappedLines,
-                rightWrappedLines: rightWrappedLines
-            )
-        }
+        guard block.index >= 0, block.index < layout.materializedBlocks.count else { return nil }
+        return layout.materializedBlocks[block.index]
     }
 
     package static func materializeVisualLines(
