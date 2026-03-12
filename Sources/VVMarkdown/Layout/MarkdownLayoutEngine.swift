@@ -396,8 +396,7 @@ public struct LayoutTableCell {
 /// Engine for laying out markdown documents
 public final class MarkdownLayoutEngine {
     private struct FontAdvanceKey: Hashable {
-        let name: String
-        let size: Int
+        let fontID: ObjectIdentifier
     }
 
     // MARK: - Properties
@@ -413,6 +412,7 @@ public final class MarkdownLayoutEngine {
 
     private var fonts: [FontVariant: CTFont] = [:]
     private var monospaceAdvanceCache: [FontAdvanceKey: CGFloat] = [:]
+    private var postScriptNameCache: [ObjectIdentifier: String] = [:]
     private var lineHeight: CGFloat = 20
     private var ascent: CGFloat = 14
     private var descent: CGFloat = 4
@@ -3510,7 +3510,7 @@ public final class MarkdownLayoutEngine {
 
             let attributes = CTRunGetAttributes(run) as NSDictionary
             let runFont = attributes[kCTFontAttributeName] as! CTFont
-            let fontName = CTFontCopyPostScriptName(runFont) as String
+            let fontName = postScriptName(for: runFont)
             let isEmoji = fontName.contains("Emoji")
             let storedFontName: String? = isEmoji ? nil : (isSystemUIFontName(fontName) ? nil : fontName)
             let glyphVariant: FontVariant = isEmoji ? .emoji : variant
@@ -3554,13 +3554,17 @@ public final class MarkdownLayoutEngine {
     }
 
     private func canUseFastMonospaceASCIIPath(_ text: String, variant: FontVariant) -> Bool {
-        guard variant == .monospace, !text.isEmpty, !text.contains("\t") else { return false }
-        return text.unicodeScalars.allSatisfy(\.isASCII)
+        guard variant == .monospace, !text.isEmpty else { return false }
+        for scalar in text.unicodeScalars {
+            if scalar.value == 9 || !scalar.isASCII {
+                return false
+            }
+        }
+        return true
     }
 
     private func monospaceAdvance(for font: CTFont) -> CGFloat {
-        let name = CTFontCopyPostScriptName(font) as String
-        let key = FontAdvanceKey(name: name, size: Int(CTFontGetSize(font) * 100))
+        let key = FontAdvanceKey(fontID: ObjectIdentifier(font as AnyObject))
         if let cached = monospaceAdvanceCache[key] {
             return cached
         }
@@ -3585,7 +3589,7 @@ public final class MarkdownLayoutEngine {
             return nil
         }
 
-        let fontName = CTFontCopyPostScriptName(font) as String
+        let fontName = postScriptName(for: font)
         let storedFontName: String? = isSystemUIFontName(fontName) ? nil : fontName
         let advanceWidth = monospaceAdvance(for: font)
         let runFontSize = CTFontGetSize(font)
@@ -3617,6 +3621,16 @@ public final class MarkdownLayoutEngine {
         }
 
         return (glyphs, advanceWidth * CGFloat(unichars.count))
+    }
+
+    private func postScriptName(for font: CTFont) -> String {
+        let key = ObjectIdentifier(font as AnyObject)
+        if let cached = postScriptNameCache[key] {
+            return cached
+        }
+        let name = CTFontCopyPostScriptName(font) as String
+        postScriptNameCache[key] = name
+        return name
     }
 
     private func tokenize(text: String) -> [String] {

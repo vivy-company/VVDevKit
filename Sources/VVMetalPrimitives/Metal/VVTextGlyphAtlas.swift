@@ -54,7 +54,7 @@ private struct GlyphKey: Hashable {
     let glyphID: CGGlyph
     let fontVariant: VVFontVariant
     let fontSize: Int  // Scaled font size for cache key
-    let baseFontName: String  // Distinguishes same variant with different base fonts
+    let baseFontID: ObjectIdentifier  // Distinguishes same variant with different base fonts
 }
 
 private struct FontKey: Hashable {
@@ -68,7 +68,7 @@ private struct FontGlyphKey: Hashable {
 }
 
 private struct VariantFontKey: Hashable {
-    let baseFontName: String
+    let baseFontID: ObjectIdentifier
     let variant: VVFontVariant
     let size: Int
 }
@@ -126,8 +126,8 @@ public final class VVTextGlyphAtlas {
         let resolvedBase = override ?? self.baseFont
         let scaledSize = size * scaleFactor
         let intSize = Int(scaledSize)
-        let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
-        let key = VariantFontKey(baseFontName: baseName, variant: variant, size: intSize)
+        let baseFontID = ObjectIdentifier(resolvedBase)
+        let key = VariantFontKey(baseFontID: baseFontID, variant: variant, size: intSize)
 
         if let cached = variantFontCache[key] {
             return cached
@@ -274,9 +274,9 @@ public final class VVTextGlyphAtlas {
     /// Pass `baseFont` to correctly derive font variants when the atlas is shared across views with different base fonts.
     public func glyph(for glyphID: CGGlyph, variant: VVFontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> VVTextCachedGlyph? {
         let resolvedBase = baseFont ?? self.baseFont
-        let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
+        let baseFontID = ObjectIdentifier(resolvedBase)
         let intSize = Int(fontSize * scaleFactor)
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontName: baseName)
+        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontID: baseFontID)
 
         if let cached = glyphCache[key] {
             return cached
@@ -289,16 +289,16 @@ public final class VVTextGlyphAtlas {
 
     private func glyphUnsafe(for glyphID: CGGlyph, variant: VVFontVariant, fontSize: CGFloat, baseFont: VVFont? = nil) -> VVTextCachedGlyph? {
         let resolvedBase = baseFont ?? self.baseFont
-        let baseName = CTFontCopyPostScriptName(resolvedBase as CTFont) as String
+        let baseFontID = ObjectIdentifier(resolvedBase)
         let intSize = Int(fontSize * scaleFactor)
-        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontName: baseName)
+        let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontID: baseFontID)
 
         if let cached = glyphCache[key] {
             return cached
         }
 
         let font = fontFor(variant: variant, size: fontSize, baseFont: resolvedBase)
-        return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant, fontSize: fontSize, baseFontName: baseName)
+        return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant, fontSize: fontSize, baseFontID: baseFontID)
     }
 
     public func glyph(for glyphID: CGGlyph, font: CTFont, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
@@ -493,7 +493,7 @@ public final class VVTextGlyphAtlas {
         colorRowHeight = 0
     }
 
-    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: VVFontVariant, fontSize: CGFloat, storeInVariantCache: Bool = true, baseFontName: String? = nil) -> VVTextCachedGlyph? {
+    private func rasterizeGlyph(glyphID: CGGlyph, font: CTFont, variant: VVFontVariant, fontSize: CGFloat, storeInVariantCache: Bool = true, baseFontID: ObjectIdentifier? = nil) -> VVTextCachedGlyph? {
         var glyph = glyphID
         var boundingRect = CGRect.zero
         CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &boundingRect, 1)
@@ -652,8 +652,8 @@ public final class VVTextGlyphAtlas {
 
         if storeInVariantCache {
             let intSize = Int(fontSize * scaleFactor)
-            let resolvedBaseName = baseFontName ?? (CTFontCopyPostScriptName(self.baseFont as CTFont) as String)
-            let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontName: resolvedBaseName)
+            let resolvedBaseID = baseFontID ?? ObjectIdentifier(self.baseFont)
+            let key = GlyphKey(glyphID: glyphID, fontVariant: variant, fontSize: intSize, baseFontID: resolvedBaseID)
             glyphCache[key] = cached
         }
 

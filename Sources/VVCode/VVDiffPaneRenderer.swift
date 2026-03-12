@@ -7,6 +7,30 @@ import VVMarkdown
 import VVMetalPrimitives
 
 private typealias MDLayoutGlyph = VVMarkdown.LayoutGlyph
+
+private extension VVFontVariant {
+    var diffCacheKey: UInt8 {
+        switch self {
+        case .regular:
+            return 0
+        case .semibold:
+            return 1
+        case .semiboldItalic:
+            return 2
+        case .bold:
+            return 3
+        case .italic:
+            return 4
+        case .boldItalic:
+            return 5
+        case .monospace:
+            return 6
+        case .emoji:
+            return 7
+        }
+    }
+}
+
 struct VVDiffTextPass {
     let clipRect: CGRect?
     let glyphBatches: [Int: [VVTextGlyphInstance]]
@@ -156,6 +180,8 @@ enum VVDiffPaneRenderer {
 }
 
 private final class DiffPacketBuilder {
+    private typealias BaseGlyphLookupKey = UInt64
+
     private struct EmptyPaneHatchCacheKey: Hashable {
         let widthKey: Int
         let heightKey: Int
@@ -172,9 +198,10 @@ private final class DiffPacketBuilder {
     private struct WrappedTextSegment: Hashable {
         let text: String
         let start: Int
+        let length: Int
 
         var end: Int {
-            start + text.count
+            start + length
         }
     }
 
@@ -249,6 +276,7 @@ private final class DiffPacketBuilder {
     private static var emptyPaneHatchCache: [EmptyPaneHatchCacheKey: [PathRenderVertex]] = [:]
 
     private var lineNumberGlyphCache: [LineNumberGlyphCacheKey: [MDLayoutGlyph]] = [:]
+    private var baseGlyphLookupCache: [BaseGlyphLookupKey: VVTextCachedGlyph] = [:]
 
     private let textColor: SIMD4<Float>
     private let backgroundColor: SIMD4<Float>
@@ -1111,12 +1139,37 @@ private final class DiffPacketBuilder {
                 variant: variant
             )
         }
-        return metalRenderer.glyphAtlas.glyph(
+
+        let key = packedBaseGlyphLookupKey(
+            glyphID: glyph.glyphID,
+            fontVariant: variant,
+            fontSizeKey: Int(glyph.fontSize * 100)
+        )
+        if let cached = baseGlyphLookupCache[key] {
+            return cached
+        }
+
+        let resolved = metalRenderer.glyphAtlas.glyph(
             for: glyph.glyphID,
             variant: variant,
             fontSize: glyph.fontSize,
             baseFont: metalRenderer.baseFont
         )
+        if let resolved {
+            baseGlyphLookupCache[key] = resolved
+        }
+        return resolved
+    }
+
+    private func packedBaseGlyphLookupKey(
+        glyphID: CGGlyph,
+        fontVariant: VVFontVariant,
+        fontSizeKey: Int
+    ) -> BaseGlyphLookupKey {
+        let packedSize = UInt64(UInt32(clamping: max(0, fontSizeKey)))
+        return UInt64(glyphID)
+            | (UInt64(fontVariant.diffCacheKey) << 16)
+            | (packedSize << 24)
     }
 
     private func glyphXForCharIndex(_ charIndex: Int, in glyphs: [MDLayoutGlyph]) -> CGFloat {
@@ -1166,10 +1219,10 @@ private final class DiffPacketBuilder {
         _ descriptors: [VVDiffWrappedTextDescriptor],
         from sourceText: String
     ) -> [WrappedTextSegment] {
-        guard !descriptors.isEmpty else { return [WrappedTextSegment(text: "", start: 0)] }
+        guard !descriptors.isEmpty else { return [WrappedTextSegment(text: "", start: 0, length: 0)] }
         return descriptors.map { descriptor in
             guard descriptor.length > 0 else {
-                return WrappedTextSegment(text: "", start: descriptor.start)
+                return WrappedTextSegment(text: "", start: descriptor.start, length: 0)
             }
             let boundedStart = min(max(0, descriptor.start), sourceText.count)
             let boundedLength = min(max(0, descriptor.length), sourceText.count - boundedStart)
@@ -1177,7 +1230,8 @@ private final class DiffPacketBuilder {
             let endIndex = sourceText.index(startIndex, offsetBy: boundedLength)
             return WrappedTextSegment(
                 text: String(sourceText[startIndex..<endIndex]),
-                start: descriptor.start
+                start: descriptor.start,
+                length: boundedLength
             )
         }
     }

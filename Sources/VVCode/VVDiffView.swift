@@ -1106,6 +1106,18 @@ private final class VVDiffMetalView: NSView {
     }
 
     private func startNextHighlightBatchIfNeeded() {
+        guard syntaxHighlightingEnabled else {
+            pendingHighlightCodeRowRange = nil
+            return
+        }
+        guard !codeRows.isEmpty else {
+            pendingHighlightCodeRowRange = nil
+            return
+        }
+        guard effectiveHighlightLanguageConfiguration() != nil else {
+            pendingHighlightCodeRowRange = nil
+            return
+        }
         guard highlightTask == nil else { return }
         let targetRange = pendingHighlightCodeRowRange ?? desiredHighlightedCodeRowRangeForVisibleViewport()
         guard targetRange.lowerBound < targetRange.upperBound else { return }
@@ -1425,15 +1437,15 @@ extension VVDiffMetalView: MTKViewDelegate {
         currentScrollOffset = scrollOffset
         renderer.beginFrame(viewportSize: view.bounds.size, scrollOffset: scrollOffset)
 
-        let renderCullPadding = isActivelyScrolling ? max(64, Self.renderCullPadding / 2) : Self.renderCullPadding
-        let visibleRect = scrollView.contentView.bounds.insetBy(dx: -renderCullPadding, dy: -renderCullPadding)
+        let viewportVisibleRect = scrollView.contentView.bounds
         let renderWidth = currentRenderWidth()
         let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
         let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
 
-        // Tight visible block range (no prefetch padding) — used for partial
-        // cache hit test so the cached render packet padding acts as hysteresis.
-        let tightVisibleRange = visibleDisplayBlockRange(in: visibleRect)
+        // Actual viewport-visible range with no extra padding. This must always
+        // be covered by the packet we draw; otherwise fast scrolling can show
+        // temporary blank gaps while the async prebuild catches up.
+        let viewportVisibleBlockRange = visibleDisplayBlockRange(in: viewportVisibleRect)
 
         var renderArtifacts: VVDiffRenderArtifacts?
         // During active scrolling, accept stale highlights — don't let highlight
@@ -1447,45 +1459,44 @@ extension VVDiffMetalView: MTKViewDelegate {
            cachedRenderKey.contains(
             renderWidth: renderWidth,
             highlightVersion: effectiveHighlightVersion,
-            requiredBlockRange: tightVisibleRange
+            requiredBlockRange: viewportVisibleBlockRange
            ) {
             renderArtifacts = cached
-        } else if let layoutPlan {
-            if isActivelyScrolling,
-               let staleArtifacts = cachedRenderArtifacts,
-               let cachedRenderKey,
-               cachedRenderKey.intersects(requiredBlockRange: tightVisibleRange) {
+            if !cachedRenderKey.contains(
+                renderWidth: renderWidth,
+                highlightVersion: effectiveHighlightVersion,
+                requiredBlockRange: requiredBlockRange
+            ) {
                 scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
-                renderArtifacts = staleArtifacts
-            } else {
-                // If the cached packet no longer overlaps the viewport, build
-                // the currently visible window immediately so fast scrolling
-                // doesn't show empty gaps, then continue the padded prebuild.
-                let synchronousBlockRange = tightVisibleRange.lowerBound < tightVisibleRange.upperBound
-                    ? tightVisibleRange
-                    : requiredBlockRange
-                let artifacts = Self.buildRenderArtifacts(
-                    layoutPlan: layoutPlan,
-                    blockRange: synchronousBlockRange,
-                    renderer: renderer,
-                    theme: theme,
-                    baseFont: configuration.font,
-                    options: renderOptions,
-                    highlightedRanges: highlightedRanges
-                )
-                renderArtifacts = artifacts
-                cachedRenderArtifacts = artifacts
-                cachedRenderKey = ViewportSceneCacheKey(
-                    startBlockIndex: synchronousBlockRange.lowerBound,
-                    endBlockIndex: synchronousBlockRange.upperBound,
-                    renderWidthBucket: Int((renderWidth * 2).rounded()),
-                    highlightVersion: highlightSceneVersion
-                )
-                staleHighlightedRowIDs.removeAll(keepingCapacity: true)
-                sceneBuildInFlightKey = nil
-                if synchronousBlockRange != requiredBlockRange {
-                    scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
-                }
+            }
+        } else if let layoutPlan {
+            // Build the currently visible window immediately whenever the cache
+            // falls behind the viewport. This avoids blank gaps during fast
+            // scroll, then the larger padded packet is rebuilt asynchronously.
+            let synchronousBlockRange = viewportVisibleBlockRange.lowerBound < viewportVisibleBlockRange.upperBound
+                ? viewportVisibleBlockRange
+                : requiredBlockRange
+            let artifacts = Self.buildRenderArtifacts(
+                layoutPlan: layoutPlan,
+                blockRange: synchronousBlockRange,
+                renderer: renderer,
+                theme: theme,
+                baseFont: configuration.font,
+                options: renderOptions,
+                highlightedRanges: highlightedRanges
+            )
+            renderArtifacts = artifacts
+            cachedRenderArtifacts = artifacts
+            cachedRenderKey = ViewportSceneCacheKey(
+                startBlockIndex: synchronousBlockRange.lowerBound,
+                endBlockIndex: synchronousBlockRange.upperBound,
+                renderWidthBucket: Int((renderWidth * 2).rounded()),
+                highlightVersion: highlightSceneVersion
+            )
+            staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+            sceneBuildInFlightKey = nil
+            if synchronousBlockRange != requiredBlockRange {
+                scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
             }
         } else {
             renderArtifacts = cachedRenderArtifacts
