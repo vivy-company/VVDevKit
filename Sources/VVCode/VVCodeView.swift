@@ -424,7 +424,6 @@ struct VVCodeView_Previews: PreviewProvider {
             }
 
             let message = greet("World")
-            print(message)
             """,
             language: .swift
         )

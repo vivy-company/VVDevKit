@@ -454,7 +454,6 @@ public final class MetalTextView: MTKView {
         if let ctx = metalContext {
             renderer = VVTextMetalRenderer(context: ctx, baseFont: font, scaleFactor: layerScale)
         } else {
-            print("Failed to initialize VVTextMetalRenderer: no VVMetalContext available")
             return
         }
 

@@ -311,8 +311,8 @@ private final class DiffPacketBuilder {
             ? blended(theme.codeBackgroundColor, emptyPaneTint, 0.16)
             : blended(theme.codeBackgroundColor, emptyPaneTint, 0.18)
         self.emptyPaneGuideColor = isLight
-            ? withAlpha(blended(emptyPaneTint, theme.codeGutterTextColor, 0.24), 0.24)
-            : withAlpha(blended(emptyPaneTint, theme.codeGutterTextColor, 0.32), 0.28)
+            ? withAlpha(blended(theme.codeBackgroundColor, emptyPaneTint, 0.30), 0.20)
+            : withAlpha(blended(theme.codeBackgroundColor, emptyPaneTint, 0.36), 0.24)
         self.addedMarkerColor = isLight
             ? SIMD4<Float>(0.11, 0.57, 0.25, 1.0)
             : SIMD4<Float>(0.43, 0.86, 0.56, 1.0)

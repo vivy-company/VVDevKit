@@ -108,6 +108,11 @@ private struct ViewportSceneCacheKey: Equatable {
         startBlockIndex <= requiredBlockRange.lowerBound &&
         endBlockIndex >= requiredBlockRange.upperBound
     }
+
+    func intersects(requiredBlockRange: Range<Int>) -> Bool {
+        startBlockIndex < requiredBlockRange.upperBound &&
+        endBlockIndex > requiredBlockRange.lowerBound
+    }
 }
 
 private typealias DisplayBlock = VVDiffLayoutBlock
@@ -366,6 +371,9 @@ private final class VVDiffMetalView: NSView {
     private static let highlightWarmupContextRows: Int = 32
     private static let renderCullPadding: CGFloat = 256
     private static let sceneCacheViewportPaddingMultiplier: CGFloat = 2.0
+    private static let scrollingSceneCacheViewportPaddingMultiplier: CGFloat = 3.5
+    private static let minimumSceneCachePaddingBlocks: Int = 48
+    private static let minimumScrollingSceneCachePaddingBlocks: Int = 96
     private static let scrollActivityGrace: CFTimeInterval = 0.16
     private static let sceneBuildQueue = DispatchQueue(label: "vvdevkit.diff.scene-build", qos: .userInitiated)
 
@@ -383,7 +391,6 @@ private final class VVDiffMetalView: NSView {
     private var rowGeometriesContentHeight: CGFloat = 0
     private var rowsSignature: Int = 0
     private var fastPlainModeEnabled: Bool = false
-    private var drawFrameCounter: Int = 0
     private let codeInsetX: CGFloat = 10
 
     init(frame: CGRect, metalContext: VVMetalContext? = nil) {
@@ -1314,7 +1321,6 @@ private final class VVDiffMetalView: NSView {
                 }
                 guard self.sceneBuildInFlightKey == sceneKey else { return }
 
-                print("[DiffRender] async build complete blocks=\(sceneKey.startBlockIndex)..<\(sceneKey.endBlockIndex) calls=\(artifacts.drawCallCount)")
                 self.cachedRenderArtifacts = artifacts
                 self.cachedRenderKey = sceneKey
                 self.staleHighlightedRowIDs.removeAll(keepingCapacity: true)
@@ -1393,10 +1399,8 @@ extension VVDiffMetalView: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        let t0 = CACurrentMediaTime()
         guard let renderer,
               let drawable = view.currentDrawable else { return }
-        let tDrawable = CACurrentMediaTime()
 
         let dr = ensureDiffMetrics()
         let bg = dr.backgroundColor
@@ -1432,7 +1436,6 @@ extension VVDiffMetalView: MTKViewDelegate {
         let tightVisibleRange = visibleDisplayBlockRange(in: visibleRect)
 
         var renderArtifacts: VVDiffRenderArtifacts?
-        var sceneCachePath = "hit"
         // During active scrolling, accept stale highlights — don't let highlight
         // version changes trigger expensive synchronous packet rebuilds in draw().
         // Highlights will be applied when scrolling stops.
@@ -1448,16 +1451,22 @@ extension VVDiffMetalView: MTKViewDelegate {
            ) {
             renderArtifacts = cached
         } else if let layoutPlan {
-            if isActivelyScrolling, let staleArtifacts = cachedRenderArtifacts {
-                sceneCachePath = "stale[\(requiredBlockRange.count)blk]"
+            if isActivelyScrolling,
+               let staleArtifacts = cachedRenderArtifacts,
+               let cachedRenderKey,
+               cachedRenderKey.intersects(requiredBlockRange: tightVisibleRange) {
                 scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
                 renderArtifacts = staleArtifacts
             } else {
-                // Cache doesn't cover visible blocks — must build synchronously.
-                sceneCachePath = "REBUILD[\(requiredBlockRange.count)blk]"
+                // If the cached packet no longer overlaps the viewport, build
+                // the currently visible window immediately so fast scrolling
+                // doesn't show empty gaps, then continue the padded prebuild.
+                let synchronousBlockRange = tightVisibleRange.lowerBound < tightVisibleRange.upperBound
+                    ? tightVisibleRange
+                    : requiredBlockRange
                 let artifacts = Self.buildRenderArtifacts(
                     layoutPlan: layoutPlan,
-                    blockRange: requiredBlockRange,
+                    blockRange: synchronousBlockRange,
                     renderer: renderer,
                     theme: theme,
                     baseFont: configuration.font,
@@ -1466,15 +1475,21 @@ extension VVDiffMetalView: MTKViewDelegate {
                 )
                 renderArtifacts = artifacts
                 cachedRenderArtifacts = artifacts
-                cachedRenderKey = sceneKey
+                cachedRenderKey = ViewportSceneCacheKey(
+                    startBlockIndex: synchronousBlockRange.lowerBound,
+                    endBlockIndex: synchronousBlockRange.upperBound,
+                    renderWidthBucket: Int((renderWidth * 2).rounded()),
+                    highlightVersion: highlightSceneVersion
+                )
                 staleHighlightedRowIDs.removeAll(keepingCapacity: true)
                 sceneBuildInFlightKey = nil
+                if synchronousBlockRange != requiredBlockRange {
+                    scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
+                }
             }
         } else {
             renderArtifacts = cachedRenderArtifacts
         }
-
-        let tScene = CACurrentMediaTime()
 
         if let renderArtifacts {
             VVDiffPaneRenderer.render(
@@ -1510,25 +1525,10 @@ extension VVDiffMetalView: MTKViewDelegate {
             }
         }
 
-        let tRender = CACurrentMediaTime()
-
         encoder.endEncoding()
         renderer.recycleTransientBuffers(after: commandBuffer)
         commandBuffer?.present(drawable)
         commandBuffer?.commit()
-
-        let tEnd = CACurrentMediaTime()
-        let totalMs = (tEnd - t0) * 1000
-        if totalMs > 8 || drawFrameCounter % 300 == 0 {
-            let drawableMs = (tDrawable - t0) * 1000
-            let sceneMs = (tScene - tDrawable) * 1000
-            let renderMs = (tRender - tScene) * 1000
-            let commitMs = (tEnd - tRender) * 1000
-            let drawCalls = renderArtifacts?.drawCallCount ?? 0
-            let viewSize = view.bounds.size
-            print("[DiffDraw] total=\(String(format: "%.1f", totalMs))ms drw=\(String(format: "%.1f", drawableMs))ms prep=\(String(format: "%.1f", sceneMs))ms rnd=\(String(format: "%.1f", renderMs))ms cmt=\(String(format: "%.1f", commitMs))ms calls=\(drawCalls) \(sceneCachePath) \(Int(viewSize.width))x\(Int(viewSize.height))")
-        }
-        drawFrameCounter += 1
     }
 
     private func visibleGeometryRange(in visibleRect: CGRect) -> Range<Int> {
@@ -1602,7 +1602,13 @@ extension VVDiffMetalView: MTKViewDelegate {
         }
 
         let visibleCount = max(visibleRange.count, 1)
-        let paddingBlocks = max(48, Int((CGFloat(visibleCount) * Self.sceneCacheViewportPaddingMultiplier).rounded(.up)))
+        let paddingMultiplier = isActivelyScrolling
+            ? Self.scrollingSceneCacheViewportPaddingMultiplier
+            : Self.sceneCacheViewportPaddingMultiplier
+        let minimumPaddingBlocks = isActivelyScrolling
+            ? Self.minimumScrollingSceneCachePaddingBlocks
+            : Self.minimumSceneCachePaddingBlocks
+        let paddingBlocks = max(minimumPaddingBlocks, Int((CGFloat(visibleCount) * paddingMultiplier).rounded(.up)))
         let startBlockIndex = max(0, visibleRange.lowerBound - paddingBlocks)
         let endBlockIndex = min(displayBlocks.count, visibleRange.upperBound + paddingBlocks)
         return ViewportSceneCacheKey(
