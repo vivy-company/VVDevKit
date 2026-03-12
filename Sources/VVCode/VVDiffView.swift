@@ -1183,9 +1183,8 @@ private final class VVDiffMetalView: NSView {
 
             await MainActor.run { [weak self] in
                 guard let self, self.highlightGeneration == generation, !Task.isCancelled else { return }
-                for (rowID, rowRanges) in ranges {
-                    guard targetRowIDs.contains(rowID) else { continue }
-                    self.highlightedRanges[rowID] = rowRanges
+                for rowID in targetRowIDs {
+                    self.highlightedRanges[rowID] = ranges[rowID] ?? []
                 }
                 if !targetRowIDs.isEmpty {
                     self.staleHighlightedRowIDs.formUnion(targetRowIDs)
