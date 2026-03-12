@@ -532,12 +532,9 @@ private final class VVDiffMetalView: NSView {
 
         // Scrolling just stopped — apply deferred highlights, prefetch, resume batching.
         var needsAnotherTick = false
-        var shouldRedraw = false
 
         if deferredHighlightSceneRefresh {
-            applyDeferredHighlightSceneRefresh(redraw: false)
-            shouldRedraw = true
-            needsAnotherTick = true
+            applyDeferredHighlightSceneRefresh()
         }
 
         prewarmSceneBuildIfNeeded()
@@ -550,10 +547,6 @@ private final class VVDiffMetalView: NSView {
 
         if highlightTask != nil {
             needsAnotherTick = true
-        }
-
-        if shouldRedraw {
-            metalView.setNeedsDisplay(metalView.bounds)
         }
 
         if !needsAnotherTick {
@@ -1248,43 +1241,20 @@ private final class VVDiffMetalView: NSView {
         staleHighlightedRowIDs = Set(staleHighlightedRowIDs.filter { keepRowIDs.contains($0) })
     }
 
-    private func applyDeferredHighlightSceneRefresh(redraw: Bool) {
+    private func applyDeferredHighlightSceneRefresh() {
         guard deferredHighlightSceneRefresh || !staleHighlightedRowIDs.isEmpty else { return }
         deferredHighlightSceneRefresh = false
         staleHighlightedRowIDs.removeAll(keepingCapacity: true)
         highlightSceneVersion &+= 1
-        let renderWidth = currentRenderWidth()
-        if let layoutPlan {
-            let refreshSceneKey = makeHighlightRefreshSceneCacheKey(renderWidth: renderWidth)
-            let refreshBlockRange = refreshSceneKey.startBlockIndex..<refreshSceneKey.endBlockIndex
-            if refreshBlockRange.lowerBound < refreshBlockRange.upperBound {
-                let artifacts = Self.buildRenderArtifacts(
-                    layoutPlan: layoutPlan,
-                    blockRange: refreshBlockRange,
-                    renderer: renderer,
-                    theme: theme,
-                    baseFont: configuration.font,
-                    options: renderOptions,
-                    highlightedRanges: highlightedRanges
-                )
-                cachedRenderArtifacts = artifacts
-                cachedRenderKey = refreshSceneKey
-                sceneBuildInFlightKey = nil
+        sceneBuildGeneration &+= 1
+        sceneBuildInFlightKey = nil
 
-                let paddedSceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
-                if paddedSceneKey != refreshSceneKey {
-                    scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: paddedSceneKey)
-                }
-            } else {
-                invalidateSceneCache(clearScene: false)
-                prewarmSceneBuildIfNeeded()
-            }
+        if layoutPlan != nil {
+            let renderWidth = currentRenderWidth()
+            let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
+            scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
         } else {
             invalidateSceneCache(clearScene: false)
-            prewarmSceneBuildIfNeeded()
-        }
-        if redraw {
-            metalView?.setNeedsDisplay(metalView.bounds)
         }
     }
 
@@ -1482,6 +1452,11 @@ extension VVDiffMetalView: MTKViewDelegate {
         let effectiveHighlightVersion = isActivelyScrolling
             ? (cachedRenderKey?.highlightVersion ?? highlightSceneVersion)
             : highlightSceneVersion
+        let hasPendingViewportSceneBuild = sceneBuildInFlightKey?.contains(
+            renderWidth: renderWidth,
+            highlightVersion: highlightSceneVersion,
+            requiredBlockRange: viewportVisibleBlockRange
+        ) ?? false
         if let cached = cachedRenderArtifacts,
            let cachedRenderKey,
            cachedRenderKey.contains(
@@ -1497,6 +1472,15 @@ extension VVDiffMetalView: MTKViewDelegate {
             ) {
                 scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
             }
+        } else if let cached = cachedRenderArtifacts,
+                  let cachedRenderKey,
+                  hasPendingViewportSceneBuild,
+                  cachedRenderKey.contains(
+                    renderWidth: renderWidth,
+                    highlightVersion: cachedRenderKey.highlightVersion,
+                    requiredBlockRange: viewportVisibleBlockRange
+                  ) {
+            renderArtifacts = cached
         } else if let layoutPlan {
             // Build the currently visible window immediately whenever the cache
             // falls behind the viewport. This avoids blank gaps during fast
@@ -1648,38 +1632,6 @@ extension VVDiffMetalView: MTKViewDelegate {
             ? Self.minimumScrollingSceneCachePaddingBlocks
             : Self.minimumSceneCachePaddingBlocks
         let paddingBlocks = max(minimumPaddingBlocks, Int((CGFloat(visibleCount) * paddingMultiplier).rounded(.up)))
-        let startBlockIndex = max(0, visibleRange.lowerBound - paddingBlocks)
-        let endBlockIndex = min(displayBlocks.count, visibleRange.upperBound + paddingBlocks)
-        return ViewportSceneCacheKey(
-            startBlockIndex: startBlockIndex,
-            endBlockIndex: endBlockIndex,
-            renderWidthBucket: renderWidthBucket,
-            highlightVersion: highlightSceneVersion
-        )
-    }
-
-    private func makeHighlightRefreshSceneCacheKey(renderWidth: CGFloat) -> ViewportSceneCacheKey {
-        let renderWidthBucket = Int((renderWidth * 2).rounded())
-        guard let scrollView, !displayBlocks.isEmpty else {
-            return ViewportSceneCacheKey(
-                startBlockIndex: 0,
-                endBlockIndex: 0,
-                renderWidthBucket: renderWidthBucket,
-                highlightVersion: highlightSceneVersion
-            )
-        }
-
-        let visibleRange = visibleDisplayBlockRange(in: scrollView.contentView.bounds.insetBy(dx: 0, dy: -Self.renderCullPadding * 0.5))
-        guard visibleRange.lowerBound < visibleRange.upperBound else {
-            return ViewportSceneCacheKey(
-                startBlockIndex: 0,
-                endBlockIndex: min(displayBlocks.count, 1),
-                renderWidthBucket: renderWidthBucket,
-                highlightVersion: highlightSceneVersion
-            )
-        }
-
-        let paddingBlocks = min(12, max(4, visibleRange.count / 4))
         let startBlockIndex = max(0, visibleRange.lowerBound - paddingBlocks)
         let endBlockIndex = min(displayBlocks.count, visibleRange.upperBound + paddingBlocks)
         return ViewportSceneCacheKey(
