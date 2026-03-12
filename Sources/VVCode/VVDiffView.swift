@@ -598,10 +598,37 @@ private final class VVDiffMetalView: NSView {
     }
 
     private func prewarmSceneBuildIfNeeded() {
-        guard metalView != nil else { return }
+        guard metalView != nil, isVisibleForViewportWork else { return }
         let renderWidth = currentRenderWidth()
         let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
         scheduleSceneBuildIfNeeded(renderWidth: renderWidth, sceneKey: sceneKey)
+    }
+
+    private var isVisibleForViewportWork: Bool {
+        window != nil && superview != nil && !isHiddenOrHasHiddenAncestor
+    }
+
+    private func suspendNonVisibleWork() {
+        activeScrollDeadline = 0
+        stopDisplayLink()
+        sceneBuildGeneration &+= 1
+        sceneBuildInFlightKey = nil
+        highlightGeneration += 1
+        highlightTask?.cancel()
+        highlightTask = nil
+        pendingHighlightCodeRowRange = nil
+        deferredHighlightSceneRefresh = false
+        staleHighlightedRowIDs.removeAll(keepingCapacity: true)
+    }
+
+    private func resumeVisibleWorkIfNeeded() {
+        guard isVisibleForViewportWork else { return }
+        requestViewportHighlightingIfNeeded()
+        prewarmSceneBuildIfNeeded()
+        if isActivelyScrolling || deferredHighlightSceneRefresh || highlightTask != nil {
+            startDisplayLink()
+        }
+        metalView?.setNeedsDisplay(metalView.bounds)
     }
 
     private var wrapsUnified: Bool {
@@ -1008,6 +1035,7 @@ private final class VVDiffMetalView: NSView {
     }
 
     private func requestViewportHighlightingIfNeeded() {
+        guard isVisibleForViewportWork else { return }
         guard syntaxHighlightingEnabled else { return }
         guard !codeRows.isEmpty else { return }
         guard effectiveHighlightLanguageConfiguration() != nil else { return }
@@ -1106,6 +1134,7 @@ private final class VVDiffMetalView: NSView {
     }
 
     private func startNextHighlightBatchIfNeeded() {
+        guard isVisibleForViewportWork else { return }
         guard syntaxHighlightingEnabled else {
             pendingHighlightCodeRowRange = nil
             return
@@ -1383,23 +1412,22 @@ private final class VVDiffMetalView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
-            stopDisplayLink()
+            suspendNonVisibleWork()
             metalView?.releaseDrawables()
+        } else {
+            resumeVisibleWorkIfNeeded()
         }
     }
 
     override func viewDidHide() {
         super.viewDidHide()
-        stopDisplayLink()
+        suspendNonVisibleWork()
         metalView?.releaseDrawables()
     }
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
-        if isActivelyScrolling || deferredHighlightSceneRefresh || highlightTask != nil {
-            startDisplayLink()
-        }
-        metalView?.setNeedsDisplay(metalView.bounds)
+        resumeVisibleWorkIfNeeded()
     }
 }
 
