@@ -84,6 +84,15 @@ Example responsibilities:
 - choose animation anchors
 - expose timeline snapshots to layout/render systems
 
+### Viewport Mode
+
+The timeline core should treat viewport follow as an explicit mode, not an inferred scroll special case.
+
+- `liveTail`: the viewport is attached to the transcript tail and new tail items should land in final position without extra viewport compensation
+- `detached`: the viewport preserves its current reading position, new tail content accumulates unread state, and offscreen tail work should stay estimated/deferred until the viewport reattaches or approaches it
+
+This keeps the common chat case simple without requiring a fully inverted scroll implementation.
+
 ### 2. Timeline Layout
 
 Owns:

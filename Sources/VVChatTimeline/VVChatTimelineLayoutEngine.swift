@@ -3,9 +3,9 @@ import Foundation
 
 @MainActor
 protocol VVChatTimelineLayoutRendering: AnyObject {
-    func layoutSummary(for message: VVChatMessage) -> VVChatMessageLayoutSummary
-    func estimatedLayoutSummary(for message: VVChatMessage) -> VVChatMessageLayoutSummary
-    func trimCaches(keepingMessageIDs: Set<String>)
+    func layoutSummary(for item: VVChatTimelineItem) -> VVChatMessageLayoutSummary
+    func estimatedLayoutSummary(for item: VVChatTimelineItem) -> VVChatMessageLayoutSummary
+    func trimCaches(keepingItemIDs: Set<String>)
 }
 
 @MainActor
@@ -85,8 +85,8 @@ final class VVChatTimelineLayoutEngine {
     private var renderWidth: CGFloat
     private var layoutRecords: [LayoutRecord] = []
     private var heightIndex = HeightIndex()
-    private var messageImageURLs: [String: Set<String>] = [:]
-    private var imageURLToMessageIDs: [String: Set<String>] = [:]
+    private var itemImageURLs: [String: Set<String>] = [:]
+    private var imageURLToItemIDs: [String: Set<String>] = [:]
 
     init(style: VVChatTimelineStyle, renderWidth: CGFloat) {
         self.style = style
@@ -110,17 +110,17 @@ final class VVChatTimelineLayoutEngine {
     }
 
     func reset(
-        messages: [VVChatMessage],
+        items: [VVChatTimelineItem],
         renderer: VVChatTimelineLayoutRendering
     ) {
         layoutRecords.removeAll(keepingCapacity: true)
-        messageImageURLs.removeAll(keepingCapacity: true)
-        imageURLToMessageIDs.removeAll(keepingCapacity: true)
+        itemImageURLs.removeAll(keepingCapacity: true)
+        imageURLToItemIDs.removeAll(keepingCapacity: true)
 
         var heights: [CGFloat] = []
-        heights.reserveCapacity(messages.count)
-        for message in messages {
-            let record = buildLayoutRecord(for: message, exact: false, renderer: renderer)
+        heights.reserveCapacity(items.count)
+        for item in items {
+            let record = buildLayoutRecord(for: item, exact: false, renderer: renderer)
             layoutRecords.append(record)
             heights.append(record.height)
         }
@@ -128,20 +128,57 @@ final class VVChatTimelineLayoutEngine {
     }
 
     func append(
-        message: VVChatMessage,
+        item: VVChatTimelineItem,
+        exact: Bool,
         renderer: VVChatTimelineLayoutRendering
     ) {
-        let record = buildLayoutRecord(for: message, exact: false, renderer: renderer)
+        let record = buildLayoutRecord(for: item, exact: exact, renderer: renderer)
         layoutRecords.append(record)
         heightIndex.append(record.height)
     }
 
     func replace(
         range: Range<Int>,
-        messages: [VVChatMessage],
+        items: [VVChatTimelineItem],
+        exact: Bool,
         renderer: VVChatTimelineLayoutRendering
     ) {
-        let newRecords = messages.map { buildLayoutRecord(for: $0, exact: false, renderer: renderer) }
+        // Clean up image mappings for records being replaced.
+        for index in range where layoutRecords.indices.contains(index) {
+            let removedID = layoutRecords[index].id
+            if let urls = itemImageURLs.removeValue(forKey: removedID) {
+                for url in urls {
+                    imageURLToItemIDs[url]?.remove(removedID)
+                    if imageURLToItemIDs[url]?.isEmpty == true {
+                        imageURLToItemIDs.removeValue(forKey: url)
+                    }
+                }
+            }
+        }
+        let newRecords = items.map { buildLayoutRecord(for: $0, exact: exact, renderer: renderer) }
+        layoutRecords.replaceSubrange(range, with: newRecords)
+        heightIndex.rebuild(heights: layoutRecords.map(\.height))
+    }
+
+    func replace(
+        range: Range<Int>,
+        items: [VVChatTimelineItem],
+        renderer: VVChatTimelineLayoutRendering
+    ) {
+        for index in range where layoutRecords.indices.contains(index) {
+            let removedID = layoutRecords[index].id
+            if let urls = itemImageURLs.removeValue(forKey: removedID) {
+                for url in urls {
+                    imageURLToItemIDs[url]?.remove(removedID)
+                    if imageURLToItemIDs[url]?.isEmpty == true {
+                        imageURLToItemIDs.removeValue(forKey: url)
+                    }
+                }
+            }
+        }
+        let newRecords = items.map { item in
+            buildLayoutRecord(for: item, exact: item.message.state != .draft, renderer: renderer)
+        }
         layoutRecords.replaceSubrange(range, with: newRecords)
         heightIndex.rebuild(heights: layoutRecords.map(\.height))
     }
@@ -149,18 +186,21 @@ final class VVChatTimelineLayoutEngine {
     @discardableResult
     func updateLayout(
         at index: Int,
-        message: VVChatMessage,
+        item: VVChatTimelineItem,
+        exact: Bool,
         renderer: VVChatTimelineLayoutRendering
     ) -> CGFloat {
-        let summary = renderer.layoutSummary(for: message)
-        updateImageMappings(messageID: message.id, imageURLs: Set(summary.imageURLs))
+        let summary = exact
+            ? renderer.layoutSummary(for: item)
+            : renderer.estimatedLayoutSummary(for: item)
+        updateImageMappings(itemID: item.id, imageURLs: Set(summary.imageURLs))
         let oldHeight = heightIndex.height(at: index)
         let newHeight = summary.height
         layoutRecords[index].height = newHeight
         layoutRecords[index].contentOffset = summary.contentOffset
-        layoutRecords[index].isDraft = message.state == .draft
-        layoutRecords[index].revision = message.revision
-        layoutRecords[index].isExact = true
+        layoutRecords[index].isDraft = item.message.state == .draft
+        layoutRecords[index].revision = item.revision
+        layoutRecords[index].isExact = exact
 
         if newHeight != oldHeight {
             heightIndex.updateHeight(at: index, to: newHeight)
@@ -170,15 +210,15 @@ final class VVChatTimelineLayoutEngine {
 
     func relayout(
         indexes: [Int],
-        messages: [VVChatMessage],
+        items: [VVChatTimelineItem],
         renderer: VVChatTimelineLayoutRendering
     ) -> VVChatTimelineLayoutMutation {
         let uniqueSorted = Array(Set(indexes)).sorted()
         var updatedIndexes = IndexSet()
         var totalDelta: CGFloat = 0
 
-        for index in uniqueSorted where messages.indices.contains(index) {
-            totalDelta += updateLayout(at: index, message: messages[index], renderer: renderer)
+        for index in uniqueSorted where items.indices.contains(index) {
+            totalDelta += updateLayout(at: index, item: items[index], exact: true, renderer: renderer)
             updatedIndexes.insert(index)
         }
 
@@ -187,7 +227,7 @@ final class VVChatTimelineLayoutEngine {
 
     func hydrateExactLayouts(
         in range: Range<Int>,
-        messages: [VVChatMessage],
+        items: [VVChatTimelineItem],
         renderer: VVChatTimelineLayoutRendering
     ) -> VVChatTimelineLayoutMutation {
         let clampedLower = max(0, range.lowerBound)
@@ -202,8 +242,8 @@ final class VVChatTimelineLayoutEngine {
         for index in clampedLower..<clampedUpper {
             guard layoutRecords.indices.contains(index),
                   !layoutRecords[index].isExact,
-                  messages.indices.contains(index) else { continue }
-            totalDelta += updateLayout(at: index, message: messages[index], renderer: renderer)
+                  items.indices.contains(index) else { continue }
+            totalDelta += updateLayout(at: index, item: items[index], exact: true, renderer: renderer)
             updatedIndexes.insert(index)
         }
 
@@ -317,11 +357,11 @@ final class VVChatTimelineLayoutEngine {
             keepIDs.insert(record.id)
         }
 
-        renderer.trimCaches(keepingMessageIDs: keepIDs)
+        renderer.trimCaches(keepingItemIDs: keepIDs)
     }
 
-    func messageIDs(forImageURL url: String) -> [String] {
-        Array(imageURLToMessageIDs[url] ?? [])
+    func itemIDs(forImageURL url: String) -> [String] {
+        Array(imageURLToItemIDs[url] ?? [])
     }
 
     func debugExactLayoutCount() -> Int {
@@ -331,20 +371,20 @@ final class VVChatTimelineLayoutEngine {
     }
 
     private func buildLayoutRecord(
-        for message: VVChatMessage,
+        for item: VVChatTimelineItem,
         exact: Bool,
         renderer: VVChatTimelineLayoutRendering
     ) -> LayoutRecord {
         let summary = exact
-            ? renderer.layoutSummary(for: message)
-            : renderer.estimatedLayoutSummary(for: message)
-        updateImageMappings(messageID: message.id, imageURLs: Set(summary.imageURLs))
+            ? renderer.layoutSummary(for: item)
+            : renderer.estimatedLayoutSummary(for: item)
+        updateImageMappings(itemID: item.id, imageURLs: Set(summary.imageURLs))
         return LayoutRecord(
-            id: message.id,
+            id: item.id,
             height: summary.height,
             contentOffset: summary.contentOffset,
-            isDraft: message.state == .draft,
-            revision: message.revision,
+            isDraft: item.message.state == .draft,
+            revision: item.revision,
             isExact: exact
         )
     }
@@ -404,18 +444,18 @@ final class VVChatTimelineLayoutEngine {
         return low
     }
 
-    private func updateImageMappings(messageID: String, imageURLs: Set<String>) {
-        if let previous = messageImageURLs[messageID] {
+    private func updateImageMappings(itemID: String, imageURLs: Set<String>) {
+        if let previous = itemImageURLs[itemID] {
             for url in previous {
-                imageURLToMessageIDs[url]?.remove(messageID)
-                if imageURLToMessageIDs[url]?.isEmpty == true {
-                    imageURLToMessageIDs.removeValue(forKey: url)
+                imageURLToItemIDs[url]?.remove(itemID)
+                if imageURLToItemIDs[url]?.isEmpty == true {
+                    imageURLToItemIDs.removeValue(forKey: url)
                 }
             }
         }
-        messageImageURLs[messageID] = imageURLs
+        itemImageURLs[itemID] = imageURLs
         for url in imageURLs {
-            imageURLToMessageIDs[url, default: []].insert(messageID)
+            imageURLToItemIDs[url, default: []].insert(itemID)
         }
     }
 }

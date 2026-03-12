@@ -2,11 +2,6 @@ import CoreGraphics
 import Foundation
 import VVMetalPrimitives
 
-struct VVChatTimelineViewportAnimationPlan {
-    let targetY: CGFloat
-    let animation: VVAnimationDescriptor
-}
-
 struct VVChatTimelineLayoutAnimationPlan {
     let startSnapshots: [String: VVLayoutAnimationSnapshot]
     let targetSnapshots: [String: VVLayoutAnimationSnapshot]
@@ -19,7 +14,6 @@ struct VVChatTimelineUpdateTransitionPlan {
     let transition: VVChatTimelineController.PendingLayoutTransition?
     let shouldSuppressPinnedTailViewportMotion: Bool
     let compensatedScrollTargetY: CGFloat?
-    let viewportAnimation: VVChatTimelineViewportAnimationPlan?
 }
 
 @MainActor
@@ -43,7 +37,8 @@ final class VVChatTimelineTransitionCoordinator {
             layoutAnimationItemPadding: layoutAnimationItemPadding
         )
         let shouldSuppressPinnedTailViewportMotion =
-            update.shouldScrollToBottom && (controller.state.isPinnedToBottom || wasPinnedToBottom)
+            update.followPolicy == .preservePinnedBottom &&
+            (controller.state.isLiveTail || wasPinnedToBottom)
         let compensatedScrollTargetY = compensatedScrollTargetY(
             for: update,
             controller: controller,
@@ -54,19 +49,12 @@ final class VVChatTimelineTransitionCoordinator {
             controller: controller,
             stableSnapshots: stableSnapshots
         )
-        let viewportAnimation = viewportAnimationPlan(
-            transition: transition,
-            controller: controller,
-            visibleRect: visibleRect,
-            shouldSuppressPinnedTailViewportMotion: shouldSuppressPinnedTailViewportMotion
-        )
 
         return VVChatTimelineUpdateTransitionPlan(
             snapshotIndexes: snapshotIndexes,
             transition: transition,
             shouldSuppressPinnedTailViewportMotion: shouldSuppressPinnedTailViewportMotion,
-            compensatedScrollTargetY: compensatedScrollTargetY,
-            viewportAnimation: viewportAnimation
+            compensatedScrollTargetY: compensatedScrollTargetY
         )
     }
 
@@ -76,54 +64,90 @@ final class VVChatTimelineTransitionCoordinator {
         liveSnapshots: [String: VVLayoutAnimationSnapshot],
         transition: VVChatTimelineController.PendingLayoutTransition,
         viewportWidth: CGFloat,
+        viewportIsFollowing: Bool,
         motion: VVChatTimelineMotionStyle
     ) -> VVChatTimelineLayoutAnimationPlan? {
         guard !nextSnapshots.isEmpty else { return nil }
 
         let baselineSnapshots = liveSnapshots.isEmpty ? previousSnapshots : liveSnapshots
-        let anchorSnapshot = baselineSnapshots[transition.anchorID] ?? previousSnapshots[transition.anchorID]
-        let anchorFrame = anchorSnapshot?.frame ?? CGRect(
-            x: 0,
-            y: transition.anchorY,
-            width: viewportWidth,
-            height: 0
-        )
         var startSnapshots = baselineSnapshots
         var targetSnapshots = nextSnapshots
 
         for (id, nextSnapshot) in nextSnapshots where baselineSnapshots[id] == nil {
-            let insertedStartFrame = insertedItemStartFrame(
-                for: nextSnapshot.frame,
-                anchorFrame: anchorFrame
-            )
-            startSnapshots[id] = VVLayoutAnimationSnapshot(
-                id: id,
-                frame: insertedStartFrame,
-                contentOffset: nextSnapshot.contentOffset,
-                transition: nextSnapshot.transition ?? motion.layoutTransition,
-                animation: nextSnapshot.animation ?? motion.layoutAnimation
-            )
-            if targetSnapshots[id]?.transition == nil {
-                targetSnapshots[id]?.transition = motion.layoutTransition
-            }
-            if targetSnapshots[id]?.animation == nil {
-                targetSnapshots[id]?.animation = motion.layoutAnimation
+            if viewportIsFollowing {
+                // When the viewport follows content (pinned to bottom), inserted
+                // items appear at their target position immediately — no accordion
+                // slide — because the viewport scrolls to accommodate them and any
+                // Y-offset animation creates a visible bounce on short items.
+                startSnapshots[id] = nextSnapshot
+            } else {
+                let insertionTransition = nextSnapshot.transition ?? motion.layoutTransition
+                let insertionAnimation = nextSnapshot.animation ?? motion.layoutAnimation
+                let insertedStartFrame = insertedItemStartFrame(
+                    for: nextSnapshot.frame,
+                    transition: insertionTransition
+                )
+                startSnapshots[id] = VVLayoutAnimationSnapshot(
+                    id: id,
+                    frame: insertedStartFrame,
+                    contentOffset: nextSnapshot.contentOffset,
+                    opacity: insertionTransition.insertion.opacity,
+                    scale: insertionTransition.insertion.scale,
+                    transition: insertionTransition,
+                    animation: insertionAnimation
+                )
+                if targetSnapshots[id]?.transition == nil {
+                    targetSnapshots[id]?.transition = insertionTransition
+                }
+                if targetSnapshots[id]?.animation == nil {
+                    targetSnapshots[id]?.animation = insertionAnimation
+                }
             }
         }
 
         for (id, previousSnapshot) in baselineSnapshots where nextSnapshots[id] == nil {
+            let removalTransition = previousSnapshot.transition ?? motion.layoutTransition
+            let removalAnimation = previousSnapshot.animation ?? motion.layoutAnimation
             let targetFrame = previousSnapshot.frame.offsetBy(
-                dx: 0,
-                dy: -min(max(previousSnapshot.frame.height * 0.35, 10), 24)
+                dx: removalTransition.removal.offset.width,
+                dy: removalTransition.removal.offset.height
             )
             targetSnapshots[id] = VVLayoutAnimationSnapshot(
                 id: id,
                 frame: targetFrame,
                 contentOffset: previousSnapshot.contentOffset,
-                transition: previousSnapshot.transition ?? motion.layoutTransition,
-                animation: previousSnapshot.animation ?? motion.layoutAnimation
+                opacity: removalTransition.removal.opacity,
+                scale: removalTransition.removal.scale,
+                transition: removalTransition,
+                animation: removalAnimation
             )
         }
+
+        let hasInsertionsOrRemovals = nextSnapshots.keys != baselineSnapshots.keys
+        // When the viewport follows content (pinned to bottom), shared items appear
+        // stationary from the user's perspective — freeze them. When the viewport is
+        // stationary (user scrolled away), shared items must slide to their new
+        // positions so the accordion effect is visible.
+        if hasInsertionsOrRemovals && !viewportIsFollowing {
+            animateSharedItemPositions(
+                startSnapshots: &startSnapshots,
+                targetSnapshots: &targetSnapshots,
+                baselineSnapshots: baselineSnapshots,
+                nextSnapshots: nextSnapshots,
+                motion: motion
+            )
+        } else {
+            freezeSharedItemGeometry(
+                startSnapshots: &startSnapshots,
+                targetSnapshots: targetSnapshots,
+                baselineSnapshots: baselineSnapshots,
+                nextSnapshots: nextSnapshots
+            )
+        }
+        stabilizeChatGeometry(
+            startSnapshots: &startSnapshots,
+            targetSnapshots: &targetSnapshots
+        )
 
         return VVChatTimelineLayoutAnimationPlan(
             startSnapshots: startSnapshots,
@@ -138,8 +162,13 @@ final class VVChatTimelineTransitionCoordinator {
         controller: VVChatTimelineController,
         stableSnapshots: [String: VVLayoutAnimationSnapshot]
     ) -> VVChatTimelineController.PendingLayoutTransition? {
-        if let transition = controller.pendingLayoutTransition {
+        // Always honor an explicitly prepared layout transition, regardless of cause.
+        if let transition = update.layoutTransition {
             return transition
+        }
+
+        guard shouldCreateImplicitLayoutTransition(for: update, controller: controller) else {
+            return nil
         }
 
         guard update.heightDelta != 0,
@@ -164,9 +193,11 @@ final class VVChatTimelineTransitionCoordinator {
         controller: VVChatTimelineController,
         visibleRect: CGRect
     ) -> CGFloat? {
+        guard shouldCompensateViewport(for: update) else {
+            return nil
+        }
         guard update.heightDelta != 0,
               let changedIndex = update.changedIndex,
-              !update.shouldScrollToBottom,
               let layout = controller.itemLayout(at: changedIndex) else {
             return nil
         }
@@ -177,38 +208,6 @@ final class VVChatTimelineTransitionCoordinator {
         let contentHeight = max(controller.totalHeight, visibleRect.height)
         let maxOffset = max(0, contentHeight - visibleRect.height)
         return min(max(0, visibleRect.origin.y + update.heightDelta), maxOffset)
-    }
-
-    private func viewportAnimationPlan(
-        transition: VVChatTimelineController.PendingLayoutTransition?,
-        controller: VVChatTimelineController,
-        visibleRect: CGRect,
-        shouldSuppressPinnedTailViewportMotion: Bool
-    ) -> VVChatTimelineViewportAnimationPlan? {
-        guard let transition else { return nil }
-        let heightDelta = controller.totalHeight - transition.previousTotalHeight
-        guard abs(heightDelta) > 1 else { return nil }
-
-        let contentHeight = max(controller.totalHeight, visibleRect.height)
-        let maxOffset = max(0, contentHeight - visibleRect.height)
-
-        if heightDelta < 0 {
-            let currentY = visibleRect.origin.y
-            let clampedY = min(currentY, maxOffset)
-            guard abs(clampedY - currentY) > 1 else { return nil }
-            return VVChatTimelineViewportAnimationPlan(
-                targetY: clampedY,
-                animation: controller.currentStyle.motion.viewportClampAnimation
-            )
-        }
-
-        guard controller.state.isPinnedToBottom, !shouldSuppressPinnedTailViewportMotion else {
-            return nil
-        }
-        return VVChatTimelineViewportAnimationPlan(
-            targetY: maxOffset,
-            animation: controller.currentStyle.motion.viewportFollowAnimation
-        )
     }
 
     private func animationSnapshotIndexes(
@@ -260,7 +259,7 @@ final class VVChatTimelineTransitionCoordinator {
                 )
             }
         }
-        if let anchorID = controller.pendingLayoutTransition?.anchorID,
+        if let anchorID = update.layoutTransition?.anchorID,
            let anchorIndex = controller.indexForLayout(id: anchorID) {
             indexes.formUnion(
                 paddedIndexSet(
@@ -270,7 +269,7 @@ final class VVChatTimelineTransitionCoordinator {
                 )
             )
         }
-        if controller.state.isPinnedToBottom, controller.layoutCount > 0 {
+        if controller.state.isLiveTail, controller.layoutCount > 0 {
             let tailStart = max(0, controller.layoutCount - 24)
             indexes.formUnion(IndexSet(integersIn: tailStart..<controller.layoutCount))
         }
@@ -302,25 +301,121 @@ final class VVChatTimelineTransitionCoordinator {
         return IndexSet(integersIn: lowerBound..<upperBound)
     }
 
-    private func insertedItemStartFrame(for targetFrame: CGRect, anchorFrame: CGRect) -> CGRect {
-        let verticalShift = min(max(targetFrame.height * 0.55, 16), 42)
-        let anchorBottom = anchorFrame.maxY
-        let startY: CGFloat
-
-        if targetFrame.minY >= anchorBottom {
-            startY = max(
-                anchorBottom - min(targetFrame.height * 0.35, 12),
-                targetFrame.minY - verticalShift
-            )
-        } else {
-            startY = targetFrame.minY - min(verticalShift, 28)
-        }
-
-        return CGRect(
-            x: targetFrame.origin.x,
-            y: startY,
-            width: targetFrame.width,
-            height: targetFrame.height
+    private func insertedItemStartFrame(
+        for targetFrame: CGRect,
+        transition: VVTransition
+    ) -> CGRect {
+        targetFrame.offsetBy(
+            dx: transition.insertion.offset.width,
+            dy: transition.insertion.offset.height
         )
+    }
+
+    private func stabilizeChatGeometry(
+        startSnapshots: inout [String: VVLayoutAnimationSnapshot],
+        targetSnapshots: inout [String: VVLayoutAnimationSnapshot]
+    ) {
+        for (id, target) in targetSnapshots {
+            guard var start = startSnapshots[id] else { continue }
+
+            // Chat timeline motion should animate container geometry, not slide
+            // inner content independently. Keeping x/content offsets pinned to the
+            // target layout removes left/right and inner up/down jitter.
+            start.frame.origin.x = target.frame.origin.x
+            start.frame.size.width = target.frame.size.width
+            start.contentOffset = target.contentOffset
+            startSnapshots[id] = start
+        }
+    }
+
+    private func animateSharedItemPositions(
+        startSnapshots: inout [String: VVLayoutAnimationSnapshot],
+        targetSnapshots: inout [String: VVLayoutAnimationSnapshot],
+        baselineSnapshots: [String: VVLayoutAnimationSnapshot],
+        nextSnapshots: [String: VVLayoutAnimationSnapshot],
+        motion: VVChatTimelineMotionStyle
+    ) {
+        for (id, target) in targetSnapshots {
+            guard baselineSnapshots[id] != nil,
+                  nextSnapshots[id] != nil,
+                  var start = startSnapshots[id] else {
+                continue
+            }
+            // Keep the item at its previous Y so it slides to its new position.
+            // Freeze opacity/scale/size so only the vertical position animates.
+            start.frame.size = target.frame.size
+            start.opacity = target.opacity
+            start.scale = target.scale
+            if start.animation == nil {
+                start.animation = motion.layoutAnimation
+            }
+            if start.transition == nil {
+                start.transition = motion.layoutTransition
+            }
+            startSnapshots[id] = start
+            if targetSnapshots[id]?.animation == nil {
+                targetSnapshots[id]?.animation = motion.layoutAnimation
+            }
+        }
+    }
+
+    private func freezeSharedItemGeometry(
+        startSnapshots: inout [String: VVLayoutAnimationSnapshot],
+        targetSnapshots: [String: VVLayoutAnimationSnapshot],
+        baselineSnapshots: [String: VVLayoutAnimationSnapshot],
+        nextSnapshots: [String: VVLayoutAnimationSnapshot]
+    ) {
+        for (id, target) in targetSnapshots {
+            guard baselineSnapshots[id] != nil,
+                  nextSnapshots[id] != nil,
+                  var start = startSnapshots[id] else {
+                continue
+            }
+            start.frame = target.frame
+            start.contentOffset = target.contentOffset
+            start.opacity = target.opacity
+            start.scale = target.scale
+            start.transition = target.transition
+            start.animation = target.animation
+            startSnapshots[id] = start
+        }
+    }
+
+    private func shouldCreateImplicitLayoutTransition(
+        for update: VVChatTimelineController.Update,
+        controller: VVChatTimelineController
+    ) -> Bool {
+        guard update.heightDelta != 0 || !update.insertedIndexes.isEmpty || !update.removedIndexes.isEmpty else {
+            return false
+        }
+        switch update.cause {
+        case .tailAppend:
+            guard update.insertedIndexes.count == 1,
+                  update.updatedIndexes.isEmpty,
+                  update.removedIndexes.isEmpty,
+                  let insertedIndex = update.insertedIndexes.first,
+                  controller.entries.indices.contains(insertedIndex) else {
+                return false
+            }
+            return true
+        case .rangeReplace:
+            return !update.insertedIndexes.isEmpty || !update.removedIndexes.isEmpty
+        case .rebuild, .singleReplace, .streamUpdate, .relayout, .hydrateCorrection, .jumpToLatest:
+            return false
+        }
+    }
+
+    private func shouldCompensateViewport(
+        for update: VVChatTimelineController.Update
+    ) -> Bool {
+        guard update.followPolicy == .none else {
+            return false
+        }
+        switch update.cause {
+        case .singleReplace, .rangeReplace, .streamUpdate, .relayout, .hydrateCorrection:
+            return true
+        case .rebuild, .tailAppend, .jumpToLatest:
+            return false
+        }
     }
 }

@@ -51,6 +51,8 @@ public struct VVChatTimelineMotionStyle: Hashable, Sendable {
     public var viewportFollowAnimation: VVAnimationDescriptor
     public var viewportClampAnimation: VVAnimationDescriptor
     public var jumpToLatestAnimation: VVAnimationDescriptor
+    public var streamContentAnimation: VVAnimationDescriptor
+    public var streamContentLift: CGFloat
     public var updateBatchInterval: TimeInterval
 
     public init(
@@ -59,6 +61,8 @@ public struct VVChatTimelineMotionStyle: Hashable, Sendable {
         viewportFollowAnimation: VVAnimationDescriptor = .smooth(duration: 0.24),
         viewportClampAnimation: VVAnimationDescriptor = .smooth(duration: 0.22),
         jumpToLatestAnimation: VVAnimationDescriptor = .timing(duration: 0.34, easing: .easeOut),
+        streamContentAnimation: VVAnimationDescriptor = .timing(duration: 0.18, easing: .easeOut),
+        streamContentLift: CGFloat = 10,
         updateBatchInterval: TimeInterval = 1.0 / 45.0
     ) {
         self.layoutTransition = layoutTransition
@@ -66,7 +70,117 @@ public struct VVChatTimelineMotionStyle: Hashable, Sendable {
         self.viewportFollowAnimation = viewportFollowAnimation
         self.viewportClampAnimation = viewportClampAnimation
         self.jumpToLatestAnimation = jumpToLatestAnimation
+        self.streamContentAnimation = streamContentAnimation
+        self.streamContentLift = max(0, streamContentLift)
         self.updateBatchInterval = updateBatchInterval
+    }
+}
+
+public struct VVChatTimelineCacheBudget: Hashable, Sendable {
+    public static let defaultRenderedMessageCostLimit = 12 * 1024 * 1024
+    public static let defaultPreparedMarkdownCostLimit = 64 * 1024 * 1024
+    public static let defaultDraftPreparedStateCostLimit = 24 * 1024 * 1024
+    public static let defaultMaterializedPreparedLayoutCostLimit = 24 * 1024 * 1024
+    public static let defaultSceneWindowCostLimit = 24 * 1024 * 1024
+    public static let defaultSelectionWindowCostLimit = 12 * 1024 * 1024
+
+    public var renderedMessageCountLimit: Int
+    public var renderedMessageCostLimit: Int
+    public var preparedMarkdownCountLimit: Int
+    public var preparedMarkdownCostLimit: Int
+    public var draftPreparedStateCountLimit: Int
+    public var draftPreparedStateCostLimit: Int
+    public var materializedPreparedLayoutCostLimit: Int
+    public var sceneWindowCountLimit: Int
+    public var sceneWindowCostLimit: Int
+    public var selectionWindowCountLimit: Int
+    public var selectionWindowCostLimit: Int
+
+    public init(
+        renderedMessageCountLimit: Int = 50,
+        renderedMessageCostLimit: Int = VVChatTimelineCacheBudget.defaultRenderedMessageCostLimit,
+        preparedMarkdownCountLimit: Int? = nil,
+        preparedMarkdownCostLimit: Int = VVChatTimelineCacheBudget.defaultPreparedMarkdownCostLimit,
+        draftPreparedStateCountLimit: Int? = nil,
+        draftPreparedStateCostLimit: Int = VVChatTimelineCacheBudget.defaultDraftPreparedStateCostLimit,
+        materializedPreparedLayoutCostLimit: Int = VVChatTimelineCacheBudget.defaultMaterializedPreparedLayoutCostLimit,
+        sceneWindowCountLimit: Int? = nil,
+        sceneWindowCostLimit: Int = VVChatTimelineCacheBudget.defaultSceneWindowCostLimit,
+        selectionWindowCountLimit: Int? = nil,
+        selectionWindowCostLimit: Int = VVChatTimelineCacheBudget.defaultSelectionWindowCostLimit
+    ) {
+        let renderedMessageCountLimit = Self.normalizedCountLimit(renderedMessageCountLimit)
+
+        self.renderedMessageCountLimit = renderedMessageCountLimit
+        self.renderedMessageCostLimit = Self.normalizedCostLimit(renderedMessageCostLimit)
+        self.preparedMarkdownCountLimit = Self.normalizedCountLimit(
+            preparedMarkdownCountLimit ?? renderedMessageCountLimit
+        )
+        self.preparedMarkdownCostLimit = Self.normalizedCostLimit(preparedMarkdownCostLimit)
+        self.draftPreparedStateCountLimit = Self.normalizedCountLimit(
+            draftPreparedStateCountLimit ?? max(2, renderedMessageCountLimit)
+        )
+        self.draftPreparedStateCostLimit = Self.normalizedCostLimit(draftPreparedStateCostLimit)
+        self.materializedPreparedLayoutCostLimit = Self.normalizedCostLimit(materializedPreparedLayoutCostLimit)
+        self.sceneWindowCountLimit = Self.normalizedCountLimit(
+            sceneWindowCountLimit ?? max(8, renderedMessageCountLimit * 4)
+        )
+        self.sceneWindowCostLimit = Self.normalizedCostLimit(sceneWindowCostLimit)
+        self.selectionWindowCountLimit = Self.normalizedCountLimit(
+            selectionWindowCountLimit ?? max(8, renderedMessageCountLimit * 3)
+        )
+        self.selectionWindowCostLimit = Self.normalizedCostLimit(selectionWindowCostLimit)
+    }
+
+    public static func compatible(renderedCacheLimit: Int) -> Self {
+        Self(renderedMessageCountLimit: renderedCacheLimit)
+    }
+
+    func applyingCompatibleRenderedMessageCountLimit(_ renderedCacheLimit: Int) -> Self {
+        let renderedCacheLimit = Self.normalizedCountLimit(renderedCacheLimit)
+        let currentCompatible = Self.compatible(renderedCacheLimit: renderedMessageCountLimit)
+        let nextCompatible = Self.compatible(renderedCacheLimit: renderedCacheLimit)
+        var updated = self
+        updated.renderedMessageCountLimit = renderedCacheLimit
+
+        if preparedMarkdownCountLimit == currentCompatible.preparedMarkdownCountLimit {
+            updated.preparedMarkdownCountLimit = nextCompatible.preparedMarkdownCountLimit
+        }
+        if draftPreparedStateCountLimit == currentCompatible.draftPreparedStateCountLimit {
+            updated.draftPreparedStateCountLimit = nextCompatible.draftPreparedStateCountLimit
+        }
+        if sceneWindowCountLimit == currentCompatible.sceneWindowCountLimit {
+            updated.sceneWindowCountLimit = nextCompatible.sceneWindowCountLimit
+        }
+        if selectionWindowCountLimit == currentCompatible.selectionWindowCountLimit {
+            updated.selectionWindowCountLimit = nextCompatible.selectionWindowCountLimit
+        }
+
+        return updated.normalized()
+    }
+
+    func normalized() -> Self {
+        Self(
+            renderedMessageCountLimit: renderedMessageCountLimit,
+            renderedMessageCostLimit: renderedMessageCostLimit,
+            preparedMarkdownCountLimit: preparedMarkdownCountLimit,
+            preparedMarkdownCostLimit: preparedMarkdownCostLimit,
+            draftPreparedStateCountLimit: draftPreparedStateCountLimit,
+            draftPreparedStateCostLimit: draftPreparedStateCostLimit,
+            materializedPreparedLayoutCostLimit: materializedPreparedLayoutCostLimit,
+            sceneWindowCountLimit: sceneWindowCountLimit,
+            sceneWindowCostLimit: sceneWindowCostLimit,
+            selectionWindowCountLimit: selectionWindowCountLimit,
+            selectionWindowCostLimit: selectionWindowCostLimit
+        )
+    }
+
+    private static func normalizedCountLimit(_ limit: Int) -> Int {
+        max(0, limit)
+    }
+
+    private static func normalizedCostLimit(_ limit: Int) -> Int {
+        max(0, limit)
     }
 }
 
@@ -132,7 +246,24 @@ public struct VVChatTimelineStyle {
     public var systemInsets: VVInsets
     public var pinThreshold: CGFloat
     public var backgroundColor: SIMD4<Float>
-    public var renderedCacheLimit: Int
+    private var _renderedCacheLimit: Int
+    private var _cacheBudget: VVChatTimelineCacheBudget
+    public var renderedCacheLimit: Int {
+        get { _renderedCacheLimit }
+        set {
+            let renderedCacheLimit = max(0, newValue)
+            _renderedCacheLimit = renderedCacheLimit
+            _cacheBudget = _cacheBudget.applyingCompatibleRenderedMessageCountLimit(renderedCacheLimit)
+        }
+    }
+    public var cacheBudget: VVChatTimelineCacheBudget {
+        get { _cacheBudget }
+        set {
+            let normalizedBudget = newValue.normalized()
+            _cacheBudget = normalizedBudget
+            _renderedCacheLimit = normalizedBudget.renderedMessageCountLimit
+        }
+    }
     public var motion: VVChatTimelineMotionStyle
 
     public init(
@@ -198,7 +329,14 @@ public struct VVChatTimelineStyle {
         pinThreshold: CGFloat = 24,
         backgroundColor: SIMD4<Float> = .darkBackground,
         renderedCacheLimit: Int = 50,
-        motion: VVChatTimelineMotionStyle = .init()
+        cacheBudget: VVChatTimelineCacheBudget? = nil,
+        motion: VVChatTimelineMotionStyle = .init(
+            layoutTransition: VVTransition(
+                insertion: VVTransitionPhase(opacity: 0, scale: 0.985, offset: CGSize(width: 0, height: 18)),
+                removal: VVTransitionPhase(opacity: 0)
+            ),
+            layoutAnimation: .timing(duration: 0.2, easing: .smooth)
+        )
     ) {
         func normalizedTheme(_ theme: MarkdownTheme) -> MarkdownTheme {
             var adjusted = theme
@@ -275,7 +413,9 @@ public struct VVChatTimelineStyle {
         self.systemInsets = systemInsets
         self.pinThreshold = pinThreshold
         self.backgroundColor = backgroundColor
-        self.renderedCacheLimit = renderedCacheLimit
+        let resolvedCacheBudget = (cacheBudget ?? VVChatTimelineCacheBudget.compatible(renderedCacheLimit: renderedCacheLimit)).normalized()
+        self._cacheBudget = resolvedCacheBudget
+        self._renderedCacheLimit = resolvedCacheBudget.renderedMessageCountLimit
         self.motion = motion
     }
 

@@ -1,84 +1,32 @@
 import Foundation
 
-enum VVChatTimelineItemKind: Hashable, Sendable {
-    case message(role: VVChatMessageRole)
-    case toolGroup
-    case toolCall
-    case summaryCard
-    case systemEvent
-    case diffCard
-    case customWidget(name: String)
-
-    static func classify(
-        entry: VVChatTimelineEntry,
-        message: VVChatMessage
-    ) -> VVChatTimelineItemKind {
-        switch entry {
-        case .message:
-            if let customContent = message.customContent {
-                switch customContent {
-                case .summaryCard:
-                    return .summaryCard
-                case .inlineDiff:
-                    return .diffCard
-                }
-            }
-            return .message(role: message.role)
-        case .custom(let custom):
-            let normalized = custom.kind
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-
-            switch normalized {
-            case "toolgroup", "tool_call_group", "tool-call-group", "toolcallgroup":
-                return .toolGroup
-            case "toolcall", "tool_call", "tool-call", "toolcalldetail", "tool_call_detail", "tool-call-detail":
-                return .toolCall
-            case "summarycard", "summary_card", "summary-card":
-                return .summaryCard
-            case "systemevent", "system_event", "system-event":
-                return .systemEvent
-            case "diffcard", "diff_card", "diff-card", "inlinediff", "inline_diff", "inline-diff":
-                return .diffCard
-            case "":
-                return .customWidget(name: "custom")
-            default:
-                return .customWidget(name: normalized)
-            }
-        }
-    }
-}
-
 struct VVChatTimelineItem: Identifiable, Hashable, Sendable {
-    let id: String
-    let kind: VVChatTimelineItemKind
-    let entry: VVChatTimelineEntry
+    let model: VVChatTimelineItemModel
     let message: VVChatMessage
-    let revision: Int
-    let timestamp: Date?
-    let isStreaming: Bool
 
-    init(entry: VVChatTimelineEntry, message: VVChatMessage) {
-        self.id = entry.id
-        self.kind = VVChatTimelineItemKind.classify(entry: entry, message: message)
-        self.entry = entry
+    var id: String { model.id }
+    var kind: VVChatTimelineItemKind { model.kind }
+    var entry: VVChatTimelineEntry { model.entry }
+    var revision: Int { model.revision }
+    var timestamp: Date? { model.timestamp }
+    var isStreaming: Bool { message.isStreaming }
+
+    init(model: VVChatTimelineItemModel, message: VVChatMessage) {
+        self.model = model
         self.message = message
-        self.revision = message.revision
-        self.timestamp = message.timestamp
-        self.isStreaming = message.isStreaming
     }
 
-    init(adaptedEntry: VVChatAdaptedTimelineEntry) {
-        self.init(entry: adaptedEntry.entry, message: adaptedEntry.message)
+    init(adaptedItem: VVChatAdaptedTimelineItem) {
+        self.init(model: adaptedItem.model, message: adaptedItem.message)
     }
 
     func replacing(
-        entry: VVChatTimelineEntry? = nil,
+        model: VVChatTimelineItemModel? = nil,
         message: VVChatMessage? = nil
     ) -> VVChatTimelineItem {
-        let nextEntry = entry ?? self.entry
+        let nextModel = model ?? self.model
         let nextMessage = message ?? self.message
-        return VVChatTimelineItem(entry: nextEntry, message: nextMessage)
+        return VVChatTimelineItem(model: nextModel, message: nextMessage)
     }
 }
 
@@ -87,6 +35,10 @@ struct VVChatTimelineCoreSnapshot: Sendable {
     let itemIndexByID: [String: Int]
 
     static let empty = VVChatTimelineCoreSnapshot(items: [], itemIndexByID: [:])
+
+    var itemModels: [VVChatTimelineItemModel] {
+        items.map(\.model)
+    }
 
     var entries: [VVChatTimelineEntry] {
         items.map(\.entry)
@@ -134,24 +86,48 @@ final class VVChatTimelineCoreStore {
         itemAdapter.customEntryMessageMapper = customEntryMessageMapper
     }
 
+    func itemModel(for entry: VVChatTimelineEntry) -> VVChatTimelineItemModel {
+        itemAdapter.itemModel(for: entry)
+    }
+
     @discardableResult
-    func setEntries(_ entries: [VVChatTimelineEntry]) -> VVChatTimelineCoreSnapshot {
-        snapshot = makeSnapshot(from: entries.map(itemAdapter.adapt))
+    func setItems(_ items: [VVChatTimelineItemModel]) -> VVChatTimelineCoreSnapshot {
+        snapshot = makeSnapshot(from: items.map(itemAdapter.adapt))
         return snapshot
     }
 
     @discardableResult
-    func appendMessage(_ message: VVChatMessage) -> VVChatTimelineCoreSnapshot {
+    func setEntries(_ entries: [VVChatTimelineEntry]) -> VVChatTimelineCoreSnapshot {
+        snapshot = setItems(entries.map(itemAdapter.itemModel))
+        return snapshot
+    }
+
+    @discardableResult
+    func appendItem(_ item: VVChatTimelineItemModel) -> VVChatTimelineCoreSnapshot {
         var items = snapshot.items
-        items.append(VVChatTimelineItem(adaptedEntry: itemAdapter.adapt(.message(message))))
+        items.append(VVChatTimelineItem(adaptedItem: itemAdapter.adapt(item)))
         snapshot = makeSnapshot(from: items)
         return snapshot
     }
 
     @discardableResult
+    func appendMessage(_ message: VVChatMessage) -> VVChatTimelineCoreSnapshot {
+        appendItem(VVChatTimelineItemModel(message: message))
+    }
+
+    @discardableResult
     func appendCustomEntry(_ entry: VVCustomTimelineEntry) -> VVChatTimelineCoreSnapshot {
+        appendItem(VVChatTimelineItemModel(customEntry: entry))
+    }
+
+    @discardableResult
+    func replaceItem(
+        id: String,
+        with item: VVChatTimelineItemModel
+    ) -> VVChatTimelineCoreSnapshot {
+        guard let index = snapshot.index(forItemID: id) else { return snapshot }
         var items = snapshot.items
-        items.append(VVChatTimelineItem(adaptedEntry: itemAdapter.adapt(.custom(entry))))
+        items[index] = VVChatTimelineItem(adaptedItem: itemAdapter.adapt(item))
         snapshot = makeSnapshot(from: items)
         return snapshot
     }
@@ -161,10 +137,20 @@ final class VVChatTimelineCoreStore {
         id: String,
         with entry: VVChatTimelineEntry
     ) -> VVChatTimelineCoreSnapshot {
-        guard let index = snapshot.index(forItemID: id) else { return snapshot }
-        var items = snapshot.items
-        items[index] = VVChatTimelineItem(adaptedEntry: itemAdapter.adapt(entry))
-        snapshot = makeSnapshot(from: items)
+        replaceItem(id: id, with: itemAdapter.itemModel(for: entry))
+    }
+
+    @discardableResult
+    func replaceItems(
+        in range: Range<Int>,
+        with items: [VVChatTimelineItemModel]
+    ) -> VVChatTimelineCoreSnapshot {
+        let lower = max(0, min(range.lowerBound, snapshot.count))
+        let upper = max(lower, min(range.upperBound, snapshot.count))
+        let adapted = items.map(itemAdapter.adapt).map(VVChatTimelineItem.init(adaptedItem:))
+        var currentItems = snapshot.items
+        currentItems.replaceSubrange(lower..<upper, with: adapted)
+        snapshot = makeSnapshot(from: currentItems)
         return snapshot
     }
 
@@ -173,13 +159,7 @@ final class VVChatTimelineCoreStore {
         in range: Range<Int>,
         with entries: [VVChatTimelineEntry]
     ) -> VVChatTimelineCoreSnapshot {
-        let lower = max(0, min(range.lowerBound, snapshot.count))
-        let upper = max(lower, min(range.upperBound, snapshot.count))
-        let adapted = entries.map(itemAdapter.adapt).map(VVChatTimelineItem.init(adaptedEntry:))
-        var items = snapshot.items
-        items.replaceSubrange(lower..<upper, with: adapted)
-        snapshot = makeSnapshot(from: items)
-        return snapshot
+        replaceItems(in: range, with: entries.map(itemAdapter.itemModel))
     }
 
     @discardableResult
@@ -187,20 +167,20 @@ final class VVChatTimelineCoreStore {
         guard let index = snapshot.index(forItemID: message.id) else { return snapshot }
         var items = snapshot.items
         let current = items[index]
-        let nextEntry: VVChatTimelineEntry
-        switch current.entry {
+        let nextModel: VVChatTimelineItemModel
+        switch current.model.content {
         case .message:
-            nextEntry = .message(message)
+            nextModel = VVChatTimelineItemModel(message: message)
         case .custom:
-            nextEntry = current.entry
+            nextModel = current.model
         }
-        items[index] = current.replacing(entry: nextEntry, message: message)
+        items[index] = current.replacing(model: nextModel, message: message)
         snapshot = makeSnapshot(from: items)
         return snapshot
     }
 
-    private func makeSnapshot(from adaptedEntries: [VVChatAdaptedTimelineEntry]) -> VVChatTimelineCoreSnapshot {
-        makeSnapshot(from: adaptedEntries.map(VVChatTimelineItem.init(adaptedEntry:)))
+    private func makeSnapshot(from adaptedItems: [VVChatAdaptedTimelineItem]) -> VVChatTimelineCoreSnapshot {
+        makeSnapshot(from: adaptedItems.map(VVChatTimelineItem.init(adaptedItem:)))
     }
 
     private func makeSnapshot(from items: [VVChatTimelineItem]) -> VVChatTimelineCoreSnapshot {

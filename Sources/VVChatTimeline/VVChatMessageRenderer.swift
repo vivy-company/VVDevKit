@@ -84,6 +84,9 @@ public final class VVChatMessageRenderer {
         private var costLimit: Int?
         private let cost: (Value) -> Int
         private var totalCost = 0
+        private var lookupHits = 0
+        private var lookupMisses = 0
+        private var evictions = 0
 
         init(limit: Int, costLimit: Int? = nil, cost: @escaping (Value) -> Int = { _ in 1 }) {
             self.limit = max(0, limit)
@@ -102,7 +105,11 @@ public final class VVChatMessageRenderer {
         }
 
         func value(for key: Key) -> Value? {
-            guard let node = map[key] else { return nil }
+            guard let node = map[key] else {
+                lookupMisses += 1
+                return nil
+            }
+            lookupHits += 1
             moveToTail(node)
             return node.value
         }
@@ -154,8 +161,28 @@ public final class VVChatMessageRenderer {
             map.count
         }
 
+        var entryLimit: Int {
+            limit
+        }
+
         var currentCost: Int {
             totalCost
+        }
+
+        var entryCostLimit: Int? {
+            costLimit
+        }
+
+        var hitCount: Int {
+            lookupHits
+        }
+
+        var missCount: Int {
+            lookupMisses
+        }
+
+        var evictionCount: Int {
+            evictions
         }
 
         func keysFromLeastRecent() -> [Key] {
@@ -218,6 +245,7 @@ public final class VVChatMessageRenderer {
                 totalCost -= oldest.cost
                 unlink(oldest)
                 map.removeValue(forKey: oldest.key)
+                evictions += 1
             }
         }
     }
@@ -236,19 +264,32 @@ public final class VVChatMessageRenderer {
         let contentScaleKey: Int
     }
 
+    struct CacheSnapshot {
+        let count: Int
+        let countLimit: Int
+        let estimatedCost: Int
+        let costLimit: Int?
+        let hitCount: Int
+        let missCount: Int
+        let evictionCount: Int
+    }
+
+    struct ResidentLayoutSnapshot {
+        let count: Int
+        let estimatedCost: Int
+        let costLimit: Int
+        let dematerializationCount: Int
+    }
+
     struct DebugSnapshot {
-        let renderedMessageCacheCount: Int
-        let renderedMessageCacheEstimatedCost: Int
-        let renderedMessageCacheCostLimit: Int
-        let preparedMarkdownCacheCount: Int
-        let draftPreparedStateCount: Int
-        let materializedPreparedLayoutCount: Int
-        let materializedPreparedLayoutEstimatedCost: Int
-        let materializedPreparedLayoutCostLimit: Int
-        let preparedMarkdownCacheHits: Int
-        let preparedMarkdownCacheMisses: Int
-        let preparedMarkdownCacheEstimatedCost: Int
-        let preparedMarkdownCacheCostLimit: Int
+        let renderedMessageCache: CacheSnapshot
+        let preparedMarkdownCache: CacheSnapshot
+        let draftPreparedStateCache: CacheSnapshot
+        let sceneWindowCache: CacheSnapshot
+        let selectionWindowCache: CacheSnapshot
+        let materializedPreparedLayouts: ResidentLayoutSnapshot
+        let preparedContentCacheHitCount: Int
+        let preparedContentCacheMissCount: Int
         let markdownParseCount: Int
         let markdownLayoutCount: Int
         let markdownWindowLayoutCount: Int
@@ -257,8 +298,23 @@ public final class VVChatMessageRenderer {
         let incrementalDraftReuseCount: Int
         let incrementalDraftLayoutPassCount: Int
         let incrementalDraftFullRebuildCount: Int
-        let sceneWindowCacheEstimatedCost: Int
-        let sceneWindowCacheCostLimit: Int
+
+        var renderedMessageCacheCount: Int { renderedMessageCache.count }
+        var renderedMessageCacheEstimatedCost: Int { renderedMessageCache.estimatedCost }
+        var renderedMessageCacheCostLimit: Int { renderedMessageCache.costLimit ?? 0 }
+        var preparedMarkdownCacheCount: Int { preparedMarkdownCache.count }
+        var draftPreparedStateCount: Int { draftPreparedStateCache.count }
+        var materializedPreparedLayoutCount: Int { materializedPreparedLayouts.count }
+        var materializedPreparedLayoutEstimatedCost: Int { materializedPreparedLayouts.estimatedCost }
+        var materializedPreparedLayoutCostLimit: Int { materializedPreparedLayouts.costLimit }
+        var preparedMarkdownCacheHits: Int { preparedContentCacheHitCount }
+        var preparedMarkdownCacheMisses: Int { preparedContentCacheMissCount }
+        var preparedMarkdownCacheEstimatedCost: Int {
+            preparedMarkdownCache.estimatedCost + draftPreparedStateCache.estimatedCost
+        }
+        var preparedMarkdownCacheCostLimit: Int { preparedMarkdownCache.costLimit ?? 0 }
+        var sceneWindowCacheEstimatedCost: Int { sceneWindowCache.estimatedCost }
+        var sceneWindowCacheCostLimit: Int { sceneWindowCache.costLimit ?? 0 }
     }
 
     private struct PreparedMarkdownLayoutAnalysis {
@@ -373,12 +429,9 @@ public final class VVChatMessageRenderer {
     private var incrementalDraftReuseCount = 0
     private var incrementalDraftLayoutPassCount = 0
     private var incrementalDraftFullRebuildCount = 0
-    private static let renderedMessageCacheCostLimit = 12 * 1024 * 1024
-    private static let materializedPreparedLayoutCostLimit = 24 * 1024 * 1024
-    private static let preparedMarkdownCacheCostLimit = 64 * 1024 * 1024
-    private static let draftPreparedStateCostLimit = 24 * 1024 * 1024
-    private static let sceneWindowCacheCostLimit = 24 * 1024 * 1024
-    private static let selectionWindowCacheCostLimit = 12 * 1024 * 1024
+    private var preparedLayoutDematerializationCount = 0
+    private let preparationService: VVChatMarkdownPreparationService
+    private var preparationGeneration = 0
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
@@ -388,6 +441,8 @@ public final class VVChatMessageRenderer {
 
     public init(style: VVChatTimelineStyle, contentWidth: CGFloat) {
         let fixedResources = Self.makeFixedResources(style: style, contentWidth: contentWidth)
+        let cacheBudget = style.cacheBudget
+        let styleSnapshot = VVChatMarkdownPreparationStyleSnapshot(style: style)
         self.style = style
         self.contentWidth = contentWidth
         self.finalLayoutEngine = fixedResources.final.layoutEngine
@@ -401,37 +456,40 @@ public final class VVChatMessageRenderer {
         self.loadingLayoutEngine = fixedResources.loading.layoutEngine
         self.loadingPipeline = fixedResources.loading.pipeline
         self.cache = LRUCache(
-            limit: style.renderedCacheLimit,
-            costLimit: Self.renderedMessageCacheCostLimit,
+            limit: cacheBudget.renderedMessageCountLimit,
+            costLimit: cacheBudget.renderedMessageCostLimit,
             cost: Self.estimatedRenderedMessageCost
         )
         self.preparedMarkdownCache = LRUCache(
-            limit: style.renderedCacheLimit,
-            costLimit: Self.preparedMarkdownCacheCostLimit,
+            limit: cacheBudget.preparedMarkdownCountLimit,
+            costLimit: cacheBudget.preparedMarkdownCostLimit,
             cost: Self.estimatedPreparedMarkdownCost
         )
         self.draftPreparedStates = LRUCache(
-            limit: max(2, style.renderedCacheLimit),
-            costLimit: Self.draftPreparedStateCostLimit,
+            limit: cacheBudget.draftPreparedStateCountLimit,
+            costLimit: cacheBudget.draftPreparedStateCostLimit,
             cost: { state in
                 Self.estimatedPreparedMarkdownCost(state.prepared)
             }
         )
         self.sceneWindowCache = LRUCache(
-            limit: max(8, style.renderedCacheLimit * 4),
-            costLimit: Self.sceneWindowCacheCostLimit,
+            limit: cacheBudget.sceneWindowCountLimit,
+            costLimit: cacheBudget.sceneWindowCostLimit,
             cost: Self.estimatedSceneArtifactsCost
         )
         self.selectionWindowCache = LRUCache(
-            limit: max(8, style.renderedCacheLimit * 3),
-            costLimit: Self.selectionWindowCacheCostLimit,
+            limit: cacheBudget.selectionWindowCountLimit,
+            costLimit: cacheBudget.selectionWindowCostLimit,
             cost: Self.estimatedSelectionArtifactsCost
         )
+        self.preparationService = VVChatMarkdownPreparationService(styleSnapshot: styleSnapshot)
     }
 
     public func updateStyle(_ style: VVChatTimelineStyle) {
         let fixedResources = Self.makeFixedResources(style: style, contentWidth: contentWidth)
+        let cacheBudget = style.cacheBudget
         self.style = style
+        preparationGeneration += 1
         finalLayoutEngine = fixedResources.final.layoutEngine
         draftLayoutEngine = fixedResources.draft.layoutEngine
         finalPipeline = fixedResources.final.pipeline
@@ -443,21 +501,26 @@ public final class VVChatMessageRenderer {
         loadingLayoutEngine = fixedResources.loading.layoutEngine
         loadingPipeline = fixedResources.loading.pipeline
         clearResourceCaches()
-        cache.updateLimit(style.renderedCacheLimit)
-        cache.updateCostLimit(Self.renderedMessageCacheCostLimit)
-        preparedMarkdownCache.updateLimit(style.renderedCacheLimit)
-        preparedMarkdownCache.updateCostLimit(Self.preparedMarkdownCacheCostLimit)
-        draftPreparedStates.updateLimit(max(2, style.renderedCacheLimit))
-        draftPreparedStates.updateCostLimit(Self.draftPreparedStateCostLimit)
-        sceneWindowCache.updateLimit(max(8, style.renderedCacheLimit * 4))
-        sceneWindowCache.updateCostLimit(Self.sceneWindowCacheCostLimit)
-        selectionWindowCache.updateLimit(max(8, style.renderedCacheLimit * 3))
-        selectionWindowCache.updateCostLimit(Self.selectionWindowCacheCostLimit)
+        cache.updateLimit(cacheBudget.renderedMessageCountLimit)
+        cache.updateCostLimit(cacheBudget.renderedMessageCostLimit)
+        preparedMarkdownCache.updateLimit(cacheBudget.preparedMarkdownCountLimit)
+        preparedMarkdownCache.updateCostLimit(cacheBudget.preparedMarkdownCostLimit)
+        draftPreparedStates.updateLimit(cacheBudget.draftPreparedStateCountLimit)
+        draftPreparedStates.updateCostLimit(cacheBudget.draftPreparedStateCostLimit)
+        sceneWindowCache.updateLimit(cacheBudget.sceneWindowCountLimit)
+        sceneWindowCache.updateCostLimit(cacheBudget.sceneWindowCostLimit)
+        selectionWindowCache.updateLimit(cacheBudget.selectionWindowCountLimit)
+        selectionWindowCache.updateCostLimit(cacheBudget.selectionWindowCostLimit)
         cache.removeAll()
         preparedMarkdownCache.removeAll()
         draftPreparedStates.removeAll()
         sceneWindowCache.removeAll()
         selectionWindowCache.removeAll()
+        Task {
+            await preparationService.updateStyleSnapshot(
+                VVChatMarkdownPreparationStyleSnapshot(style: style)
+            )
+        }
     }
 
     public func updateContentWidth(_ width: CGFloat) {
@@ -485,6 +548,139 @@ public final class VVChatMessageRenderer {
         }
         imageSizes[url] = size
         return true
+    }
+
+    func prepareMarkdownContentIfNeeded(
+        for message: VVChatMessage,
+        requiresLayout: Bool
+    ) async {
+        guard message.customContent == nil else { return }
+
+        let key = cacheKey(for: message)
+        if let cached = preparedMarkdownCache.value(for: key),
+           cached.layout != nil || !requiresLayout {
+            return
+        }
+
+        let generation = preparationGeneration
+        let prepared = await preparationService.prepare(
+            VVChatMarkdownPreparationRequest(
+                id: message.id,
+                revision: message.revision,
+                content: message.content,
+                widthKey: key.widthKey,
+                isDraft: key.isDraft,
+                contentScaleKey: key.contentScaleKey,
+                imageSizes: imageSizes
+            )
+        )
+
+        await MainActor.run {
+            guard generation == preparationGeneration else { return }
+            guard key == cacheKey(for: message) else { return }
+
+            let analysis = analyzePreparedMarkdownLayout(prepared.layout, document: prepared.document)
+            preparedMarkdownCache.set(
+                PreparedMarkdownContent(
+                    document: prepared.document,
+                    layout: requiresLayout ? prepared.layout : nil,
+                    analysis: analysis,
+                    appliedImageSizes: prepared.appliedImageSizes
+                ),
+                for: key
+            )
+            dematerializePreparedLayoutsIfNeeded(excluding: requiresLayout ? key : nil)
+        }
+    }
+
+    func prepareVisibleSceneArtifactsIfNeeded(
+        for message: VVChatMessage,
+        rendered: VVChatRenderedMessage,
+        visibleRect: CGRect?
+    ) async {
+        guard case .markdown(let key) = rendered.contentSceneSource else { return }
+
+        let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
+        let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
+        let prepared = preparedMarkdownContent(
+            for: message,
+            key: key,
+            layoutEngine: layoutEngine,
+            requiresLayout: true
+        )
+        let blockRange = visibleMarkdownBlockRange(
+            in: visibleRect?.offsetBy(
+                dx: -rendered.selectionContentOffset.x,
+                dy: -rendered.selectionContentOffset.y
+            ),
+            analysis: prepared.analysis
+        )
+        let windowKey = SceneWindowCacheKey(
+            key: key,
+            startBlock: blockRange.lowerBound,
+            endBlock: blockRange.upperBound
+        )
+        guard sceneWindowCache.value(for: windowKey) == nil else { return }
+        guard let layout = prepared.layout else { return }
+
+        markdownSceneBuildCount += 1
+        let artifacts = await preparationService.prepareContentScene(
+            VVChatMarkdownSceneRequest(
+                layout: layout,
+                blockRange: blockRange,
+                widthKey: key.widthKey,
+                isDraft: key.isDraft,
+                contentScaleKey: key.contentScaleKey,
+                textOpacityMultiplier: message.presentation?.textOpacityMultiplier,
+                prefixGlyphColor: message.presentation?.prefixGlyphColor,
+                prefixGlyphCount: max(0, message.presentation?.prefixGlyphCount ?? 0)
+            )
+        )
+        await MainActor.run {
+            sceneWindowCache.set(artifacts, for: windowKey)
+        }
+    }
+
+    func prepareVisibleSelectionArtifactsIfNeeded(
+        for message: VVChatMessage,
+        rendered: VVChatRenderedMessage,
+        visibleRect: CGRect?
+    ) async {
+        guard case .markdown(let key) = rendered.contentSceneSource else { return }
+
+        let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
+        let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
+        let prepared = preparedMarkdownContent(
+            for: message,
+            key: key,
+            layoutEngine: layoutEngine,
+            requiresLayout: true
+        )
+        let blockRange = visibleRect.map { visibleMarkdownBlockRange(in: $0, analysis: prepared.analysis) }
+            ?? (0..<prepared.analysis.blockMinY.count)
+        guard !blockRange.isEmpty else { return }
+        let windowKey = SelectionWindowCacheKey(
+            key: key,
+            startBlock: blockRange.lowerBound,
+            endBlock: blockRange.upperBound
+        )
+        guard selectionWindowCache.value(for: windowKey) == nil else { return }
+        guard let layout = prepared.layout else { return }
+
+        let artifacts = await preparationService.prepareSelectionArtifacts(
+            VVChatMarkdownSelectionRequest(
+                layout: layout,
+                blockRange: blockRange,
+                widthKey: key.widthKey,
+                isDraft: key.isDraft,
+                contentScaleKey: key.contentScaleKey
+            )
+        )
+        if let artifacts {
+            await MainActor.run {
+                selectionWindowCache.set(artifacts, for: windowKey)
+            }
+        }
     }
 
     func trimCaches(keepingMessageIDs: Set<String>) {
@@ -521,28 +717,26 @@ public final class VVChatMessageRenderer {
 
     func debugSnapshot() -> DebugSnapshot {
         let preparedValues = preparedMarkdownCache.valuesFromLeastRecent()
-        let draftValues = draftPreparedStates.valuesFromLeastRecent()
+        let materializedPreparedLayoutCount = preparedValues.reduce(into: 0) { count, value in
+            if value.layout != nil { count += 1 }
+        }
+        let materializedPreparedLayoutEstimatedCost = preparedValues.reduce(into: 0) { total, value in
+            total += Self.estimatedResidentPreparedLayoutCost(value)
+        }
         return DebugSnapshot(
-            renderedMessageCacheCount: cache.count,
-            renderedMessageCacheEstimatedCost: cache.currentCost,
-            renderedMessageCacheCostLimit: Self.renderedMessageCacheCostLimit,
-            preparedMarkdownCacheCount: preparedMarkdownCache.count,
-            draftPreparedStateCount: draftPreparedStates.count,
-            materializedPreparedLayoutCount: preparedValues.reduce(into: 0) { count, value in
-                if value.layout != nil { count += 1 }
-            } + draftValues.reduce(into: 0) { count, value in
-                if value.prepared.layout != nil { count += 1 }
-            },
-            materializedPreparedLayoutEstimatedCost: preparedValues.reduce(into: 0) { total, value in
-                total += Self.estimatedResidentPreparedLayoutCost(value)
-            } + draftValues.reduce(into: 0) { total, value in
-                total += Self.estimatedResidentPreparedLayoutCost(value.prepared)
-            },
-            materializedPreparedLayoutCostLimit: Self.materializedPreparedLayoutCostLimit,
-            preparedMarkdownCacheHits: preparedMarkdownCacheHits,
-            preparedMarkdownCacheMisses: preparedMarkdownCacheMisses,
-            preparedMarkdownCacheEstimatedCost: preparedMarkdownCache.currentCost + draftPreparedStates.currentCost,
-            preparedMarkdownCacheCostLimit: Self.preparedMarkdownCacheCostLimit,
+            renderedMessageCache: Self.cacheSnapshot(for: cache),
+            preparedMarkdownCache: Self.cacheSnapshot(for: preparedMarkdownCache),
+            draftPreparedStateCache: Self.cacheSnapshot(for: draftPreparedStates),
+            sceneWindowCache: Self.cacheSnapshot(for: sceneWindowCache),
+            selectionWindowCache: Self.cacheSnapshot(for: selectionWindowCache),
+            materializedPreparedLayouts: ResidentLayoutSnapshot(
+                count: materializedPreparedLayoutCount,
+                estimatedCost: materializedPreparedLayoutEstimatedCost,
+                costLimit: style.cacheBudget.materializedPreparedLayoutCostLimit,
+                dematerializationCount: preparedLayoutDematerializationCount
+            ),
+            preparedContentCacheHitCount: preparedMarkdownCacheHits,
+            preparedContentCacheMissCount: preparedMarkdownCacheMisses,
             markdownParseCount: markdownParseCount,
             markdownLayoutCount: markdownLayoutCount,
             markdownWindowLayoutCount: markdownWindowLayoutCount,
@@ -550,9 +744,7 @@ public final class VVChatMessageRenderer {
             incrementalImageLayoutPassCount: incrementalImageLayoutPassCount,
             incrementalDraftReuseCount: incrementalDraftReuseCount,
             incrementalDraftLayoutPassCount: incrementalDraftLayoutPassCount,
-            incrementalDraftFullRebuildCount: incrementalDraftFullRebuildCount,
-            sceneWindowCacheEstimatedCost: sceneWindowCache.currentCost,
-            sceneWindowCacheCostLimit: Self.sceneWindowCacheCostLimit
+            incrementalDraftFullRebuildCount: incrementalDraftFullRebuildCount
         )
     }
 
@@ -573,17 +765,9 @@ public final class VVChatMessageRenderer {
         let maxBubbleWidth = bubbleStyle?.maxWidth ?? availableWidth
         let maxContentWidth = usesBubble ? min(availableWidth - bubbleInsets.left - bubbleInsets.right, maxBubbleWidth) : availableWidth
         let messageContentWidth = max(0, maxContentWidth)
-        let widthKey = Self.widthKey(for: messageContentWidth)
         let isDraft = message.state == .draft
         let contentScale = normalizedContentScale(presentation?.contentFontScale)
-        let contentScaleKey = Self.contentScaleKey(for: contentScale)
-        let key = CacheKey(
-            id: message.id,
-            revision: message.revision,
-            widthKey: widthKey,
-            isDraft: isDraft,
-            contentScaleKey: contentScaleKey
-        )
+        let key = cacheKey(for: message)
         if let cached = cache.value(for: key) {
             return cached
         }
@@ -980,6 +1164,7 @@ public final class VVChatMessageRenderer {
         let messageContentWidth = max(0, maxContentWidth)
         let isDraft = message.state == .draft
         let contentScale = normalizedContentScale(presentation?.contentFontScale)
+        let key = cacheKey(for: message)
         let (layoutEngine, _) = contentResources(isDraft: isDraft, scale: contentScale)
         let customContent = message.customContent
 
@@ -1006,39 +1191,16 @@ public final class VVChatMessageRenderer {
             measuredWidth = customRender.visualWidth
             contentLayoutTotalHeight = nil
         } else {
-            if isDraft {
-                let widthKey = Self.widthKey(for: messageContentWidth)
-                let contentScaleKey = Self.contentScaleKey(for: contentScale)
-                let key = CacheKey(
-                    id: message.id,
-                    revision: message.revision,
-                    widthKey: widthKey,
-                    isDraft: true,
-                    contentScaleKey: contentScaleKey
-                )
-                let prepared = preparedMarkdownContent(
-                    for: message,
-                    key: key,
-                    layoutEngine: layoutEngine,
-                    requiresLayout: true
-                )
-                contentBounds = prepared.analysis.contentBounds
-                imageURLs = prepared.analysis.imageURLs
-                measuredWidth = usesBubble ? prepared.analysis.measuredWidth : nil
-                contentLayoutTotalHeight = prepared.analysis.totalHeight
-            } else {
-                markdownParseCount += 1
-                let document = parser.parse(message.content)
-                markdownLayoutCount += 1
-                var layout = layoutEngine.layout(document)
-                applyKnownImageSizes(to: &layout, layoutEngine: layoutEngine)
-                layoutEngine.adjustParagraphImageSpacing(in: &layout)
-                let analysis = analyzePreparedMarkdownLayout(layout, document: document)
-                contentBounds = analysis.contentBounds
-                imageURLs = analysis.imageURLs
-                measuredWidth = usesBubble ? analysis.measuredWidth : nil
-                contentLayoutTotalHeight = layout.totalHeight
-            }
+            let prepared = preparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: true
+            )
+            contentBounds = prepared.analysis.contentBounds
+            imageURLs = prepared.analysis.imageURLs
+            measuredWidth = usesBubble ? prepared.analysis.measuredWidth : nil
+            contentLayoutTotalHeight = prepared.analysis.totalHeight
         }
 
         let bubbleWidthSource = measuredWidth ?? max(0, contentBounds?.width ?? 0)
@@ -1521,15 +1683,6 @@ public final class VVChatMessageRenderer {
         requiresLayout: Bool
     ) -> PreparedMarkdownContent {
         configureMarkdownLayoutEngine(layoutEngine, for: key)
-        if message.state == .draft {
-            return draftPreparedMarkdownContent(
-                for: message,
-                key: key,
-                layoutEngine: layoutEngine,
-                requiresLayout: requiresLayout
-            )
-        }
-
         if var cached = preparedMarkdownCache.value(for: key) {
             preparedMarkdownCacheHits += 1
             let didRefresh = refreshPreparedMarkdownContentIfNeeded(
@@ -1547,6 +1700,15 @@ public final class VVChatMessageRenderer {
                 dematerializePreparedLayoutsIfNeeded(excluding: requiresLayout ? key : nil)
             }
             return cached
+        }
+
+        if message.state == .draft {
+            return draftPreparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: requiresLayout
+            )
         }
 
         preparedMarkdownCacheMisses += 1
@@ -1597,6 +1759,7 @@ public final class VVChatMessageRenderer {
             if didUpdate || didRefresh {
                 draftPreparedStates.set(cached, for: draftKey)
             }
+            preparedMarkdownCache.set(cached.prepared, for: key)
             return cached.prepared
         }
 
@@ -1608,6 +1771,7 @@ public final class VVChatMessageRenderer {
             layoutEngine: layoutEngine
         )
         draftPreparedStates.set(rebuilt, for: draftKey)
+        preparedMarkdownCache.set(rebuilt.prepared, for: key)
         return rebuilt.prepared
     }
 
@@ -2014,7 +2178,14 @@ public final class VVChatMessageRenderer {
         pipeline: VVMarkdownRenderPipeline
     ) -> VVScene {
         markdownSceneBuildCount += 1
-        var scene = pipeline.buildScene(from: layout, blockRange: blockRange)
+        return applyMessageScenePresentation(
+            pipeline.buildScene(from: layout, blockRange: blockRange),
+            for: message
+        )
+    }
+
+    private func applyMessageScenePresentation(_ scene: VVScene, for message: VVChatMessage) -> VVScene {
+        var scene = scene
         if let opacityMultiplier = message.presentation?.textOpacityMultiplier {
             scene = applyingTextOpacity(to: scene, multiplier: opacityMultiplier)
         }
@@ -3020,6 +3191,33 @@ public final class VVChatMessageRenderer {
         return max(0.72, min(1.6, requested))
     }
 
+    private func cacheKey(for message: VVChatMessage) -> CacheKey {
+        let insets = style.insets(for: message.role)
+        let presentation = message.presentation
+        let leadingIconURL = normalizedAssetURL(presentation?.leadingIconURL)
+        let hasLeadingIcon = leadingIconURL != nil
+        let leadingIconSize = hasLeadingIcon ? max(8, presentation?.leadingIconSize ?? style.headerIconSize) : 0
+        let leadingIconSpacing = hasLeadingIcon ? max(0, presentation?.leadingIconSpacing ?? style.headerIconSpacing) : 0
+        let explicitLaneWidth = max(0, presentation?.leadingLaneWidth ?? 0)
+        let implicitLaneWidth = hasLeadingIcon ? (leadingIconSize + leadingIconSpacing) : 0
+        let leadingLaneWidth = max(explicitLaneWidth, implicitLaneWidth)
+        let bubbleStyle = presentation?.bubbleStyle ?? style.bubbleStyle(for: message.role)
+        let bubbleInsets = bubbleStyle?.insets ?? VVInsets()
+        let availableWidth = max(0, contentWidth - insets.left - insets.right - leadingLaneWidth)
+        let maxBubbleWidth = bubbleStyle?.maxWidth ?? availableWidth
+        let maxContentWidth = bubbleStyle != nil
+            ? min(availableWidth - bubbleInsets.left - bubbleInsets.right, maxBubbleWidth)
+            : availableWidth
+        let contentScale = normalizedContentScale(presentation?.contentFontScale)
+        return CacheKey(
+            id: message.id,
+            revision: message.revision,
+            widthKey: Self.widthKey(for: max(0, maxContentWidth)),
+            isDraft: message.state == .draft,
+            contentScaleKey: Self.contentScaleKey(for: contentScale)
+        )
+    }
+
     private func contentResources(isDraft: Bool, scale: CGFloat) -> ContentResources {
         let normalizedScale = normalizedContentScale(scale)
         let scaleKey = Self.contentScaleKey(for: normalizedScale)
@@ -3484,23 +3682,41 @@ public final class VVChatMessageRenderer {
             }
         }
 
+        let cacheBudget = style.cacheBudget
         var residentCost = currentResidentCost()
-        guard residentCost > Self.materializedPreparedLayoutCostLimit ||
-                preparedMarkdownCache.currentCost > Self.preparedMarkdownCacheCostLimit else { return }
+        guard residentCost > cacheBudget.materializedPreparedLayoutCostLimit ||
+                preparedMarkdownCache.currentCost > cacheBudget.preparedMarkdownCostLimit else { return }
         for key in preparedMarkdownCache.keysFromLeastRecent() {
             if let protectedKey, protectedKey == key {
                 continue
             }
+            var didDematerialize = false
             preparedMarkdownCache.updateValue(for: key) { prepared in
                 guard prepared.layout != nil else { return }
                 prepared.layout = nil
+                didDematerialize = true
+            }
+            if didDematerialize {
+                preparedLayoutDematerializationCount += 1
             }
             residentCost = currentResidentCost()
-            if residentCost <= Self.materializedPreparedLayoutCostLimit &&
-                preparedMarkdownCache.currentCost <= Self.preparedMarkdownCacheCostLimit {
+            if residentCost <= cacheBudget.materializedPreparedLayoutCostLimit &&
+                preparedMarkdownCache.currentCost <= cacheBudget.preparedMarkdownCostLimit {
                 break
             }
         }
+    }
+
+    private static func cacheSnapshot<Key, Value>(for cache: LRUCache<Key, Value>) -> CacheSnapshot {
+        CacheSnapshot(
+            count: cache.count,
+            countLimit: cache.entryLimit,
+            estimatedCost: cache.currentCost,
+            costLimit: cache.entryCostLimit,
+            hitCount: cache.hitCount,
+            missCount: cache.missCount,
+            evictionCount: cache.evictionCount
+        )
     }
 
     private static func estimatedPreparedMarkdownCost(_ content: PreparedMarkdownContent) -> Int {

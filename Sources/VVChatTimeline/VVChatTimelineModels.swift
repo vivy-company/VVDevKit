@@ -222,6 +222,51 @@ public struct VVChatMessage: Identifiable, Hashable, Sendable {
     }
 }
 
+public enum VVChatTimelineItemKind: Hashable, Sendable {
+    case message(role: VVChatMessageRole)
+    case toolGroup
+    case toolCall
+    case summaryCard
+    case systemEvent
+    case diffCard
+    case customWidget(name: String)
+
+    static func classify(message: VVChatMessage) -> VVChatTimelineItemKind {
+        if let customContent = message.customContent {
+            switch customContent {
+            case .summaryCard:
+                return .summaryCard
+            case .inlineDiff:
+                return .diffCard
+            }
+        }
+        return .message(role: message.role)
+    }
+
+    static func classify(customKind: String) -> VVChatTimelineItemKind {
+        let normalized = customKind
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case "toolgroup", "tool_call_group", "tool-call-group", "toolcallgroup":
+            return .toolGroup
+        case "toolcall", "tool_call", "tool-call", "toolcalldetail", "tool_call_detail", "tool-call-detail":
+            return .toolCall
+        case "summarycard", "summary_card", "summary-card":
+            return .summaryCard
+        case "systemevent", "system_event", "system-event":
+            return .systemEvent
+        case "diffcard", "diff_card", "diff-card", "inlinediff", "inline_diff", "inline-diff":
+            return .diffCard
+        case "":
+            return .customWidget(name: "custom")
+        default:
+            return .customWidget(name: normalized)
+        }
+    }
+}
+
 public struct VVCustomTimelineEntry: Identifiable, Hashable, Sendable {
     public let id: String
     public let kind: String
@@ -241,6 +286,92 @@ public struct VVCustomTimelineEntry: Identifiable, Hashable, Sendable {
         self.payload = payload
         self.revision = revision
         self.timestamp = timestamp
+    }
+}
+
+public enum VVChatTimelineItemContent: Hashable, Sendable {
+    case message(VVChatMessage)
+    case custom(VVCustomTimelineEntry)
+
+    public var id: String {
+        switch self {
+        case .message(let message):
+            return message.id
+        case .custom(let custom):
+            return custom.id
+        }
+    }
+
+    public var revision: Int {
+        switch self {
+        case .message(let message):
+            return message.revision
+        case .custom(let custom):
+            return custom.revision
+        }
+    }
+
+    public var timestamp: Date? {
+        switch self {
+        case .message(let message):
+            return message.timestamp
+        case .custom(let custom):
+            return custom.timestamp
+        }
+    }
+
+    public var kind: VVChatTimelineItemKind {
+        switch self {
+        case .message(let message):
+            return VVChatTimelineItemKind.classify(message: message)
+        case .custom(let custom):
+            return VVChatTimelineItemKind.classify(customKind: custom.kind)
+        }
+    }
+
+    public var entry: VVChatTimelineEntry {
+        switch self {
+        case .message(let message):
+            return .message(message)
+        case .custom(let custom):
+            return .custom(custom)
+        }
+    }
+}
+
+public struct VVChatTimelineItemModel: Identifiable, Hashable, Sendable {
+    public let content: VVChatTimelineItemContent
+
+    public init(content: VVChatTimelineItemContent) {
+        self.content = content
+    }
+
+    public init(message: VVChatMessage) {
+        self.content = .message(message)
+    }
+
+    public init(customEntry: VVCustomTimelineEntry) {
+        self.content = .custom(customEntry)
+    }
+
+    public var id: String {
+        content.id
+    }
+
+    public var kind: VVChatTimelineItemKind {
+        content.kind
+    }
+
+    public var revision: Int {
+        content.revision
+    }
+
+    public var timestamp: Date? {
+        content.timestamp
+    }
+
+    public var entry: VVChatTimelineEntry {
+        content.entry
     }
 }
 

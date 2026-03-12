@@ -1120,6 +1120,8 @@ struct ChatPlaygroundView: View {
     @State private var toolGroupsByID: [String: PlaygroundToolGroup] = [:]
     @State private var nextScriptedTurn = 0
     @State private var chatState = VVChatTimelineState()
+    private let maxTimelineEntries = 300
+    private let pruneTargetEntries = 200
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 12) {
@@ -1860,10 +1862,27 @@ struct ChatPlaygroundView: View {
 
         await MainActor.run {
             prepareAppendTransition()
-            controller.appendMessage(chatMessage(from: turn.userMessage, startsAssistantLane: false))
+            let draftID = "assistant-draft-\(UUID().uuidString)"
+            let currentDraft = PlaygroundChatMessage(
+                id: draftID,
+                role: .assistant,
+                state: .draft,
+                content: "",
+                revision: 0,
+                timestamp: turn.agentPreface.timestamp
+            )
+            controller.replaceEntries(
+                in: controller.entries.count..<controller.entries.count,
+                with: [
+                    .message(chatMessage(from: turn.userMessage, startsAssistantLane: false)),
+                    .message(chatMessage(from: currentDraft, startsAssistantLane: true))
+                ],
+                scrollToBottom: controller.state.shouldAutoFollow,
+                markUnread: true
+            )
         }
 
-        let draftID = "assistant-draft-\(UUID().uuidString)"
+        let draftID = controller.entries.last?.id ?? "assistant-draft-\(UUID().uuidString)"
         var currentDraft = PlaygroundChatMessage(
             id: draftID,
             role: .assistant,
@@ -1872,10 +1891,6 @@ struct ChatPlaygroundView: View {
             revision: 0,
             timestamp: turn.agentPreface.timestamp
         )
-        await MainActor.run {
-            prepareAppendTransition()
-            controller.appendMessage(chatMessage(from: currentDraft, startsAssistantLane: true))
-        }
 
         for chunk in markdownStreamingSegments(for: turn.agentPreface.content) {
             if Task.isCancelled { return }
@@ -1890,23 +1905,23 @@ struct ChatPlaygroundView: View {
         currentDraft.state = .final
         currentDraft.revision += 1
         await MainActor.run {
-            controller.prepareLayoutTransition(anchorItemID: currentDraft.id)
-            controller.replaceEntry(
-                id: currentDraft.id,
-                with: .message(chatMessage(from: currentDraft, startsAssistantLane: true))
-            )
-
             storeToolGroup(turn.toolGroup.inProgressVersion)
             if expandNewToolGroups {
                 expandedToolGroupIDs.insert(turn.toolGroup.inProgressVersion.id)
             }
             prepareAppendTransition()
-            upsertToolGroupBlock(
-                turn.toolGroup.inProgressVersion,
-                replacingExistingGroup: false,
-                scrollToBottom: controller.state.shouldAutoFollow,
-                markUnread: true
-            )
+            if let draftIndex = controller.entries.firstIndex(where: { $0.id == currentDraft.id }) {
+                let groupedEntries =
+                    [VVChatTimelineEntry.message(chatMessage(from: currentDraft, startsAssistantLane: true))] +
+                    [VVChatTimelineEntry.custom(groupEntry(for: turn.toolGroup.inProgressVersion))] +
+                    expandedToolEntries(for: turn.toolGroup.inProgressVersion)
+                controller.replaceEntries(
+                    in: draftIndex..<(draftIndex + 1),
+                    with: groupedEntries,
+                    scrollToBottom: controller.state.shouldAutoFollow,
+                    markUnread: true
+                )
+            }
         }
 
         try? await Task.sleep(nanoseconds: UInt64(max(chunkDelay, 0.05) * 5 * 1_000_000_000))
@@ -1917,8 +1932,7 @@ struct ChatPlaygroundView: View {
                 turn.toolGroup.completedVersion,
                 replacingExistingGroup: true,
                 scrollToBottom: controller.state.shouldAutoFollow,
-                markUnread: false,
-                animatedAnchorID: turn.toolGroup.completedVersion.id
+                markUnread: false
             )
         }
 
@@ -1948,18 +1962,23 @@ struct ChatPlaygroundView: View {
         streamedFinal.state = .final
         streamedFinal.revision += 1
         await MainActor.run {
-            controller.prepareLayoutTransition(anchorItemID: streamedFinal.id)
-            controller.replaceEntry(
-                id: streamedFinal.id,
-                with: .message(chatMessage(from: streamedFinal, startsAssistantLane: false))
-            )
-
             prepareAppendTransition()
-            controller.appendCustomEntry(turnSummaryEntry(for: turn.summary))
-            if let systemMessage = turn.systemMessage, includeInterrupts {
-                prepareAppendTransition()
-                controller.appendMessage(chatMessage(from: systemMessage, startsAssistantLane: false))
+            if let finalIndex = controller.entries.firstIndex(where: { $0.id == streamedFinal.id }) {
+                var completionEntries: [VVChatTimelineEntry] = [
+                    .message(chatMessage(from: streamedFinal, startsAssistantLane: false)),
+                    .custom(turnSummaryEntry(for: turn.summary))
+                ]
+                if let systemMessage = turn.systemMessage, includeInterrupts {
+                    completionEntries.append(.message(chatMessage(from: systemMessage, startsAssistantLane: false)))
+                }
+                controller.replaceEntries(
+                    in: finalIndex..<(finalIndex + 1),
+                    with: completionEntries,
+                    scrollToBottom: controller.state.shouldAutoFollow,
+                    markUnread: true
+                )
             }
+            pruneTimelineIfNeeded()
         }
     }
 
@@ -1968,6 +1987,26 @@ struct ChatPlaygroundView: View {
         if let anchorID {
             controller.prepareLayoutTransition(anchorItemID: anchorID)
         }
+    }
+
+    private func pruneTimelineIfNeeded() {
+        guard controller.entries.count > maxTimelineEntries else { return }
+        let removeCount = controller.entries.count - pruneTargetEntries
+        guard removeCount > 0 else { return }
+
+        controller.replaceEntries(
+            in: 0..<removeCount,
+            with: [],
+            scrollToBottom: false,
+            markUnread: false
+        )
+
+        let remainingGroupIDs = Set(controller.entries.compactMap { entry -> String? in
+            guard case .custom(let custom) = entry, custom.kind == "toolCallGroup" else { return nil }
+            return custom.id
+        })
+        toolGroupsByID = toolGroupsByID.filter { remainingGroupIDs.contains($0.key) }
+        expandedToolGroupIDs = expandedToolGroupIDs.intersection(remainingGroupIDs)
     }
 
     private func handleEntryActivate(_ entryID: String) {
@@ -3399,7 +3438,7 @@ enum SampleData {
             assistantInsets: .init(top: 3, left: 20, bottom: 4, right: 20),
             systemInsets: .init(top: 15, left: 20, bottom: 15, right: 20),
             backgroundColor: .clear,
-            renderedCacheLimit: 12,
+            renderedCacheLimit: 40,
             motion: .init(
                 layoutTransition: .accordion,
                 layoutAnimation: .spring(response: 0.34, dampingFraction: 0.84),

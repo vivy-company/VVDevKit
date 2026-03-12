@@ -1,7 +1,7 @@
 import Foundation
 
-struct VVChatAdaptedTimelineEntry {
-    let entry: VVChatTimelineEntry
+struct VVChatAdaptedTimelineItem {
+    let model: VVChatTimelineItemModel
     let message: VVChatMessage
 }
 
@@ -11,15 +11,28 @@ struct VVChatTimelineItemAdapter {
 
     var customEntryMessageMapper: CustomEntryMessageMapper?
 
-    func adapt(_ entry: VVChatTimelineEntry) -> VVChatAdaptedTimelineEntry {
-        VVChatAdaptedTimelineEntry(
-            entry: entry,
-            message: message(for: entry)
+    func itemModel(for entry: VVChatTimelineEntry) -> VVChatTimelineItemModel {
+        switch entry {
+        case .message(let message):
+            return VVChatTimelineItemModel(message: message)
+        case .custom(let custom):
+            return VVChatTimelineItemModel(customEntry: custom)
+        }
+    }
+
+    func adapt(_ entry: VVChatTimelineEntry) -> VVChatAdaptedTimelineItem {
+        adapt(itemModel(for: entry))
+    }
+
+    func adapt(_ item: VVChatTimelineItemModel) -> VVChatAdaptedTimelineItem {
+        VVChatAdaptedTimelineItem(
+            model: item,
+            message: message(for: item)
         )
     }
 
-    private func message(for entry: VVChatTimelineEntry) -> VVChatMessage {
-        switch entry {
+    private func message(for item: VVChatTimelineItemModel) -> VVChatMessage {
+        switch item.content {
         case .message(let message):
             return message
         case .custom(let custom):

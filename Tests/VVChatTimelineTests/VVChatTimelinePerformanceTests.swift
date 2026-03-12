@@ -204,6 +204,30 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         XCTAssertGreaterThan(afterVisibleRender.renderedMessageCacheCount, 0)
     }
 
+    func testFinalTailAppendMeasuresExactLayoutImmediately() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+
+        controller.appendMessage(
+            VVChatMessage(
+                id: "user-final",
+                role: .user,
+                state: .final,
+                content: longMessageContent(paragraphCount: 24)
+            )
+        )
+
+        XCTAssertEqual(controller.debugExactLayoutCount(), 1)
+        XCTAssertEqual(controller.layouts.first?.isExact, true)
+    }
+
+    func testDraftTailAppendRemainsEstimatedUntilHydrated() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        _ = controller.beginStreamingAssistantMessage(content: longMessageContent(paragraphCount: 12))
+
+        XCTAssertEqual(controller.debugExactLayoutCount(), 0)
+        XCTAssertEqual(controller.layouts.first?.isExact, false)
+    }
+
     func testLongRenderedMessageProvidesVisiblePrimitiveSubset() {
         let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
         controller.appendMessage(
@@ -310,6 +334,166 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         let finalSnapshot = renderer.debugSnapshot()
         XCTAssertGreaterThan(finalSnapshot.markdownSceneBuildCount, firstSnapshot.markdownSceneBuildCount)
         XCTAssertGreaterThan(fullArtifacts.scene.primitives.count, 0)
+    }
+
+    func testBackgroundPreparationWarmsRenderedMessageWithoutMainActorReparse() async {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "background-prewarm",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 180)
+        )
+
+        await renderer.prepareMarkdownContentIfNeeded(for: message, requiresLayout: true)
+        let afterPrepare = renderer.debugSnapshot()
+
+        XCTAssertEqual(afterPrepare.markdownParseCount, 0)
+        XCTAssertEqual(afterPrepare.markdownLayoutCount, 0)
+        XCTAssertGreaterThan(afterPrepare.preparedMarkdownCacheCount, 0)
+
+        _ = renderer.renderedMessage(for: message)
+        let afterRender = renderer.debugSnapshot()
+
+        XCTAssertEqual(afterRender.markdownParseCount, afterPrepare.markdownParseCount)
+        XCTAssertEqual(afterRender.markdownLayoutCount, afterPrepare.markdownLayoutCount)
+        XCTAssertGreaterThan(afterRender.preparedMarkdownCacheHits, afterPrepare.preparedMarkdownCacheHits)
+    }
+
+    func testBackgroundPreparationWarmsDraftRenderedMessageWithoutMainActorReparse() async {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "background-draft-prewarm",
+            role: .assistant,
+            state: .draft,
+            content: streamedMarkdown(step: 32, cycle: "background-draft")
+        )
+
+        await renderer.prepareMarkdownContentIfNeeded(for: message, requiresLayout: true)
+        let afterPrepare = renderer.debugSnapshot()
+
+        XCTAssertEqual(afterPrepare.markdownParseCount, 0)
+        XCTAssertEqual(afterPrepare.markdownLayoutCount, 0)
+        XCTAssertGreaterThan(afterPrepare.preparedMarkdownCacheCount, 0)
+
+        _ = renderer.renderedMessage(for: message)
+        let afterRender = renderer.debugSnapshot()
+
+        XCTAssertEqual(afterRender.markdownParseCount, afterPrepare.markdownParseCount)
+        XCTAssertEqual(afterRender.markdownLayoutCount, afterPrepare.markdownLayoutCount)
+        XCTAssertGreaterThan(afterRender.preparedMarkdownCacheHits, afterPrepare.preparedMarkdownCacheHits)
+    }
+
+    func testBackgroundScenePreparationWarmsVisibleSceneWindow() async {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "background-scene-prewarm",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 200)
+        )
+
+        await renderer.prepareMarkdownContentIfNeeded(for: message, requiresLayout: true)
+        let rendered = renderer.renderedMessage(for: message)
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: 320)
+
+        let before = renderer.debugSnapshot()
+        await renderer.prepareVisibleSceneArtifactsIfNeeded(
+            for: message,
+            rendered: rendered,
+            visibleRect: visibleRect
+        )
+        let warmed = renderer.debugSnapshot()
+
+        XCTAssertGreaterThan(warmed.sceneWindowCache.count, 0)
+
+        _ = renderer.contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let afterRead = renderer.debugSnapshot()
+
+        XCTAssertEqual(afterRead.markdownSceneBuildCount, warmed.markdownSceneBuildCount)
+        XCTAssertGreaterThan(afterRead.sceneWindowCache.hitCount, warmed.sceneWindowCache.hitCount)
+        XCTAssertEqual(before.markdownSceneBuildCount + 1, warmed.markdownSceneBuildCount)
+    }
+
+    func testBackgroundScenePreparationWarmsVisibleSceneWindowWithPresentationOverrides() async {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        var presentation = VVChatMessagePresentation()
+        presentation.textOpacityMultiplier = 0.72
+        presentation.prefixGlyphColor = .rgba(1, 0.3, 0.2, 1)
+        presentation.prefixGlyphCount = 12
+        let message = VVChatMessage(
+            id: "background-scene-overrides",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 120),
+            presentation: presentation
+        )
+
+        await renderer.prepareMarkdownContentIfNeeded(for: message, requiresLayout: true)
+        let rendered = renderer.renderedMessage(for: message)
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: 320)
+
+        let before = renderer.debugSnapshot()
+        await renderer.prepareVisibleSceneArtifactsIfNeeded(
+            for: message,
+            rendered: rendered,
+            visibleRect: visibleRect
+        )
+        let warmed = renderer.debugSnapshot()
+
+        _ = renderer.contentSceneArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let afterRead = renderer.debugSnapshot()
+
+        XCTAssertGreaterThan(warmed.sceneWindowCache.count, 0)
+        XCTAssertEqual(before.markdownSceneBuildCount + 1, warmed.markdownSceneBuildCount)
+        XCTAssertEqual(afterRead.markdownSceneBuildCount, warmed.markdownSceneBuildCount)
+        XCTAssertGreaterThan(afterRead.sceneWindowCache.hitCount, warmed.sceneWindowCache.hitCount)
+    }
+
+    func testBackgroundSelectionPreparationWarmsVisibleSelectionWindow() async {
+        let renderer = VVChatMessageRenderer(style: .init(), contentWidth: viewportSize.width)
+        let message = VVChatMessage(
+            id: "background-selection-prewarm",
+            role: .assistant,
+            state: .final,
+            content: longMessageContent(paragraphCount: 140)
+        )
+
+        await renderer.prepareMarkdownContentIfNeeded(for: message, requiresLayout: true)
+        let rendered = renderer.renderedMessage(for: message)
+        let visibleRect = CGRect(x: 0, y: 0, width: viewportSize.width, height: 320)
+
+        let before = renderer.debugSnapshot()
+        await renderer.prepareVisibleSelectionArtifactsIfNeeded(
+            for: message,
+            rendered: rendered,
+            visibleRect: visibleRect
+        )
+        let warmed = renderer.debugSnapshot()
+
+        _ = renderer.selectionArtifacts(for: message, rendered: rendered, visibleRect: visibleRect)
+        let afterRead = renderer.debugSnapshot()
+
+        XCTAssertGreaterThan(warmed.selectionWindowCache.count, 0)
+        XCTAssertEqual(afterRead.markdownLayoutCount, warmed.markdownLayoutCount)
+        XCTAssertGreaterThan(afterRead.selectionWindowCache.hitCount, warmed.selectionWindowCache.hitCount)
+        XCTAssertGreaterThanOrEqual(warmed.selectionWindowCache.count, before.selectionWindowCache.count)
+    }
+
+    func testDraftAppendPrewarmsFirstRenderedFrame() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        _ = controller.beginStreamingAssistantMessage(
+            content: streamedMarkdown(step: 18, cycle: "draft-first-frame-prewarm")
+        )
+
+        drainMainRunLoop(for: 0.08)
+        let before = controller.debugSnapshot()
+        _ = controller.renderedMessage(at: 0)
+        let after = controller.debugSnapshot()
+
+        XCTAssertEqual(after.markdownParseCount, before.markdownParseCount)
+        XCTAssertEqual(after.markdownLayoutCount, before.markdownLayoutCount)
+        XCTAssertGreaterThan(after.preparedMarkdownCacheHits, before.preparedMarkdownCacheHits)
     }
 
     func testVisibleSceneBuildDoesNotRequireResidentFullPreparedLayout() {
@@ -592,7 +776,7 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         let maxOffset = max(0, controller.totalHeight - viewportSize.height)
         let visibleOrigin = view.viewportRect.origin.y
 
-        XCTAssertTrue(controller.state.isPinnedToBottom)
+        XCTAssertTrue(controller.state.isLiveTail)
         XCTAssertEqual(visibleOrigin, maxOffset, accuracy: 2.0)
 
         view.controller = nil
@@ -649,6 +833,204 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
 
         XCTAssertTrue(view.debugIsLayoutAnimating())
         XCTAssertFalse(view.debugIsScrollAnimating())
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedSingleReplaceDoesNotImplicitlyStartLayoutAnimation() {
+        let controller = makeSeededController(messageCount: 180, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        let targetID = controller.messages[controller.messages.count - 1].id
+        controller.replaceEntry(
+            id: targetID,
+            with: .message(
+                VVChatMessage(
+                    id: targetID,
+                    role: .assistant,
+                    state: .final,
+                    content: longMessageContent(paragraphCount: 20),
+                    revision: controller.messages.last!.revision + 1
+                )
+            ),
+            scrollToBottom: true,
+            markUnread: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        XCTAssertFalse(view.debugIsLayoutAnimating())
+        XCTAssertFalse(view.debugIsScrollAnimating())
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedStreamingDraftGrowthDoesNotStartLayoutAnimation() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        let draftID = controller.beginStreamingAssistantMessage(content: "hello")
+        drainMainRunLoop(for: 0.05)
+
+        controller.updateDraftMessage(
+            id: draftID,
+            content: streamedMarkdown(step: 18, cycle: "pinned-stream-growth"),
+            throttle: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        let maxOffset = max(0, controller.totalHeight - viewportSize.height)
+        XCTAssertFalse(view.debugIsLayoutAnimating())
+        XCTAssertEqual(view.viewportRect.origin.y, maxOffset, accuracy: 2.0)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testStreamingDraftDefersVisibleExactHydrationUntilFinalize() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        let draftID = controller.beginStreamingAssistantMessage(content: "")
+        drainMainRunLoop(for: 0.05)
+        let exactCountAfterDraftAppend = controller.debugExactLayoutCount()
+
+        for step in 1...6 {
+            controller.updateDraftMessage(
+                id: draftID,
+                content: streamedMarkdown(step: 12 + step, cycle: "hydrate-deferral"),
+                throttle: false
+            )
+            drainMainRunLoop(for: 0.03)
+        }
+
+        drainMainRunLoop(for: 0.35)
+        XCTAssertEqual(controller.debugExactLayoutCount(), exactCountAfterDraftAppend)
+
+        controller.finalizeMessage(
+            id: draftID,
+            content: streamedMarkdown(step: 24, cycle: "hydrate-deferral-final")
+        )
+        drainMainRunLoop(for: 0.35)
+        XCTAssertGreaterThan(controller.debugExactLayoutCount(), exactCountAfterDraftAppend)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedStreamingFinalizeDoesNotStartLayoutAnimation() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        let draftID = controller.beginStreamingAssistantMessage(content: streamedMarkdown(step: 10, cycle: "pinned-stream-finalize"))
+        drainMainRunLoop(for: 0.05)
+
+        controller.finalizeMessage(
+            id: draftID,
+            content: streamedMarkdown(step: 12, cycle: "pinned-stream-finalize")
+        )
+        drainMainRunLoop(for: 0.05)
+
+        let maxOffset = max(0, controller.totalHeight - viewportSize.height)
+        XCTAssertFalse(view.debugIsLayoutAnimating())
+        XCTAssertEqual(view.viewportRect.origin.y, maxOffset, accuracy: 2.0)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testPinnedStreamingDraftUpdateRefreshesOnlyChangedVisibleItem() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+        view.scrollToBottom(animated: false)
+        drainMainRunLoop(for: 0.05)
+
+        let draftID = controller.beginStreamingAssistantMessage(
+            content: streamedMarkdown(step: 8, cycle: "visible-stream-window")
+        )
+        drainMainRunLoop(for: 0.08)
+
+        let before = controller.debugSnapshot()
+        let visibleCount = max(view.debugVisibleRenderCount(), 1)
+
+        controller.updateDraftMessage(
+            id: draftID,
+            content: streamedMarkdown(step: 9, cycle: "visible-stream-window"),
+            throttle: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        let after = controller.debugSnapshot()
+        let windowLayoutDelta = after.markdownWindowLayoutCount - before.markdownWindowLayoutCount
+
+        XCTAssertLessThan(windowLayoutDelta, visibleCount)
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testVisibleRangeReplacementDoesNotResetExactLayoutsGlobally() {
+        let controller = makeSeededController(messageCount: 120, width: viewportSize.width)
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.25)
+
+        let exactBefore = controller.debugExactLayoutCount()
+        XCTAssertGreaterThan(exactBefore, 0)
+
+        controller.replaceEntries(
+            in: 8..<10,
+            with: [
+                .message(
+                    VVChatMessage(
+                        id: "tool-group-replacement",
+                        role: .assistant,
+                        state: .final,
+                        content: "Read 3, Searched 1, Planned 1",
+                        revision: 1
+                    )
+                ),
+                .message(
+                    VVChatMessage(
+                        id: "tool-detail-replacement",
+                        role: .assistant,
+                        state: .final,
+                        content: "Read [ChatMessageList.swift](app://local) 219 lines",
+                        revision: 1
+                    )
+                )
+            ],
+            scrollToBottom: false,
+            markUnread: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        XCTAssertGreaterThanOrEqual(controller.debugExactLayoutCount(), exactBefore)
 
         view.controller = nil
         drainMainRunLoop(for: 0.05)
@@ -730,6 +1112,56 @@ final class VVChatTimelinePerformanceTests: XCTestCase {
         if let targetFrame, let animatedFrame {
             XCTAssertGreaterThan(abs(animatedFrame.minY - targetFrame.minY), 0.5)
         }
+
+        view.controller = nil
+        drainMainRunLoop(for: 0.05)
+    }
+
+    func testLayoutAnimationKeepsRenderedLayerOffsetPinnedToTargetGeometry() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: viewportSize.width)
+        controller.setMessages(
+            [
+                VVChatMessage(
+                    id: "moving-alignment",
+                    role: .assistant,
+                    state: .final,
+                    content: "short assistant message"
+                )
+            ],
+            scrollToBottom: false
+        )
+
+        let view = VVChatTimelineView(frame: CGRect(origin: .zero, size: viewportSize))
+        view.controller = controller
+        view.layoutSubtreeIfNeeded()
+        drainMainRunLoop(for: 0.2)
+
+        controller.prepareLayoutTransition(anchorItemID: "moving-alignment")
+        controller.replaceEntry(
+            id: "moving-alignment",
+            with: .message(
+                VVChatMessage(
+                    id: "moving-alignment",
+                    role: .user,
+                    state: .final,
+                    content: "short assistant message"
+                )
+            ),
+            scrollToBottom: false,
+            markUnread: false
+        )
+        drainMainRunLoop(for: 0.05)
+
+        guard let targetLayout = controller.itemLayout(at: 0),
+              let animatedItem = view.renderItem(at: 0, visibleRect: view.viewportRect),
+              let firstLayer = animatedItem.layers.first else {
+            XCTFail("Expected animated render item")
+            return
+        }
+
+        XCTAssertTrue(view.debugIsLayoutAnimating())
+        XCTAssertEqual(animatedItem.frame.minX, targetLayout.frame.minX, accuracy: 0.01)
+        XCTAssertEqual(firstLayer.offset.x, targetLayout.contentOffset.x, accuracy: 0.01)
 
         view.controller = nil
         drainMainRunLoop(for: 0.05)

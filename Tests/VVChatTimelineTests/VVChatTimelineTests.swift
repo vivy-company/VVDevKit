@@ -6,20 +6,20 @@ import Darwin.Mach
 @MainActor
 final class VVChatTimelineTests: XCTestCase {
     func testPinnedStateUpdate() {
-        var state = VVChatTimelineState(isPinnedToBottom: true, userIsInteracting: false, hasUnreadNewContent: false, pinThreshold: 24)
-        // Pinned state should detach quickly as user scrolls up from bottom.
-        state.updatePinnedState(distanceFromBottom: 10)
-        XCTAssertFalse(state.isPinnedToBottom)
-        // Once detached, repin when close enough to bottom.
-        state.updatePinnedState(distanceFromBottom: 5)
-        XCTAssertTrue(state.isPinnedToBottom)
-        state.updatePinnedState(distanceFromBottom: 30)
-        XCTAssertFalse(state.isPinnedToBottom)
+        var state = VVChatTimelineState(viewportMode: .liveTail, userIsInteracting: false, hasUnreadNewContent: false, pinThreshold: 24)
+        // Live-tail mode should detach quickly as user scrolls up from bottom.
+        state.updateViewportMode(distanceFromBottom: 10)
+        XCTAssertEqual(state.viewportMode, .detached)
+        // Once detached, reattach when close enough to bottom.
+        state.updateViewportMode(distanceFromBottom: 5)
+        XCTAssertEqual(state.viewportMode, .liveTail)
+        state.updateViewportMode(distanceFromBottom: 30)
+        XCTAssertEqual(state.viewportMode, .detached)
     }
 
     func testUnreadFlagWhenNotPinned() {
         let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
-        controller.updatePinnedState(distanceFromBottom: 200)
+        controller.updateViewportMode(distanceFromBottom: 200)
         controller.appendMessage(VVChatMessage(role: .user, state: .final, content: "Hello"))
         XCTAssertTrue(controller.state.hasUnreadNewContent)
     }
@@ -36,7 +36,7 @@ final class VVChatTimelineTests: XCTestCase {
     func testImageUpdateDoesNotSetUnread() {
         let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
         controller.appendMessage(VVChatMessage(role: .assistant, state: .final, content: "![alt](file:///tmp/test.png)"))
-        controller.updatePinnedState(distanceFromBottom: 200)
+        controller.updateViewportMode(distanceFromBottom: 200)
         XCTAssertFalse(controller.state.hasUnreadNewContent)
         controller.updateImageSize(url: "file:///tmp/test.png", size: CGSize(width: 120, height: 80))
         XCTAssertFalse(controller.state.hasUnreadNewContent)
@@ -52,6 +52,150 @@ final class VVChatTimelineTests: XCTestCase {
         controller.updateDraftMessage(id: id, content: "hello world", throttle: false)
 
         XCTAssertEqual(updates.last?.shouldScrollToBottom, false)
+    }
+
+    func testPinnedTailAppendEmitsExplicitFollowPolicy() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        var updates: [VVChatTimelineController.Update] = []
+        controller.onUpdate = { updates.append($0) }
+
+        controller.appendMessage(VVChatMessage(id: "seed", role: .assistant, state: .final, content: "seed"))
+        controller.updateViewportMode(distanceFromBottom: 0)
+        controller.appendMessage(VVChatMessage(id: "tail", role: .assistant, state: .final, content: "tail"))
+
+        XCTAssertEqual(updates.last?.cause, .tailAppend)
+        XCTAssertEqual(updates.last?.followPolicy, .preservePinnedBottom)
+    }
+
+    func testMiddleReplaceWhileDetachedDoesNotRequestBottomFollow() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        var updates: [VVChatTimelineController.Update] = []
+        controller.onUpdate = { updates.append($0) }
+
+        controller.setMessages([
+            VVChatMessage(id: "a", role: .assistant, state: .final, content: "a"),
+            VVChatMessage(id: "b", role: .assistant, state: .final, content: "b")
+        ], scrollToBottom: false)
+        controller.updateViewportMode(distanceFromBottom: 200)
+        controller.replaceEntry(
+            id: "a",
+            with: .message(VVChatMessage(id: "a", role: .user, state: .final, content: "a changed")),
+            scrollToBottom: false,
+            markUnread: false
+        )
+
+        XCTAssertEqual(updates.last?.cause, .singleReplace)
+        XCTAssertEqual(updates.last?.followPolicy, VVChatTimelineController.FollowPolicy.none)
+    }
+
+    func testHydrateExactLayoutsEmitsHydrateCorrectionCause() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        var updates: [VVChatTimelineController.Update] = []
+        controller.onUpdate = { updates.append($0) }
+
+        controller.setMessages(
+            (0..<8).map { index in
+                VVChatMessage(
+                    id: "msg-\(index)",
+                    role: .assistant,
+                    state: .final,
+                    content: seededMessage(index: index)
+                )
+            },
+            scrollToBottom: false
+        )
+
+        let viewport = CGRect(x: 0, y: 0, width: 320, height: 220)
+        XCTAssertTrue(controller.hydrateExactLayouts(in: viewport, overscan: 80))
+        XCTAssertEqual(updates.last?.cause, .hydrateCorrection)
+        XCTAssertEqual(updates.last?.followPolicy, VVChatTimelineController.FollowPolicy.none)
+    }
+
+    func testSetItemsMaintainsLegacyEntryAndMessageProjections() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        let message = VVChatMessage(id: "msg", role: .assistant, state: .final, content: "hello")
+        let custom = VVCustomTimelineEntry(
+            id: "custom",
+            kind: "toolCallGroup",
+            payload: Data("tool group".utf8),
+            revision: 2
+        )
+
+        controller.setItems(
+            [
+                VVChatTimelineItemModel(message: message),
+                VVChatTimelineItemModel(customEntry: custom)
+            ],
+            scrollToBottom: false
+        )
+
+        XCTAssertEqual(controller.items.map(\.id), ["msg", "custom"])
+        XCTAssertEqual(controller.entries.map(\.id), ["msg", "custom"])
+        XCTAssertEqual(controller.messages.map(\.id), ["msg", "custom"])
+        XCTAssertEqual(controller.items.last?.kind, .toolGroup)
+    }
+
+    func testAppendItemUsesItemFirstAPIAndKeepsCompatibilityViews() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+
+        controller.appendItem(
+            VVChatTimelineItemModel(
+                customEntry: VVCustomTimelineEntry(
+                    id: "summary",
+                    kind: "turnSummary",
+                    payload: Data("summary".utf8)
+                )
+            )
+        )
+
+        XCTAssertEqual(controller.items.count, 1)
+        XCTAssertEqual(controller.entries.count, 1)
+        XCTAssertEqual(controller.messages.count, 1)
+        XCTAssertEqual(controller.items.first?.kind, .customWidget(name: "turnsummary"))
+    }
+
+    func testDetachedTailAppendStaysEstimatedUntilHydrated() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        controller.updateViewportMode(distanceFromBottom: 200)
+
+        controller.appendMessage(
+            VVChatMessage(
+                id: "detached-final",
+                role: .assistant,
+                state: .final,
+                content: seededMessage(index: 0)
+            )
+        )
+
+        XCTAssertEqual(controller.state.viewportMode, .detached)
+        XCTAssertEqual(controller.debugExactLayoutCount(), 0)
+        XCTAssertEqual(controller.layouts.last?.isExact, false)
+        XCTAssertTrue(controller.state.hasUnreadNewContent)
+    }
+
+    func testJumpToLatestEmitsOnlyViewportFollowSemantics() {
+        let controller = VVChatTimelineController(style: .init(), renderWidth: 320)
+        var updates: [VVChatTimelineController.Update] = []
+        controller.onUpdate = { updates.append($0) }
+
+        controller.jumpToLatest()
+
+        XCTAssertEqual(updates.last?.cause, .jumpToLatest)
+        XCTAssertEqual(updates.last?.followPolicy, .forceImmediateBottom)
+        XCTAssertTrue(updates.last?.insertedIndexes.isEmpty ?? false)
+        XCTAssertTrue(updates.last?.updatedIndexes.isEmpty ?? false)
+        XCTAssertTrue(updates.last?.removedIndexes.isEmpty ?? false)
+    }
+
+    func testCacheBudgetCompatibilityTracksRenderedCacheLimit() {
+        var style = VVChatTimelineStyle(renderedCacheLimit: 12)
+        XCTAssertEqual(style.cacheBudget.renderedMessageCountLimit, 12)
+
+        style.renderedCacheLimit = 9
+        XCTAssertEqual(style.cacheBudget.renderedMessageCountLimit, 9)
+
+        style.cacheBudget = VVChatTimelineCacheBudget(renderedMessageCountLimit: 5)
+        XCTAssertEqual(style.renderedCacheLimit, 5)
     }
 
     func testFinalizeCancelsPendingThrottledDraftUpdate() {
