@@ -1153,18 +1153,11 @@ private final class VVDiffMetalView: NSView {
                 // trimming causes re-highlighting when scrolling back.
                 self.highlightTask = nil
                 if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
-                    if self.isActivelyScrolling {
-                        // During scrolling, just mark deferred. The display link
-                        // will apply highlights when scrolling stops.
-                        self.deferredHighlightSceneRefresh = true
-                        self.startDisplayLink()
-                    } else {
-                        self.deferredHighlightSceneRefresh = true
-                        self.applyDeferredHighlightSceneRefresh(redraw: true)
-                    }
+                    // Coalesce highlight-driven refreshes so completed batches
+                    // don't synchronously rebuild the scene on the MainActor.
+                    self.scheduleDeferredHighlightSceneRefresh()
                 } else if self.isActivelyScrolling, !self.staleHighlightedRowIDs.isEmpty {
-                    self.deferredHighlightSceneRefresh = true
-                    self.startDisplayLink()
+                    self.scheduleDeferredHighlightSceneRefresh()
                 }
                 // Don't chain next batch during active scrolling — it causes
                 // continuous MainActor callbacks that contend with scroll handling.
@@ -1187,6 +1180,11 @@ private final class VVDiffMetalView: NSView {
             return true
         }
         return false
+    }
+
+    private func scheduleDeferredHighlightSceneRefresh() {
+        deferredHighlightSceneRefresh = true
+        startDisplayLink()
     }
 
     private func trimHighlightedRanges(keeping keepRange: Range<Int>) {
