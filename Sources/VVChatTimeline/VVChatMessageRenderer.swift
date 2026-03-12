@@ -264,57 +264,57 @@ public final class VVChatMessageRenderer {
         let contentScaleKey: Int
     }
 
-    struct CacheSnapshot {
-        let count: Int
-        let countLimit: Int
-        let estimatedCost: Int
-        let costLimit: Int?
-        let hitCount: Int
-        let missCount: Int
-        let evictionCount: Int
+    public struct CacheSnapshot {
+        public let count: Int
+        public let countLimit: Int
+        public let estimatedCost: Int
+        public let costLimit: Int?
+        public let hitCount: Int
+        public let missCount: Int
+        public let evictionCount: Int
     }
 
-    struct ResidentLayoutSnapshot {
-        let count: Int
-        let estimatedCost: Int
-        let costLimit: Int
-        let dematerializationCount: Int
+    public struct ResidentLayoutSnapshot {
+        public let count: Int
+        public let estimatedCost: Int
+        public let costLimit: Int
+        public let dematerializationCount: Int
     }
 
-    struct DebugSnapshot {
-        let renderedMessageCache: CacheSnapshot
-        let preparedMarkdownCache: CacheSnapshot
-        let draftPreparedStateCache: CacheSnapshot
-        let sceneWindowCache: CacheSnapshot
-        let selectionWindowCache: CacheSnapshot
-        let materializedPreparedLayouts: ResidentLayoutSnapshot
-        let preparedContentCacheHitCount: Int
-        let preparedContentCacheMissCount: Int
-        let markdownParseCount: Int
-        let markdownLayoutCount: Int
-        let markdownWindowLayoutCount: Int
-        let markdownSceneBuildCount: Int
-        let incrementalImageLayoutPassCount: Int
-        let incrementalDraftReuseCount: Int
-        let incrementalDraftLayoutPassCount: Int
-        let incrementalDraftFullRebuildCount: Int
+    public struct DebugSnapshot {
+        public let renderedMessageCache: CacheSnapshot
+        public let preparedMarkdownCache: CacheSnapshot
+        public let draftPreparedStateCache: CacheSnapshot
+        public let sceneWindowCache: CacheSnapshot
+        public let selectionWindowCache: CacheSnapshot
+        public let materializedPreparedLayouts: ResidentLayoutSnapshot
+        public let preparedContentCacheHitCount: Int
+        public let preparedContentCacheMissCount: Int
+        public let markdownParseCount: Int
+        public let markdownLayoutCount: Int
+        public let markdownWindowLayoutCount: Int
+        public let markdownSceneBuildCount: Int
+        public let incrementalImageLayoutPassCount: Int
+        public let incrementalDraftReuseCount: Int
+        public let incrementalDraftLayoutPassCount: Int
+        public let incrementalDraftFullRebuildCount: Int
 
-        var renderedMessageCacheCount: Int { renderedMessageCache.count }
-        var renderedMessageCacheEstimatedCost: Int { renderedMessageCache.estimatedCost }
-        var renderedMessageCacheCostLimit: Int { renderedMessageCache.costLimit ?? 0 }
-        var preparedMarkdownCacheCount: Int { preparedMarkdownCache.count }
-        var draftPreparedStateCount: Int { draftPreparedStateCache.count }
-        var materializedPreparedLayoutCount: Int { materializedPreparedLayouts.count }
-        var materializedPreparedLayoutEstimatedCost: Int { materializedPreparedLayouts.estimatedCost }
-        var materializedPreparedLayoutCostLimit: Int { materializedPreparedLayouts.costLimit }
-        var preparedMarkdownCacheHits: Int { preparedContentCacheHitCount }
-        var preparedMarkdownCacheMisses: Int { preparedContentCacheMissCount }
-        var preparedMarkdownCacheEstimatedCost: Int {
+        public var renderedMessageCacheCount: Int { renderedMessageCache.count }
+        public var renderedMessageCacheEstimatedCost: Int { renderedMessageCache.estimatedCost }
+        public var renderedMessageCacheCostLimit: Int { renderedMessageCache.costLimit ?? 0 }
+        public var preparedMarkdownCacheCount: Int { preparedMarkdownCache.count }
+        public var draftPreparedStateCount: Int { draftPreparedStateCache.count }
+        public var materializedPreparedLayoutCount: Int { materializedPreparedLayouts.count }
+        public var materializedPreparedLayoutEstimatedCost: Int { materializedPreparedLayouts.estimatedCost }
+        public var materializedPreparedLayoutCostLimit: Int { materializedPreparedLayouts.costLimit }
+        public var preparedMarkdownCacheHits: Int { preparedContentCacheHitCount }
+        public var preparedMarkdownCacheMisses: Int { preparedContentCacheMissCount }
+        public var preparedMarkdownCacheEstimatedCost: Int {
             preparedMarkdownCache.estimatedCost + draftPreparedStateCache.estimatedCost
         }
-        var preparedMarkdownCacheCostLimit: Int { preparedMarkdownCache.costLimit ?? 0 }
-        var sceneWindowCacheEstimatedCost: Int { sceneWindowCache.estimatedCost }
-        var sceneWindowCacheCostLimit: Int { sceneWindowCache.costLimit ?? 0 }
+        public var preparedMarkdownCacheCostLimit: Int { preparedMarkdownCache.costLimit ?? 0 }
+        public var sceneWindowCacheEstimatedCost: Int { sceneWindowCache.estimatedCost }
+        public var sceneWindowCacheCostLimit: Int { sceneWindowCache.costLimit ?? 0 }
     }
 
     private struct PreparedMarkdownLayoutAnalysis {
@@ -554,17 +554,14 @@ public final class VVChatMessageRenderer {
         for message: VVChatMessage,
         requiresLayout: Bool
     ) async {
-        guard message.customContent == nil else { return }
-
-        let key = cacheKey(for: message)
-        if let cached = preparedMarkdownCache.value(for: key),
-           cached.layout != nil || !requiresLayout {
-            return
-        }
-
-        let generation = preparationGeneration
-        let prepared = await preparationService.prepare(
-            VVChatMarkdownPreparationRequest(
+        let request: VVChatMarkdownPreparationRequest? = await MainActor.run {
+            guard message.customContent == nil else { return nil }
+            let key = cacheKey(for: message)
+            if let cached = preparedMarkdownCache.value(for: key),
+               cached.layout != nil || !requiresLayout {
+                return nil
+            }
+            return VVChatMarkdownPreparationRequest(
                 id: message.id,
                 revision: message.revision,
                 content: message.content,
@@ -573,11 +570,15 @@ public final class VVChatMessageRenderer {
                 contentScaleKey: key.contentScaleKey,
                 imageSizes: imageSizes
             )
-        )
+        }
+        guard let request else { return }
+
+        let generation = await MainActor.run { preparationGeneration }
+        let prepared = await preparationService.prepare(request)
 
         await MainActor.run {
             guard generation == preparationGeneration else { return }
-            guard key == cacheKey(for: message) else { return }
+            let key = cacheKey(for: message)
 
             let analysis = analyzePreparedMarkdownLayout(prepared.layout, document: prepared.document)
             preparedMarkdownCache.set(
@@ -598,46 +599,66 @@ public final class VVChatMessageRenderer {
         rendered: VVChatRenderedMessage,
         visibleRect: CGRect?
     ) async {
-        guard case .markdown(let key) = rendered.contentSceneSource else { return }
-
-        let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
-        let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
-        let prepared = preparedMarkdownContent(
-            for: message,
-            key: key,
-            layoutEngine: layoutEngine,
-            requiresLayout: true
-        )
-        let blockRange = visibleMarkdownBlockRange(
-            in: visibleRect?.offsetBy(
-                dx: -rendered.selectionContentOffset.x,
-                dy: -rendered.selectionContentOffset.y
-            ),
-            analysis: prepared.analysis
-        )
-        let windowKey = SceneWindowCacheKey(
-            key: key,
-            startBlock: blockRange.lowerBound,
-            endBlock: blockRange.upperBound
-        )
-        guard sceneWindowCache.value(for: windowKey) == nil else { return }
-        guard let layout = prepared.layout else { return }
-
-        markdownSceneBuildCount += 1
-        let artifacts = await preparationService.prepareContentScene(
-            VVChatMarkdownSceneRequest(
+        struct ScenePrep {
+            let windowKey: SceneWindowCacheKey
+            let layout: MarkdownLayout
+            let blockRange: Range<Int>
+            let key: CacheKey
+            let textOpacityMultiplier: Float?
+            let prefixGlyphColor: SIMD4<Float>?
+            let prefixGlyphCount: Int
+        }
+        let prep: ScenePrep? = await MainActor.run {
+            guard case .markdown(let key) = rendered.contentSceneSource else { return nil }
+            let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
+            let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
+            let prepared = preparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: true
+            )
+            let blockRange = visibleMarkdownBlockRange(
+                in: visibleRect?.offsetBy(
+                    dx: -rendered.selectionContentOffset.x,
+                    dy: -rendered.selectionContentOffset.y
+                ),
+                analysis: prepared.analysis
+            )
+            let windowKey = SceneWindowCacheKey(
+                key: key,
+                startBlock: blockRange.lowerBound,
+                endBlock: blockRange.upperBound
+            )
+            guard sceneWindowCache.value(for: windowKey) == nil else { return nil }
+            guard let layout = prepared.layout else { return nil }
+            markdownSceneBuildCount += 1
+            return ScenePrep(
+                windowKey: windowKey,
                 layout: layout,
                 blockRange: blockRange,
-                widthKey: key.widthKey,
-                isDraft: key.isDraft,
-                contentScaleKey: key.contentScaleKey,
+                key: key,
                 textOpacityMultiplier: message.presentation?.textOpacityMultiplier,
                 prefixGlyphColor: message.presentation?.prefixGlyphColor,
                 prefixGlyphCount: max(0, message.presentation?.prefixGlyphCount ?? 0)
             )
+        }
+        guard let prep else { return }
+
+        let artifacts = await preparationService.prepareContentScene(
+            VVChatMarkdownSceneRequest(
+                layout: prep.layout,
+                blockRange: prep.blockRange,
+                widthKey: prep.key.widthKey,
+                isDraft: prep.key.isDraft,
+                contentScaleKey: prep.key.contentScaleKey,
+                textOpacityMultiplier: prep.textOpacityMultiplier,
+                prefixGlyphColor: prep.prefixGlyphColor,
+                prefixGlyphCount: prep.prefixGlyphCount
+            )
         )
         await MainActor.run {
-            sceneWindowCache.set(artifacts, for: windowKey)
+            sceneWindowCache.set(artifacts, for: prep.windowKey)
         }
     }
 
@@ -646,39 +667,53 @@ public final class VVChatMessageRenderer {
         rendered: VVChatRenderedMessage,
         visibleRect: CGRect?
     ) async {
-        guard case .markdown(let key) = rendered.contentSceneSource else { return }
-
-        let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
-        let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
-        let prepared = preparedMarkdownContent(
-            for: message,
-            key: key,
-            layoutEngine: layoutEngine,
-            requiresLayout: true
-        )
-        let blockRange = visibleRect.map { visibleMarkdownBlockRange(in: $0, analysis: prepared.analysis) }
-            ?? (0..<prepared.analysis.blockMinY.count)
-        guard !blockRange.isEmpty else { return }
-        let windowKey = SelectionWindowCacheKey(
-            key: key,
-            startBlock: blockRange.lowerBound,
-            endBlock: blockRange.upperBound
-        )
-        guard selectionWindowCache.value(for: windowKey) == nil else { return }
-        guard let layout = prepared.layout else { return }
+        struct SelectionPrep {
+            let windowKey: SelectionWindowCacheKey
+            let layout: MarkdownLayout
+            let blockRange: Range<Int>
+            let key: CacheKey
+        }
+        let prep: SelectionPrep? = await MainActor.run {
+            guard case .markdown(let key) = rendered.contentSceneSource else { return nil }
+            let contentScale = normalizedContentScale(message.presentation?.contentFontScale)
+            let (layoutEngine, _) = contentResources(isDraft: message.state == .draft, scale: contentScale)
+            let prepared = preparedMarkdownContent(
+                for: message,
+                key: key,
+                layoutEngine: layoutEngine,
+                requiresLayout: true
+            )
+            let blockRange = visibleRect.map { visibleMarkdownBlockRange(in: $0, analysis: prepared.analysis) }
+                ?? (0..<prepared.analysis.blockMinY.count)
+            guard !blockRange.isEmpty else { return nil }
+            let windowKey = SelectionWindowCacheKey(
+                key: key,
+                startBlock: blockRange.lowerBound,
+                endBlock: blockRange.upperBound
+            )
+            guard selectionWindowCache.value(for: windowKey) == nil else { return nil }
+            guard let layout = prepared.layout else { return nil }
+            return SelectionPrep(
+                windowKey: windowKey,
+                layout: layout,
+                blockRange: blockRange,
+                key: key
+            )
+        }
+        guard let prep else { return }
 
         let artifacts = await preparationService.prepareSelectionArtifacts(
             VVChatMarkdownSelectionRequest(
-                layout: layout,
-                blockRange: blockRange,
-                widthKey: key.widthKey,
-                isDraft: key.isDraft,
-                contentScaleKey: key.contentScaleKey
+                layout: prep.layout,
+                blockRange: prep.blockRange,
+                widthKey: prep.key.widthKey,
+                isDraft: prep.key.isDraft,
+                contentScaleKey: prep.key.contentScaleKey
             )
         )
         if let artifacts {
             await MainActor.run {
-                selectionWindowCache.set(artifacts, for: windowKey)
+                selectionWindowCache.set(artifacts, for: prep.windowKey)
             }
         }
     }

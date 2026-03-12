@@ -642,11 +642,11 @@ public final class VVChatTimelineController {
     }
 #endif
 
-    func debugSnapshot() -> VVChatMessageRenderer.DebugSnapshot {
+    public func debugSnapshot() -> VVChatMessageRenderer.DebugSnapshot {
         renderService.debugSnapshot()
     }
 
-    func debugExactLayoutCount() -> Int {
+    public func debugExactLayoutCount() -> Int {
         layoutEngine.debugExactLayoutCount()
     }
 

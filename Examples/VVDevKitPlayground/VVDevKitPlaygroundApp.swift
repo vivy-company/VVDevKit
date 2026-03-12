@@ -1179,6 +1179,14 @@ struct ChatPlaygroundView: View {
                     controller.setEntries([], scrollToBottom: true, customEntryMessageMapper: customEntryMapper())
                 }
 
+                Divider()
+
+                Button("Copy Memory Snapshot") {
+                    let text = memorySnapshotText()
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+
                 Spacer()
             }
             .padding(16)
@@ -1980,6 +1988,96 @@ struct ChatPlaygroundView: View {
             }
             pruneTimelineIfNeeded()
         }
+    }
+
+    private func memorySnapshotText() -> String {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout.size(ofValue: info) / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer -> kern_return_t in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), rebound, &count)
+            }
+        }
+        let rssMB = result == KERN_SUCCESS
+            ? String(format: "%.1f", Double(info.phys_footprint) / 1_048_576.0)
+            : "?"
+
+        let snap = controller.debugSnapshot()
+        let entryCount = controller.entries.count
+        let layoutCount = controller.layoutCount
+        let exactLayouts = controller.debugExactLayoutCount()
+        let toolGroups = toolGroupsByID.count
+        let expanded = expandedToolGroupIDs.count
+
+        var atlasInfo = "?"
+        var poolInfo = "?"
+        if let ctx = VVMetalContext.shared {
+            let d = ctx.atlasDiagnostics()
+            let atlasSize = MarkdownGlyphAtlas.atlasSize
+            let bytes = d.alphaPages * atlasSize * atlasSize * 1 + d.colorPages * atlasSize * atlasSize * 4
+            atlasInfo = "\(d.alphaPages)a/\(d.colorPages)c pages \(d.cachedGlyphs) glyphs (\(String(format: "%.1f", Double(bytes) / 1_048_576.0)) MB)"
+            poolInfo = "\(ctx.pooledBufferCount) bufs (\(String(format: "%.1f", Double(ctx.pooledBufferBytes) / 1_048_576.0)) MB)"
+        }
+
+        // Estimate real memory per cache (cost metric underestimates by ~10-50x)
+        // Typical scene: 50-200 primitives × 200-500 bytes each + glyph arrays
+        let estRenderedMB = String(format: "%.1f", Double(snap.renderedMessageCacheCount) * 0.15)
+        let estPreparedMB = String(format: "%.1f", Double(snap.preparedMarkdownCacheCount) * 0.25)
+        let estScenesMB = String(format: "%.1f", Double(snap.sceneWindowCache.count) * 0.3)
+        let estSelectionMB = String(format: "%.1f", Double(snap.selectionWindowCache.count) * 0.1)
+        let estMatLayoutsMB = String(format: "%.1f", Double(snap.materializedPreparedLayoutCount) * 0.2)
+        let estTotalCacheMB = String(format: "%.1f",
+            Double(snap.renderedMessageCacheCount) * 0.15 +
+            Double(snap.preparedMarkdownCacheCount) * 0.25 +
+            Double(snap.sceneWindowCache.count) * 0.3 +
+            Double(snap.selectionWindowCache.count) * 0.1 +
+            Double(snap.materializedPreparedLayoutCount) * 0.2
+        )
+
+        // Malloc zone stats
+        var mallocStats = "unavailable"
+        var zone = malloc_statistics_t()
+        malloc_zone_statistics(nil, &zone)
+        let mallocUsedMB = String(format: "%.1f", Double(zone.size_in_use) / 1_048_576.0)
+        let mallocAllocMB = String(format: "%.1f", Double(zone.size_allocated) / 1_048_576.0)
+        let mallocMaxMB = String(format: "%.1f", Double(zone.max_size_in_use) / 1_048_576.0)
+        mallocStats = "used=\(mallocUsedMB)MB alloc=\(mallocAllocMB)MB peak=\(mallocMaxMB)MB"
+
+        return """
+        === Chat Timeline Memory Snapshot ===
+        RSS: \(rssMB) MB
+        Malloc: \(mallocStats)
+        Turn: \(nextScriptedTurn)
+
+        Timeline:
+          entries: \(entryCount)
+          layouts: \(layoutCount) (exact: \(exactLayouts))
+          toolGroups: \(toolGroups)
+          expandedGroups: \(expanded)
+
+        Caches (count / limit) [~est MB]:
+          rendered:     \(snap.renderedMessageCacheCount) / \(snap.renderedMessageCache.countLimit)  cost \(snap.renderedMessageCacheEstimatedCost)/\(snap.renderedMessageCacheCostLimit)  [~\(estRenderedMB) MB]
+          prepared:     \(snap.preparedMarkdownCacheCount) / \(snap.preparedMarkdownCache.countLimit)  cost \(snap.preparedMarkdownCacheEstimatedCost)/\(snap.preparedMarkdownCacheCostLimit)  [~\(estPreparedMB) MB]
+          scenes:       \(snap.sceneWindowCache.count) / \(snap.sceneWindowCache.countLimit)  cost \(snap.sceneWindowCacheEstimatedCost)/\(snap.sceneWindowCacheCostLimit)  [~\(estScenesMB) MB]
+          selection:    \(snap.selectionWindowCache.count) / \(snap.selectionWindowCache.countLimit)  [~\(estSelectionMB) MB]
+          matLayouts:   \(snap.materializedPreparedLayoutCount)  cost \(snap.materializedPreparedLayoutEstimatedCost)/\(snap.materializedPreparedLayoutCostLimit)  [~\(estMatLayoutsMB) MB]
+          drafts:       \(snap.draftPreparedStateCount)
+          est total:    ~\(estTotalCacheMB) MB
+
+        Cache Stats:
+          rendered:  hits=\(snap.renderedMessageCache.hitCount) miss=\(snap.renderedMessageCache.missCount) evict=\(snap.renderedMessageCache.evictionCount)
+          prepared:  hits=\(snap.preparedMarkdownCacheHits) miss=\(snap.preparedMarkdownCacheMisses) evict=\(snap.preparedMarkdownCache.evictionCount)
+          scenes:    hits=\(snap.sceneWindowCache.hitCount) miss=\(snap.sceneWindowCache.missCount) evict=\(snap.sceneWindowCache.evictionCount)
+          demat:     \(snap.materializedPreparedLayouts.dematerializationCount)
+
+        Metal:
+          atlas: \(atlasInfo)
+          bufPool: \(poolInfo)
+
+        Cumulative:
+          parses=\(snap.markdownParseCount) layouts=\(snap.markdownLayoutCount) scenes=\(snap.markdownSceneBuildCount)
+          draftReuse=\(snap.incrementalDraftReuseCount) draftLayout=\(snap.incrementalDraftLayoutPassCount) draftRebuild=\(snap.incrementalDraftFullRebuildCount)
+        """
     }
 
     private func prepareAppendTransition() {
@@ -3438,7 +3536,12 @@ enum SampleData {
             assistantInsets: .init(top: 3, left: 20, bottom: 4, right: 20),
             systemInsets: .init(top: 15, left: 20, bottom: 15, right: 20),
             backgroundColor: .clear,
-            renderedCacheLimit: 40,
+            renderedCacheLimit: 24,
+            cacheBudget: VVChatTimelineCacheBudget(
+                renderedMessageCountLimit: 24,
+                sceneWindowCountLimit: 48,
+                selectionWindowCountLimit: 24
+            ),
             motion: .init(
                 layoutTransition: .accordion,
                 layoutAnimation: .spring(response: 0.34, dampingFraction: 0.84),
