@@ -33,20 +33,17 @@ struct VVChatTimelineItem: Identifiable, Hashable, Sendable {
 struct VVChatTimelineCoreSnapshot: Sendable {
     let items: [VVChatTimelineItem]
     let itemIndexByID: [String: Int]
+    let itemModels: [VVChatTimelineItemModel]
+    let entries: [VVChatTimelineEntry]
+    let messages: [VVChatMessage]
 
-    static let empty = VVChatTimelineCoreSnapshot(items: [], itemIndexByID: [:])
-
-    var itemModels: [VVChatTimelineItemModel] {
-        items.map(\.model)
-    }
-
-    var entries: [VVChatTimelineEntry] {
-        items.map(\.entry)
-    }
-
-    var messages: [VVChatMessage] {
-        items.map(\.message)
-    }
+    static let empty = VVChatTimelineCoreSnapshot(
+        items: [],
+        itemIndexByID: [:],
+        itemModels: [],
+        entries: [],
+        messages: []
+    )
 
     var count: Int {
         items.count
@@ -186,9 +183,24 @@ final class VVChatTimelineCoreStore {
     private func makeSnapshot(from items: [VVChatTimelineItem]) -> VVChatTimelineCoreSnapshot {
         var itemIndexByID: [String: Int] = [:]
         itemIndexByID.reserveCapacity(items.count)
+        var itemModels: [VVChatTimelineItemModel] = []
+        itemModels.reserveCapacity(items.count)
+        var entries: [VVChatTimelineEntry] = []
+        entries.reserveCapacity(items.count)
+        var messages: [VVChatMessage] = []
+        messages.reserveCapacity(items.count)
         for (index, item) in items.enumerated() {
             itemIndexByID[item.id] = index
+            itemModels.append(item.model)
+            entries.append(item.entry)
+            messages.append(item.message)
         }
-        return VVChatTimelineCoreSnapshot(items: items, itemIndexByID: itemIndexByID)
+        return VVChatTimelineCoreSnapshot(
+            items: items,
+            itemIndexByID: itemIndexByID,
+            itemModels: itemModels,
+            entries: entries,
+            messages: messages
+        )
     }
 }

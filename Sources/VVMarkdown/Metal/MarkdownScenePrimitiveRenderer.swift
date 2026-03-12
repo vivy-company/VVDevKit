@@ -37,6 +37,27 @@ public final class MarkdownScenePrimitiveRenderer {
         var estimatedByteCount: Int
     }
 
+    /// Stable content-based key for a text run.
+    /// Uses position + glyph count + first glyph ID so the cache survives scene rebuilds
+    /// that contain the same text runs at the same positions (e.g. viewport-shifted rebuilds).
+    private struct TextRunCacheKey: Hashable {
+        let posX: Float
+        let posY: Float
+        let glyphCount: Int
+        let firstGlyphID: UInt16
+        let fontSize: Float
+    }
+
+    private static func cacheKey(for run: VVTextRunPrimitive) -> TextRunCacheKey {
+        TextRunCacheKey(
+            posX: Float(run.position.x),
+            posY: Float(run.position.y),
+            glyphCount: run.glyphs.count,
+            firstGlyphID: run.glyphs.first?.glyphID ?? 0,
+            fontSize: Float(run.fontSize)
+        )
+    }
+
     private let baseFont: VVFont
     private let baseFontAscent: CGFloat
     private let baseFontDescent: CGFloat
@@ -48,11 +69,23 @@ public final class MarkdownScenePrimitiveRenderer {
     private var underlines: [LineInstance] = []
     private var strikethroughs: [LineInstance] = []
     private var preparedTextRunSceneToken: SceneStorageToken?
-    private var preparedTextRunCache: [Int: PreparedTextRun] = [:]
-    private var preparedTextRunOrder: [Int] = []
+    private var preparedTextRunCache: [TextRunCacheKey: PreparedTextRun] = [:]
+    private var preparedTextRunAccessTime: [TextRunCacheKey: UInt64] = [:]
+    private var preparedTextRunGeneration: UInt64 = 0
     private var preparedTextRunBytes: Int = 0
     private static let maxPreparedTextRuns = 1024
     private static let maxPreparedTextRunBytes = 24 * 1024 * 1024
+
+    // Diagnostic counters — reset each frame by caller if desired.
+    public private(set) var lastFrameTextRunCacheHits: Int = 0
+    public private(set) var lastFrameTextRunCacheMisses: Int = 0
+
+    public var preparedTextRunCacheCount: Int { preparedTextRunCache.count }
+
+    public func resetFrameDiagnostics() {
+        lastFrameTextRunCacheHits = 0
+        lastFrameTextRunCacheMisses = 0
+    }
 
     public init(baseFont: VVFont, behavior: MarkdownSceneRenderingBehavior = MarkdownSceneRenderingBehavior()) {
         self.baseFont = baseFont
@@ -68,7 +101,7 @@ public final class MarkdownScenePrimitiveRenderer {
     public func clearPreparedTextRunCache() {
         preparedTextRunSceneToken = nil
         preparedTextRunCache.removeAll(keepingCapacity: false)
-        preparedTextRunOrder.removeAll(keepingCapacity: false)
+        preparedTextRunAccessTime.removeAll(keepingCapacity: false)
         preparedTextRunBytes = 0
     }
 
@@ -148,7 +181,6 @@ public final class MarkdownScenePrimitiveRenderer {
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):
-                flushQuadBatches()
                 appendTextPrimitive(
                     run,
                     cacheKey: position,
@@ -160,7 +192,6 @@ public final class MarkdownScenePrimitiveRenderer {
                     strikethroughs: &strikethroughs
                 )
             case .quad(let quad):
-                flushTextBatches()
                 appendQuadPrimitive(quad, transform: primitive.transform, offset: offset)
             default:
                 flushQuadBatches()
@@ -246,7 +277,9 @@ public final class MarkdownScenePrimitiveRenderer {
             updateClip(primitive.clipRect)
             switch primitive.kind {
             case .textRun(let run):
-                flushQuadBatches()
+                // Don't flush quads here — accumulate both quads and text within
+                // the same clip region. Quads flush first (backgrounds) at the
+                // next clip change or end-of-frame, then text (foreground).
                 appendTextPrimitive(
                     run,
                     cacheKey: index,
@@ -258,7 +291,6 @@ public final class MarkdownScenePrimitiveRenderer {
                     strikethroughs: &strikethroughs
                 )
             case .quad(let quad):
-                flushTextBatches()
                 appendQuadPrimitive(quad, transform: primitive.transform, offset: offset)
             default:
                 flushQuadBatches()
@@ -566,7 +598,7 @@ public final class MarkdownScenePrimitiveRenderer {
 
     private func appendTextPrimitive(
         _ run: VVTextRunPrimitive,
-        cacheKey: Int,
+        cacheKey _: Int,
         offset: SIMD2<Float>,
         renderer: MarkdownMetalRenderer,
         glyphInstances: inout [[MarkdownGlyphInstance]],
@@ -574,7 +606,8 @@ public final class MarkdownScenePrimitiveRenderer {
         underlines: inout [LineInstance],
         strikethroughs: inout [LineInstance]
     ) {
-        let prepared = preparedTextRun(for: run, cacheKey: cacheKey, renderer: renderer)
+        let key = Self.cacheKey(for: run)
+        let prepared = preparedTextRun(for: run, cacheKey: key, renderer: renderer)
         appendPreparedBatches(prepared.glyphBatches, to: &glyphInstances, offset: offset)
         appendPreparedBatches(prepared.colorGlyphBatches, to: &colorGlyphInstances, offset: offset)
 
@@ -772,13 +805,15 @@ public final class MarkdownScenePrimitiveRenderer {
 
     private func preparedTextRun(
         for run: VVTextRunPrimitive,
-        cacheKey: Int,
+        cacheKey: TextRunCacheKey,
         renderer: MarkdownMetalRenderer
     ) -> PreparedTextRun {
         if let cached = preparedTextRunCache[cacheKey] {
             touchPreparedTextRun(cacheKey)
+            lastFrameTextRunCacheHits += 1
             return cached
         }
+        lastFrameTextRunCacheMisses += 1
 
         var glyphBatches: [[MarkdownGlyphInstance]] = []
         var colorGlyphBatches: [[MarkdownGlyphInstance]] = []
@@ -805,8 +840,9 @@ public final class MarkdownScenePrimitiveRenderer {
         preparedTextRunCache[cacheKey] = prepared
         preparedTextRunBytes += prepared.estimatedByteCount
         touchPreparedTextRun(cacheKey)
-        while preparedTextRunOrder.count > Self.maxPreparedTextRuns || preparedTextRunBytes > Self.maxPreparedTextRunBytes {
-            let evicted = preparedTextRunOrder.removeFirst()
+        while preparedTextRunCache.count > Self.maxPreparedTextRuns || preparedTextRunBytes > Self.maxPreparedTextRunBytes {
+            guard let evicted = preparedTextRunAccessTime.min(by: { $0.value < $1.value })?.key else { break }
+            preparedTextRunAccessTime.removeValue(forKey: evicted)
             if let removed = preparedTextRunCache.removeValue(forKey: evicted) {
                 preparedTextRunBytes -= removed.estimatedByteCount
             }
@@ -814,9 +850,9 @@ public final class MarkdownScenePrimitiveRenderer {
         return prepared
     }
 
-    private func touchPreparedTextRun(_ cacheKey: Int) {
-        preparedTextRunOrder.removeAll { $0 == cacheKey }
-        preparedTextRunOrder.append(cacheKey)
+    private func touchPreparedTextRun(_ cacheKey: TextRunCacheKey) {
+        preparedTextRunGeneration &+= 1
+        preparedTextRunAccessTime[cacheKey] = preparedTextRunGeneration
     }
 
     private func primitivesStorageBaseAddress(for scene: VVScene) -> Int {
@@ -826,9 +862,11 @@ public final class MarkdownScenePrimitiveRenderer {
     }
 
     private func updatePreparedTextRunCacheToken(baseAddress: Int, count: Int) {
+        // With content-based cache keys (TextRunCacheKey), we no longer need to
+        // invalidate when the scene's storage address changes. The same text run
+        // at the same position produces the same key regardless of which scene
+        // rebuild it belongs to. LRU eviction handles memory.
         let token = SceneStorageToken(baseAddress: baseAddress, count: count)
-        guard preparedTextRunSceneToken != token else { return }
-        clearPreparedTextRunCache()
         preparedTextRunSceneToken = token
     }
 

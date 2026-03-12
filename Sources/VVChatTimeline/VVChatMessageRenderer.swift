@@ -1933,7 +1933,7 @@ public final class VVChatMessageRenderer {
             rhs: document.blocks
         )
         let layout: MarkdownLayout
-        if let previousLayout = previousPrepared.layout, commonPrefixCount > 0 {
+        if let previousLayout = previousPrepared.layout {
             incrementalDraftReuseCount += 1
             incrementalDraftLayoutPassCount += 1
             markdownLayoutCount += 1

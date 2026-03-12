@@ -186,9 +186,9 @@ public final class VVMetalContext {
     private var bufferPool: [Int: [MTLBuffer]] = [:]  // size bucket -> reusable buffers
     private var pooledBufferBytesStorage: Int = 0
     private let bufferPoolLock = NSLock()
-    private static let maxPooledBuffersPerBucket = 2
-    private static let maxReusableBufferLength = 256 * 1024
-    private static let maxTotalPooledBufferBytes = 8 * 1024 * 1024
+    private static let maxPooledBuffersPerBucket = 4
+    private static let maxReusableBufferLength = 1024 * 1024
+    private static let maxTotalPooledBufferBytes = 16 * 1024 * 1024
 
     // MARK: - Buffer Creation
 

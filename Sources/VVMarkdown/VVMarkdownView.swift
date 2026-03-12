@@ -36,8 +36,6 @@ public struct VVMarkdownView: View {
     private let viewProvider: MarkdownViewProvider?
     private let styleRegistry: MarkdownStyleRegistry?
 
-    @State private var scrollOffset: CGPoint = .zero
-
     public init(
         content: String,
         theme: MarkdownTheme = .dark,
@@ -64,8 +62,7 @@ public struct VVMarkdownView: View {
             baseURL: baseURL,
             linkHandler: linkHandler,
             viewProvider: viewProvider,
-            styleRegistry: styleRegistry,
-            scrollOffset: $scrollOffset
+            styleRegistry: styleRegistry
         )
     }
 }
@@ -81,17 +78,22 @@ public struct MetalMarkdownViewRepresentable: NSViewRepresentable {
     let linkHandler: VVMarkdownLinkHandler?
     let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
-    @Binding var scrollOffset: CGPoint
 
-    public func makeNSView(context: Context) -> MetalMarkdownNSView {
-        let view = MetalMarkdownNSView(frame: .zero, font: font, theme: theme, viewProvider: viewProvider, styleRegistry: styleRegistry)
+    public func makeNSView(context: Context) -> MetalMarkdownContainerView {
+        let view = MetalMarkdownContainerView(
+            frame: .zero,
+            font: font,
+            theme: theme,
+            viewProvider: viewProvider,
+            styleRegistry: styleRegistry
+        )
         view.baseURL = baseURL
         view.linkHandler = linkHandler
         view.setContent(content)
         return view
     }
 
-    public func updateNSView(_ nsView: MetalMarkdownNSView, context: Context) {
+    public func updateNSView(_ nsView: MetalMarkdownContainerView, context: Context) {
         nsView.baseURL = baseURL
         nsView.linkHandler = linkHandler
         nsView.setContent(content)
@@ -107,7 +109,6 @@ public struct MetalMarkdownViewRepresentable: UIViewRepresentable {
     let linkHandler: VVMarkdownLinkHandler?
     let viewProvider: MarkdownViewProvider?
     let styleRegistry: MarkdownStyleRegistry?
-    @Binding var scrollOffset: CGPoint
 
     public func makeUIView(context: Context) -> MetalMarkdownUIView {
         let view = MetalMarkdownUIView(frame: .zero, font: font, theme: theme, viewProvider: viewProvider, styleRegistry: styleRegistry)
@@ -140,6 +141,167 @@ public struct MarkdownDebugOptions: OptionSet, Sendable {
     public static let codeGutter = MarkdownDebugOptions(rawValue: 1 << 3)
 }
 
+private final class MarkdownDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+public final class MetalMarkdownContainerView: NSView {
+    private let scrollView: NSScrollView
+    private let documentView: MarkdownDocumentView
+    public let markdownView: MetalMarkdownNSView
+
+    public var baseURL: URL? {
+        get { markdownView.baseURL }
+        set { markdownView.baseURL = newValue }
+    }
+
+    public var linkHandler: VVMarkdownLinkHandler? {
+        get { markdownView.linkHandler }
+        set { markdownView.linkHandler = newValue }
+    }
+
+    public var topInset: CGFloat {
+        get { markdownView.topInset }
+        set {
+            markdownView.topInset = newValue
+            updateContentSize()
+        }
+    }
+
+    public override var isFlipped: Bool { true }
+
+    public init(
+        frame: CGRect,
+        font: VVFont,
+        theme: MarkdownTheme,
+        viewProvider: MarkdownViewProvider? = nil,
+        styleRegistry: MarkdownStyleRegistry? = nil,
+        metalContext: VVMetalContext? = nil
+    ) {
+        markdownView = MetalMarkdownNSView(
+            frame: .zero,
+            font: font,
+            theme: theme,
+            viewProvider: viewProvider,
+            styleRegistry: styleRegistry,
+            metalContext: metalContext
+        )
+        documentView = MarkdownDocumentView(frame: .zero)
+        scrollView = NSScrollView(frame: frame)
+        super.init(frame: frame)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        markdownView = MetalMarkdownNSView(frame: .zero, font: .systemFont(ofSize: 14), theme: .dark)
+        documentView = MarkdownDocumentView(frame: .zero)
+        scrollView = NSScrollView(frame: .zero)
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        scrollView.documentView = documentView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.contentView.postsBoundsChangedNotifications = true
+
+        markdownView.onContentSizeChange = { [weak self] in
+            self?.updateContentSize()
+        }
+        markdownView.onScrollRequest = { [weak self] offset in
+            self?.restoreScrollPosition(offset)
+        }
+
+        addSubview(scrollView)
+        scrollView.addSubview(markdownView)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScroll),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+
+        updateContentSize()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    public override func layout() {
+        super.layout()
+        scrollView.frame = bounds
+        updateContentSize()
+    }
+
+    public func setContent(_ content: String) {
+        markdownView.setContent(content)
+        updateContentSize()
+    }
+
+    public func updateTheme(_ theme: MarkdownTheme) {
+        markdownView.updateTheme(theme)
+        updateContentSize()
+    }
+
+    public func restoreScrollPosition(_ origin: CGPoint) {
+        let clampedOrigin = clampedScrollOrigin(origin)
+        scrollView.contentView.setBoundsOrigin(clampedOrigin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        syncViewport()
+    }
+
+    @objc private func handleScroll() {
+        syncViewport()
+    }
+
+    private func updateContentSize() {
+        let documentSize = Self.documentSize(
+            contentSize: markdownView.scrollableContentSize,
+            viewportSize: scrollView.contentView.bounds.size
+        )
+        documentView.frame = CGRect(origin: .zero, size: documentSize)
+        let clampedOrigin = clampedScrollOrigin(scrollView.contentView.bounds.origin)
+        if clampedOrigin != scrollView.contentView.bounds.origin {
+            scrollView.contentView.setBoundsOrigin(clampedOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+        syncViewport()
+    }
+
+    private func clampedScrollOrigin(_ origin: CGPoint) -> CGPoint {
+        let documentBounds = documentView.bounds
+        let viewportBounds = scrollView.contentView.bounds
+        let maxX = max(0, documentBounds.width - viewportBounds.width)
+        let maxY = max(0, documentBounds.height - viewportBounds.height)
+        return CGPoint(
+            x: min(max(0, origin.x), maxX),
+            y: min(max(0, origin.y), maxY)
+        )
+    }
+
+    private func syncViewport() {
+        let visibleRect = scrollView.documentVisibleRect
+        markdownView.scrollOffset = visibleRect.origin
+        markdownView.frame = CGRect(
+            origin: scrollView.contentView.frame.origin,
+            size: scrollView.contentView.bounds.size
+        )
+    }
+
+    static func documentSize(contentSize: CGSize, viewportSize: CGSize) -> CGSize {
+        CGSize(
+            width: max(contentSize.width, viewportSize.width),
+            height: max(contentSize.height, viewportSize.height)
+        )
+    }
+}
+
 public class MetalMarkdownNSView: NSView {
 
     // Match editor coordinate system (origin at top-left).
@@ -161,7 +323,12 @@ public class MetalMarkdownNSView: NSView {
     private var cachedOrderedSceneVisibilityIndex: VVPrimitiveVisibilityIndex?
     private var sceneDirty: Bool = true
 
-    private var scrollOffset: CGPoint = .zero
+    var scrollOffset: CGPoint = .zero {
+        didSet {
+            guard oldValue != scrollOffset else { return }
+            needsRedraw = true
+        }
+    }
     private var contentHeight: CGFloat = 0
     private var needsRedraw: Bool = true {
         didSet {
@@ -178,9 +345,13 @@ public class MetalMarkdownNSView: NSView {
     /// Top content inset for safe area (e.g., titlebar)
     public var topInset: CGFloat = 0 {
         didSet {
+            onContentSizeChange?()
             needsRedraw = true
         }
     }
+
+    var onContentSizeChange: (() -> Void)?
+    var onScrollRequest: ((CGPoint) -> Void)?
 
     private var theme: MarkdownTheme
     private var baseFont: VVFont
@@ -467,6 +638,7 @@ public class MetalMarkdownNSView: NSView {
         contentHeight = layout.totalHeight
         selectionHelper = VVMarkdownSelectionHelper(layout: layout, layoutEngine: layoutEngine)
         sceneDirty = true
+        onContentSizeChange?()
     }
 
     private func processBlocks() {
@@ -681,11 +853,35 @@ public class MetalMarkdownNSView: NSView {
 
     // MARK: - Scrolling
 
+    static func normalizedScrollDelta(
+        _ rawDelta: CGFloat,
+        hasPreciseScrollingDeltas: Bool,
+        lineScrollDistance: CGFloat
+    ) -> CGFloat {
+        guard !hasPreciseScrollingDeltas else { return rawDelta }
+        return rawDelta * max(1, lineScrollDistance)
+    }
+
     public override func scrollWheel(with event: NSEvent) {
+        if let enclosingScrollView {
+            enclosingScrollView.scrollWheel(with: event)
+            return
+        }
         let maxScrollY = max(0, contentHeight + topInset - bounds.height)
         let maxScrollX = max(0, (cachedLayout?.contentWidth ?? bounds.width) - bounds.width)
-        let newY = max(0, min(maxScrollY, scrollOffset.y - event.scrollingDeltaY))
-        let newX = max(0, min(maxScrollX, scrollOffset.x - event.scrollingDeltaX))
+        let lineScrollDistance = max(12, layoutEngine.currentLineHeight)
+        let deltaY = Self.normalizedScrollDelta(
+            event.scrollingDeltaY,
+            hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas,
+            lineScrollDistance: lineScrollDistance
+        )
+        let deltaX = Self.normalizedScrollDelta(
+            event.scrollingDeltaX,
+            hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas,
+            lineScrollDistance: lineScrollDistance
+        )
+        let newY = max(0, min(maxScrollY, scrollOffset.y - deltaY))
+        let newX = max(0, min(maxScrollX, scrollOffset.x - deltaX))
         guard newY != scrollOffset.y || newX != scrollOffset.x else { return }
         scrollOffset.y = newY
         scrollOffset.x = newX
@@ -693,6 +889,13 @@ public class MetalMarkdownNSView: NSView {
         if !usesContinuousRedraw {
             render()
         }
+    }
+
+    var scrollableContentSize: CGSize {
+        CGSize(
+            width: cachedLayout?.contentWidth ?? bounds.width,
+            height: contentHeight + topInset
+        )
     }
 
     // MARK: - Mouse Events & Selection
@@ -984,8 +1187,7 @@ public class MetalMarkdownNSView: NSView {
         }
 
         if newOffset.x != scrollOffset.x || newOffset.y != scrollOffset.y {
-            scrollOffset = newOffset
-            needsRedraw = true
+            requestScroll(to: newOffset)
         }
     }
 
@@ -1158,8 +1360,7 @@ public class MetalMarkdownNSView: NSView {
             let anchor = trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed
             if let target = headingAnchors[anchor] ?? headingAnchors[slugify(anchor)] {
                 let targetY = max(0, target - CGFloat(theme.contentPadding))
-                scrollOffset.y = min(max(0, targetY), max(0, contentHeight - bounds.height))
-                needsRedraw = true
+                requestScroll(to: CGPoint(x: scrollOffset.x, y: targetY))
             }
             return
         }
@@ -1181,6 +1382,19 @@ public class MetalMarkdownNSView: NSView {
         #else
         UIApplication.shared.open(url, options: [:], completionHandler: nil)
         #endif
+    }
+
+    private func requestScroll(to offset: CGPoint) {
+        let clampedOffset = CGPoint(
+            x: min(max(0, offset.x), max(0, (cachedLayout?.contentWidth ?? bounds.width) - bounds.width)),
+            y: min(max(0, offset.y), max(0, contentHeight + topInset - bounds.height))
+        )
+        if let onScrollRequest {
+            onScrollRequest(clampedOffset)
+            return
+        }
+        scrollOffset = clampedOffset
+        needsRedraw = true
     }
 
     private func resolveLinkURL(_ raw: String) -> URL? {

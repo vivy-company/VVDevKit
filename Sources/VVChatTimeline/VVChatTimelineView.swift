@@ -604,8 +604,11 @@ public final class VVChatTimelineView: NSView, VVChatTimelineRenderDataSource {
     }
 
     private func stopDisplayLink() {
-        guard let displayLink, CVDisplayLinkIsRunning(displayLink) else { return }
-        CVDisplayLinkStop(displayLink)
+        guard let displayLink else { return }
+        if CVDisplayLinkIsRunning(displayLink) {
+            CVDisplayLinkStop(displayLink)
+        }
+        self.displayLink = nil
     }
 
     private func animationFrameTick() {

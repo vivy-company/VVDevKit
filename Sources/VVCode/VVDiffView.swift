@@ -448,7 +448,7 @@ private final class VVDiffMetalView: NSView {
     private static let highlightViewportMargin: CGFloat = 220
     private static let highlightWarmupContextRows: Int = 32
     private static let renderCullPadding: CGFloat = 256
-    private static let sceneCacheViewportPaddingMultiplier: CGFloat = 1.25
+    private static let sceneCacheViewportPaddingMultiplier: CGFloat = 2.0
     private static let scrollActivityGrace: CFTimeInterval = 0.16
     private static let sceneBuildQueue = DispatchQueue(label: "vvdevkit.diff.scene-build", qos: .userInitiated)
 
@@ -466,6 +466,7 @@ private final class VVDiffMetalView: NSView {
     private var rowGeometriesContentHeight: CGFloat = 0
     private var rowsSignature: Int = 0
     private var fastPlainModeEnabled: Bool = false
+    private var drawFrameCounter: Int = 0
     private let codeInsetX: CGFloat = 10
 
     init(frame: CGRect, metalContext: VVMetalContext? = nil) {
@@ -519,6 +520,9 @@ private final class VVDiffMetalView: NSView {
         metalView.framebufferOnly = true
         metalView.delegate = self
         metalView.layer?.isOpaque = true
+        if let metalLayer = metalView.layer as? CAMetalLayer {
+            metalLayer.maximumDrawableCount = 2
+        }
 
         addSubview(scrollView)
         scrollView.addSubview(metalView)
@@ -544,12 +548,11 @@ private final class VVDiffMetalView: NSView {
         updateMetalViewport()
         noteScrollActivity()
         refreshVisibleRowGeometryWindow()
-        requestViewportHighlightingIfNeeded()
-        prewarmSceneBuildIfNeeded()
-        if !staleHighlightedRowIDs.isEmpty, shouldRedrawForHighlightedRowIDs(staleHighlightedRowIDs) {
-            deferredHighlightSceneRefresh = true
-            startDisplayLink()
-        }
+        // Defer ALL expensive work (highlighting, scene prefetch) until
+        // scrolling stops. During active scrolling the cached scene covers
+        // visible blocks and the display link drives rendering. Running
+        // highlight tasks or async scene builds during scroll causes
+        // main-thread contention and PreparedTextRun cache thrashing.
         if displayLink == nil {
             metalView.setNeedsDisplay(metalView.bounds)
         }
@@ -603,6 +606,7 @@ private final class VVDiffMetalView: NSView {
             return
         }
 
+        // Scrolling just stopped — apply deferred highlights, prefetch, resume batching.
         var needsAnotherTick = false
         var shouldRedraw = false
 
@@ -610,6 +614,14 @@ private final class VVDiffMetalView: NSView {
             applyDeferredHighlightSceneRefresh(redraw: false)
             shouldRedraw = true
             needsAnotherTick = true
+        }
+
+        prewarmSceneBuildIfNeeded()
+        requestViewportHighlightingIfNeeded()
+
+        // Resume highlight batching that was paused during scrolling.
+        if highlightTask == nil {
+            startNextHighlightBatchIfNeeded()
         }
 
         if highlightTask != nil {
@@ -1079,7 +1091,8 @@ private final class VVDiffMetalView: NSView {
         guard !codeRows.isEmpty else { return }
         guard effectiveHighlightLanguageConfiguration() != nil else { return }
         let targetRange = desiredHighlightedCodeRowRangeForVisibleViewport()
-        trimHighlightedRanges(keeping: highlightRetentionRange(for: targetRange))
+        // Don't trim highlighted ranges — the dictionary cost is trivial and
+        // trimming causes "replay" re-highlighting when scrolling back.
         scheduleHighlightingIfNeeded(targetCodeRowRange: targetRange)
     }
 
@@ -1184,7 +1197,6 @@ private final class VVDiffMetalView: NSView {
 
         guard let startIndex else {
             pendingHighlightCodeRowRange = nil
-            trimHighlightedRanges(keeping: highlightRetentionRange(for: targetRange))
             return
         }
 
@@ -1223,15 +1235,15 @@ private final class VVDiffMetalView: NSView {
                 if !targetRowIDs.isEmpty {
                     self.staleHighlightedRowIDs.formUnion(targetRowIDs)
                 }
-                self.trimHighlightedRanges(keeping: self.highlightRetentionRange(for: targetRange))
+                // Don't trim highlights — the dictionary cost is trivial and
+                // trimming causes re-highlighting when scrolling back.
                 self.highlightTask = nil
-                let hasRemainingTargetHighlights = self.hasMissingHighlightRows(in: targetRange)
                 if self.shouldRedrawForHighlightedRowIDs(targetRowIDs) {
                     if self.isActivelyScrolling {
+                        // During scrolling, just mark deferred. The display link
+                        // will apply highlights when scrolling stops.
                         self.deferredHighlightSceneRefresh = true
                         self.startDisplayLink()
-                    } else if hasRemainingTargetHighlights {
-                        self.deferredHighlightSceneRefresh = true
                     } else {
                         self.deferredHighlightSceneRefresh = true
                         self.applyDeferredHighlightSceneRefresh(redraw: true)
@@ -1240,7 +1252,11 @@ private final class VVDiffMetalView: NSView {
                     self.deferredHighlightSceneRefresh = true
                     self.startDisplayLink()
                 }
-                self.startNextHighlightBatchIfNeeded()
+                // Don't chain next batch during active scrolling — it causes
+                // continuous MainActor callbacks that contend with scroll handling.
+                if !self.isActivelyScrolling {
+                    self.startNextHighlightBatchIfNeeded()
+                }
             }
         }
     }
@@ -1387,6 +1403,7 @@ private final class VVDiffMetalView: NSView {
                 }
                 guard self.sceneBuildInFlightKey == sceneKey else { return }
 
+                print("[DiffScene] async build complete blocks=\(sceneKey.startBlockIndex)..<\(sceneKey.endBlockIndex) prims=\(artifacts.scene.primitives.count)")
                 self.cachedScene = artifacts.scene
                 self.cachedSceneKey = sceneKey
                 self.cachedOrderedPrimitiveIndices = artifacts.orderedPrimitiveIndices
@@ -1469,8 +1486,10 @@ extension VVDiffMetalView: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        let t0 = CACurrentMediaTime()
         guard let renderer,
               let drawable = view.currentDrawable else { return }
+        let tDrawable = CACurrentMediaTime()
 
         let dr = ensureDiffRenderer()
         let bg = dr.backgroundColor
@@ -1501,20 +1520,33 @@ extension VVDiffMetalView: MTKViewDelegate {
         let sceneKey = makeViewportSceneCacheKey(renderWidth: renderWidth)
         let requiredBlockRange = sceneKey.startBlockIndex..<sceneKey.endBlockIndex
 
+        // Tight visible block range (no prefetch padding) — used for partial
+        // cache hit test so the scene's built-in padding acts as hysteresis.
+        let tightVisibleRange = visibleDisplayBlockRange(in: visibleRect)
+
         var scene: VVScene?
         var orderedPrimitiveIndices: [Int]
         var visibilityIndex: VVPrimitiveVisibilityIndex?
+        var sceneCachePath = "hit"
+        // During active scrolling, accept stale highlights — don't let highlight
+        // version changes trigger expensive synchronous scene rebuilds in draw().
+        // Highlights will be applied when scrolling stops.
+        let effectiveHighlightVersion = isActivelyScrolling
+            ? (cachedSceneKey?.highlightVersion ?? highlightSceneVersion)
+            : highlightSceneVersion
         if let cached = cachedScene,
            let cachedSceneKey,
            cachedSceneKey.contains(
             renderWidth: renderWidth,
-            highlightVersion: highlightSceneVersion,
-            requiredBlockRange: requiredBlockRange
+            highlightVersion: effectiveHighlightVersion,
+            requiredBlockRange: tightVisibleRange
            ) {
             scene = cached
             orderedPrimitiveIndices = cachedOrderedPrimitiveIndices
             visibilityIndex = cachedSceneVisibilityIndex
         } else if let layoutPlan {
+            // Scene doesn't cover visible blocks — must build synchronously.
+            sceneCachePath = "REBUILD[\(requiredBlockRange.count)blk]"
             let artifacts = Self.buildSceneArtifacts(
                 layoutPlan: layoutPlan,
                 blockRange: requiredBlockRange,
@@ -1539,6 +1571,8 @@ extension VVDiffMetalView: MTKViewDelegate {
             visibilityIndex = cachedSceneVisibilityIndex
         }
 
+        let tScene = CACurrentMediaTime()
+
         let visiblePrimitiveIndicesForDraw: [Int]
         if let visibilityIndex,
            let bucketRange = visibilityIndex.bucketRange(for: visibleRect) {
@@ -1557,9 +1591,12 @@ extension VVDiffMetalView: MTKViewDelegate {
             visiblePrimitiveIndicesForDraw = orderedPrimitiveIndices
         }
 
+        let tCull = CACurrentMediaTime()
+
         if let scene {
             let sceneRenderer = self.sceneRenderer ?? MarkdownScenePrimitiveRenderer(baseFont: renderer.baseFont)
             self.sceneRenderer = sceneRenderer
+            sceneRenderer.resetFrameDiagnostics()
             sceneRenderer.updateBehavior(
                 MarkdownSceneRenderingBehavior(
                     imageTextureProvider: nil,
@@ -1599,10 +1636,30 @@ extension VVDiffMetalView: MTKViewDelegate {
             }
         }
 
+        let tRender = CACurrentMediaTime()
+
         encoder.endEncoding()
         renderer.recycleTransientBuffers(after: commandBuffer)
         commandBuffer?.present(drawable)
         commandBuffer?.commit()
+
+        let tEnd = CACurrentMediaTime()
+        let totalMs = (tEnd - t0) * 1000
+        if totalMs > 8 || drawFrameCounter % 300 == 0 {
+            let drawableMs = (tDrawable - t0) * 1000
+            let sceneMs = (tScene - tDrawable) * 1000
+            let cullMs = (tCull - tScene) * 1000
+            let renderMs = (tRender - tCull) * 1000
+            let commitMs = (tEnd - tRender) * 1000
+            let primCount = visiblePrimitiveIndicesForDraw.count
+            let totalPrimCount = scene?.primitives.count ?? 0
+            let viewSize = view.bounds.size
+            let hits = sceneRenderer?.lastFrameTextRunCacheHits ?? 0
+            let misses = sceneRenderer?.lastFrameTextRunCacheMisses ?? 0
+            let cacheSize = sceneRenderer?.preparedTextRunCacheCount ?? 0
+            print("[DiffDraw] total=\(String(format: "%.1f", totalMs))ms drw=\(String(format: "%.1f", drawableMs))ms scn=\(String(format: "%.1f", sceneMs))ms cull=\(String(format: "%.1f", cullMs))ms rnd=\(String(format: "%.1f", renderMs))ms cmt=\(String(format: "%.1f", commitMs))ms p=\(primCount)/\(totalPrimCount) txt=\(hits)h/\(misses)m/\(cacheSize)c \(sceneCachePath) \(Int(viewSize.width))x\(Int(viewSize.height))")
+        }
+        drawFrameCounter += 1
     }
 
     private func visibleGeometryRange(in visibleRect: CGRect) -> Range<Int> {

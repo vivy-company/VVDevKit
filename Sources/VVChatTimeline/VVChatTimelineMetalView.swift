@@ -165,6 +165,7 @@ public final class VVChatTimelineMetalView: MTKView {
         layer?.isOpaque = false
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         framebufferOnly = true
+        (layer as? CAMetalLayer)?.maximumDrawableCount = 2
         enableSetNeedsDisplay = true
         isPaused = true
         if let ctx = metalContext {

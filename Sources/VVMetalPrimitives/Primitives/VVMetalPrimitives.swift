@@ -641,6 +641,11 @@ public enum VVPathCommand: Hashable, Sendable {
 }
 
 public struct VVPathBuilder: Sendable {
+    private struct TessellatedSubpath {
+        var points: [CGPoint]
+        var isClosed: Bool
+    }
+
     private var commands: [VVPathCommand] = []
     private var currentPoint: CGPoint = .zero
     private var startPoint: CGPoint = .zero
@@ -746,8 +751,9 @@ public struct VVPathBuilder: Sendable {
     }
 
     public func build(fill: SIMD4<Float>? = nil, stroke: VVStrokeStyle? = nil, transform: VVTransform2D = .identity) -> VVPathPrimitive {
-        let points = tessellate()
-        guard !points.isEmpty else {
+        let subpaths = tessellateSubpaths()
+        let allPoints = subpaths.flatMap(\.points)
+        guard !allPoints.isEmpty else {
             return VVPathPrimitive(vertices: [], fill: fill, stroke: stroke, bounds: .zero, transform: transform)
         }
 
@@ -755,7 +761,7 @@ public struct VVPathBuilder: Sendable {
         var minX = CGFloat.greatestFiniteMagnitude, minY = CGFloat.greatestFiniteMagnitude
         var maxX = -CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
 
-        for point in points {
+        for point in allPoints {
             minX = min(minX, point.x)
             minY = min(minY, point.y)
             maxX = max(maxX, point.x)
@@ -765,47 +771,53 @@ public struct VVPathBuilder: Sendable {
         let bounds = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
 
         // Triangulate: simple ear-clipping for convex-ish shapes, fan for fill
-        let fillVertexCount: Int
-        if fill != nil && points.count >= 3 {
-            let center = CGPoint(
-                x: points.reduce(0) { $0 + $1.x } / CGFloat(points.count),
-                y: points.reduce(0) { $0 + $1.y } / CGFloat(points.count)
-            )
-            for i in 0..<points.count {
-                let next = (i + 1) % points.count
-                vertices.append(VVPathVertex(position: center))
-                vertices.append(VVPathVertex(position: points[i]))
-                vertices.append(VVPathVertex(position: points[next]))
+        let fillStartIndex = vertices.count
+        if fill != nil {
+            for subpath in subpaths where subpath.points.count >= 3 {
+                let center = CGPoint(
+                    x: subpath.points.reduce(0) { $0 + $1.x } / CGFloat(subpath.points.count),
+                    y: subpath.points.reduce(0) { $0 + $1.y } / CGFloat(subpath.points.count)
+                )
+                let segmentCount = subpath.isClosed ? subpath.points.count : (subpath.points.count - 1)
+                guard segmentCount >= 2 else { continue }
+                for i in 0..<segmentCount {
+                    let next = i + 1 < subpath.points.count ? i + 1 : 0
+                    vertices.append(VVPathVertex(position: center))
+                    vertices.append(VVPathVertex(position: subpath.points[i]))
+                    vertices.append(VVPathVertex(position: subpath.points[next]))
+                }
             }
-            fillVertexCount = vertices.count
-        } else {
-            fillVertexCount = 0
         }
+        let fillVertexCount = vertices.count - fillStartIndex
 
         // Stroke: expand each segment into a quad
         let strokeStartIndex = vertices.count
         if let stroke = stroke, stroke.width > 0 {
             let half = stroke.width / 2
-            for i in 0..<points.count {
-                let next = (i + 1) % points.count
-                let p0 = points[i]
-                let p1 = points[next]
-                let dx = p1.x - p0.x
-                let dy = p1.y - p0.y
-                let len = sqrt(dx * dx + dy * dy)
-                guard len > 0 else { continue }
-                let nx = -dy / len * half
-                let ny = dx / len * half
-                let a = CGPoint(x: p0.x + nx, y: p0.y + ny)
-                let b = CGPoint(x: p0.x - nx, y: p0.y - ny)
-                let c = CGPoint(x: p1.x - nx, y: p1.y - ny)
-                let d = CGPoint(x: p1.x + nx, y: p1.y + ny)
-                vertices.append(VVPathVertex(position: a))
-                vertices.append(VVPathVertex(position: b))
-                vertices.append(VVPathVertex(position: c))
-                vertices.append(VVPathVertex(position: a))
-                vertices.append(VVPathVertex(position: c))
-                vertices.append(VVPathVertex(position: d))
+            for subpath in subpaths {
+                let segmentCount = subpath.isClosed ? subpath.points.count : (subpath.points.count - 1)
+                guard segmentCount > 0 else { continue }
+                for i in 0..<segmentCount {
+                    let next = i + 1 < subpath.points.count ? i + 1 : 0
+                    let p0 = subpath.points[i]
+                    let p1 = subpath.points[next]
+                    let dx = p1.x - p0.x
+                    let dy = p1.y - p0.y
+                    let len = sqrt(dx * dx + dy * dy)
+                    guard len > 0 else { continue }
+                    let nx = -dy / len * half
+                    let ny = dx / len * half
+                    let a = CGPoint(x: p0.x + nx, y: p0.y + ny)
+                    let b = CGPoint(x: p0.x - nx, y: p0.y - ny)
+                    let c = CGPoint(x: p1.x - nx, y: p1.y - ny)
+                    let d = CGPoint(x: p1.x + nx, y: p1.y + ny)
+                    vertices.append(VVPathVertex(position: a))
+                    vertices.append(VVPathVertex(position: b))
+                    vertices.append(VVPathVertex(position: c))
+                    vertices.append(VVPathVertex(position: a))
+                    vertices.append(VVPathVertex(position: c))
+                    vertices.append(VVPathVertex(position: d))
+                }
             }
         }
 
@@ -821,38 +833,71 @@ public struct VVPathBuilder: Sendable {
         )
     }
 
-    private func tessellate() -> [CGPoint] {
-        var points: [CGPoint] = []
+    private func tessellateSubpaths() -> [TessellatedSubpath] {
+        var subpaths: [TessellatedSubpath] = []
+        var currentPoints: [CGPoint] = []
+        var currentStartPoint: CGPoint?
+        var activePoint: CGPoint?
+
+        func flushCurrentSubpath(isClosed: Bool) {
+            guard !currentPoints.isEmpty else { return }
+            subpaths.append(TessellatedSubpath(points: currentPoints, isClosed: isClosed))
+            currentPoints.removeAll(keepingCapacity: true)
+            currentStartPoint = nil
+        }
+
         for command in commands {
             switch command {
             case .moveTo(let pt):
-                points.append(pt)
+                flushCurrentSubpath(isClosed: false)
+                currentPoints.append(pt)
+                currentStartPoint = pt
+                activePoint = pt
             case .lineTo(let pt):
-                points.append(pt)
+                if currentPoints.isEmpty {
+                    currentPoints.append(activePoint ?? .zero)
+                    currentStartPoint = currentPoints.first
+                }
+                currentPoints.append(pt)
+                activePoint = pt
             case .quadCurveTo(let to, let control):
-                let from = points.last ?? .zero
+                let from = activePoint ?? currentPoints.last ?? .zero
+                if currentPoints.isEmpty {
+                    currentPoints.append(from)
+                    currentStartPoint = from
+                }
                 let segments = 8
                 for i in 1...segments {
                     let t = CGFloat(i) / CGFloat(segments)
                     let omt = 1 - t
                     let x = omt * omt * from.x + 2 * omt * t * control.x + t * t * to.x
                     let y = omt * omt * from.y + 2 * omt * t * control.y + t * t * to.y
-                    points.append(CGPoint(x: x, y: y))
+                    currentPoints.append(CGPoint(x: x, y: y))
                 }
+                activePoint = to
             case .cubicCurveTo(let to, let c1, let c2):
-                let from = points.last ?? .zero
+                let from = activePoint ?? currentPoints.last ?? .zero
+                if currentPoints.isEmpty {
+                    currentPoints.append(from)
+                    currentStartPoint = from
+                }
                 let segments = 12
                 for i in 1...segments {
                     let t = CGFloat(i) / CGFloat(segments)
                     let omt = 1 - t
                     let x = omt * omt * omt * from.x + 3 * omt * omt * t * c1.x + 3 * omt * t * t * c2.x + t * t * t * to.x
                     let y = omt * omt * omt * from.y + 3 * omt * omt * t * c1.y + 3 * omt * t * t * c2.y + t * t * t * to.y
-                    points.append(CGPoint(x: x, y: y))
+                    currentPoints.append(CGPoint(x: x, y: y))
                 }
+                activePoint = to
             case .close:
-                break
+                if currentPoints.count >= 2, let start = currentStartPoint, currentPoints.last != start {
+                    activePoint = start
+                }
+                flushCurrentSubpath(isClosed: true)
             }
         }
-        return points
+        flushCurrentSubpath(isClosed: false)
+        return subpaths
     }
 }

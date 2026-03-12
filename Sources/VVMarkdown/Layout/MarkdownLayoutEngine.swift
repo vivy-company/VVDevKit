@@ -601,13 +601,15 @@ public final class MarkdownLayoutEngine {
 
     private func measureTextWidth(_ text: String, font: CTFont) -> CGFloat {
         guard !text.isEmpty else { return 0 }
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .ligature: 1
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
-        let width = CTLineGetTypographicBounds(line, nil, nil, nil)
-        return CGFloat(width)
+        return autoreleasepool {
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .ligature: 1
+            ]
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+            let width = CTLineGetTypographicBounds(line, nil, nil, nil)
+            return CGFloat(width)
+        }
     }
 
     /// Get glyphs for math text (for math rendering)
@@ -621,6 +623,12 @@ public final class MarkdownLayoutEngine {
 
     /// Layout a parsed markdown document
     public func layout(_ document: ParsedMarkdownDocument) -> MarkdownLayout {
+        autoreleasepool {
+            layoutImpl(document)
+        }
+    }
+
+    private func layoutImpl(_ document: ParsedMarkdownDocument) -> MarkdownLayout {
         var blocks: [LayoutBlock] = []
         let padding = CGFloat(theme.contentPadding)
         var currentY: CGFloat = padding
@@ -679,6 +687,22 @@ public final class MarkdownLayoutEngine {
     }
 
     public func relayout(
+        _ document: ParsedMarkdownDocument,
+        preservingPrefixFrom previousLayout: MarkdownLayout,
+        previousSourceBlockIndexes: [Int],
+        startingAtSourceIndex sourceStartIndex: Int
+    ) -> MarkdownLayout {
+        autoreleasepool {
+            relayoutImpl(
+                document,
+                preservingPrefixFrom: previousLayout,
+                previousSourceBlockIndexes: previousSourceBlockIndexes,
+                startingAtSourceIndex: sourceStartIndex
+            )
+        }
+    }
+
+    private func relayoutImpl(
         _ document: ParsedMarkdownDocument,
         preservingPrefixFrom previousLayout: MarkdownLayout,
         previousSourceBlockIndexes: [Int],

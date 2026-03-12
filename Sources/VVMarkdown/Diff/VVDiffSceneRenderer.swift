@@ -208,6 +208,7 @@ private enum DiffCacheSizing {
     static let maxCachedUnifiedDiffUTF16 = 120_000
     static let maxCachedHighlightRows = 2_000
     static let maxCachedRenderUTF16 = 80_000
+    static let renderCacheRevision = 2
 }
 
 private func shouldCacheAnalyzedDocument(for unifiedDiff: String) -> Bool {
@@ -425,6 +426,7 @@ private func makeRenderCacheKey(
     options: VVDiffRenderOptions
 ) -> Int {
     var hasher = Hasher()
+    hasher.combine(DiffCacheSizing.renderCacheRevision)
     hasher.combine(unifiedDiff)
     hasher.combine(Int(width.rounded(.toNearestOrEven)))
     hasher.combine(baseFont.pointSize)
@@ -831,6 +833,8 @@ private final class DiffSceneBuilder {
     var hunkBgColor: SIMD4<Float>
     var addedBgColor: SIMD4<Float>
     var deletedBgColor: SIMD4<Float>
+    var emptyPaneBgColor: SIMD4<Float>
+    var emptyPaneGuideColor: SIMD4<Float>
     var addedMarkerColor: SIMD4<Float>
     var deletedMarkerColor: SIMD4<Float>
     var modifiedColor: SIMD4<Float>
@@ -865,6 +869,12 @@ private final class DiffSceneBuilder {
         self.deletedBgColor = isLight
             ? SIMD4<Float>(0.98, 0.90, 0.90, 1.0)
             : SIMD4<Float>(0.27, 0.12, 0.13, 0.92)
+        self.emptyPaneBgColor = isLight
+            ? blended(theme.codeBackgroundColor, theme.codeGutterBackgroundColor, 0.52)
+            : blended(theme.codeBackgroundColor, theme.codeHeaderBackgroundColor, 0.32)
+        self.emptyPaneGuideColor = isLight
+            ? blended(emptyPaneBgColor, theme.codeHeaderDividerColor, 0.72)
+            : blended(emptyPaneBgColor, theme.codeBorderColor, 0.78)
         self.addedMarkerColor = isLight
             ? SIMD4<Float>(0.11, 0.57, 0.25, 1.0)
             : SIMD4<Float>(0.43, 0.86, 0.56, 1.0)
@@ -898,6 +908,57 @@ private final class DiffSceneBuilder {
         let rows = layout.document.rows
         let sections = layout.document.sections
         let splitRows = layout.document.splitRows
+
+        // Collected split rows for pane-ordered rendering.
+        // Rendering all left-pane content then all right-pane content with pane-wide
+        // clip rects reduces per-frame clip transitions from O(rows) to O(1).
+        struct CollectedSplit {
+            let splitRow: ParsedDiffSplitRow
+            let y: CGFloat
+            let height: CGFloat
+            let leftWrappedLines: [WrappedTextSegment]
+            let rightWrappedLines: [WrappedTextSegment]
+        }
+        var collectedSplits: [CollectedSplit] = []
+
+        func buildMergedEmptyPaneRuns() {
+            guard !collectedSplits.isEmpty else { return }
+
+            func emitRun(paneX: CGFloat, startY: CGFloat?, endY: CGFloat?) {
+                guard let startY, let endY, endY > startY + 0.5 else { return }
+                buildEmptySplitPanePlaceholder(
+                    paneRect: CGRect(x: paneX, y: startY, width: layout.metrics.columnWidth, height: endY - startY),
+                    builder: &builder
+                )
+            }
+
+            for (paneX, isEmpty) in [
+                (CGFloat(0), { (item: CollectedSplit) in item.splitRow.left == nil }),
+                (layout.metrics.columnWidth, { (item: CollectedSplit) in item.splitRow.right == nil })
+            ] {
+                var runStartY: CGFloat?
+                var runEndY: CGFloat?
+                for item in collectedSplits {
+                    if isEmpty(item) {
+                        if runStartY == nil {
+                            runStartY = item.y
+                            runEndY = item.y + item.height
+                        } else if let endY = runEndY, abs(item.y - endY) < 0.5 {
+                            runEndY = item.y + item.height
+                        } else {
+                            emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
+                            runStartY = item.y
+                            runEndY = item.y + item.height
+                        }
+                    } else {
+                        emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
+                        runStartY = nil
+                        runEndY = nil
+                    }
+                }
+                emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
+            }
+        }
 
         for block in layout.blocks[clampedRange] {
             guard let materializedBlock = VVDiffLayoutBuilder.materializedBlock(block, in: layout) else {
@@ -978,37 +1039,63 @@ private final class DiffSceneBuilder {
             case let .splitRow(splitRowIndex, leftWrappedLines, rightWrappedLines):
                 guard splitRows.indices.contains(splitRowIndex) else { continue }
                 let splitRow = splitRows[splitRowIndex]
-                buildSplitCell(
-                    cell: splitRow.left,
-                    wrappedLines: materializeWrappedTextSegments(
-                        leftWrappedLines,
-                        from: splitRow.left?.text ?? ""
-                    ),
-                    y: block.y,
-                    paneX: 0,
-                    paneWidth: layout.metrics.columnWidth,
-                    height: block.height,
-                    gutterColWidth: layout.metrics.gutterColWidth,
-                    markerWidth: layout.metrics.markerWidth,
-                    codeStartX: layout.metrics.codeStartX,
-                    builder: &builder
+
+                // Pass 1: backgrounds only. Empty-pane placeholders are merged
+                // across contiguous runs after block collection.
+                buildSplitCellBackground(
+                    cell: splitRow.left, y: block.y, paneX: 0,
+                    paneWidth: layout.metrics.columnWidth, height: block.height, builder: &builder
                 )
-                buildSplitCell(
-                    cell: splitRow.right,
-                    wrappedLines: materializeWrappedTextSegments(
-                        rightWrappedLines,
-                        from: splitRow.right?.text ?? ""
-                    ),
-                    y: block.y,
-                    paneX: layout.metrics.columnWidth,
-                    paneWidth: layout.metrics.columnWidth,
-                    height: block.height,
-                    gutterColWidth: layout.metrics.gutterColWidth,
-                    markerWidth: layout.metrics.markerWidth,
-                    codeStartX: layout.metrics.codeStartX,
-                    builder: &builder
+                buildSplitCellBackground(
+                    cell: splitRow.right, y: block.y, paneX: layout.metrics.columnWidth,
+                    paneWidth: layout.metrics.columnWidth, height: block.height, builder: &builder
                 )
+
+                collectedSplits.append(CollectedSplit(
+                    splitRow: splitRow, y: block.y, height: block.height,
+                    leftWrappedLines: materializeWrappedTextSegments(leftWrappedLines, from: splitRow.left?.text ?? ""),
+                    rightWrappedLines: materializeWrappedTextSegments(rightWrappedLines, from: splitRow.right?.text ?? "")
+                ))
             }
+        }
+
+        buildMergedEmptyPaneRuns()
+
+        // Pass 2+3: pane-ordered content with pane-wide clips.
+        // All left-pane primitives share one clip rect, all right-pane share another,
+        // so the renderer only transitions clip twice total instead of per-row.
+        if !collectedSplits.isEmpty {
+            let columnWidth = layout.metrics.columnWidth
+            let leftPaneClip = CGRect(x: 0, y: 0, width: columnWidth, height: layout.contentHeight)
+            let rightPaneClip = CGRect(x: columnWidth, y: 0, width: columnWidth, height: layout.contentHeight)
+
+            builder.pushClip(leftPaneClip)
+            for item in collectedSplits {
+                if let cell = item.splitRow.left {
+                    buildSplitCellContent(
+                        cell: cell, wrappedLines: item.leftWrappedLines,
+                        y: item.y, paneX: 0, paneWidth: columnWidth, height: item.height,
+                        gutterColWidth: layout.metrics.gutterColWidth,
+                        markerWidth: layout.metrics.markerWidth,
+                        codeStartX: layout.metrics.codeStartX, builder: &builder
+                    )
+                }
+            }
+            builder.popClip()
+
+            builder.pushClip(rightPaneClip)
+            for item in collectedSplits {
+                if let cell = item.splitRow.right {
+                    buildSplitCellContent(
+                        cell: cell, wrappedLines: item.rightWrappedLines,
+                        y: item.y, paneX: columnWidth, paneWidth: columnWidth, height: item.height,
+                        gutterColWidth: layout.metrics.gutterColWidth,
+                        markerWidth: layout.metrics.markerWidth,
+                        codeStartX: layout.metrics.codeStartX, builder: &builder
+                    )
+                }
+            }
+            builder.popClip()
         }
 
         return (builder.scene, layout.contentHeight)
@@ -1107,6 +1194,56 @@ private final class DiffSceneBuilder {
         var builder = VVSceneBuilder()
         var y: CGFloat = 0
 
+        struct CollectedSplit {
+            let splitRow: ParsedDiffSplitRow
+            let y: CGFloat
+            let height: CGFloat
+            let leftCell: ParsedDiffSplitRow.Cell?
+            let rightCell: ParsedDiffSplitRow.Cell?
+            let leftWrappedLines: [WrappedTextSegment]
+            let rightWrappedLines: [WrappedTextSegment]
+        }
+        var collectedSplits: [CollectedSplit] = []
+
+        func buildMergedEmptyPaneRuns() {
+            guard !collectedSplits.isEmpty else { return }
+
+            func emitRun(paneX: CGFloat, startY: CGFloat?, endY: CGFloat?) {
+                guard let startY, let endY, endY > startY + 0.5 else { return }
+                buildEmptySplitPanePlaceholder(
+                    paneRect: CGRect(x: paneX, y: startY, width: columnWidth, height: endY - startY),
+                    builder: &builder
+                )
+            }
+
+            for (paneX, isEmpty) in [
+                (CGFloat(0), { (item: CollectedSplit) in item.leftCell == nil }),
+                (columnWidth, { (item: CollectedSplit) in item.rightCell == nil })
+            ] {
+                var runStartY: CGFloat?
+                var runEndY: CGFloat?
+                for item in collectedSplits {
+                    if isEmpty(item) {
+                        if runStartY == nil {
+                            runStartY = item.y
+                            runEndY = item.y + item.height
+                        } else if let endY = runEndY, abs(item.y - endY) < 0.5 {
+                            runEndY = item.y + item.height
+                        } else {
+                            emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
+                            runStartY = item.y
+                            runEndY = item.y + item.height
+                        }
+                    } else {
+                        emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
+                        runStartY = nil
+                        runEndY = nil
+                    }
+                }
+                emitRun(paneX: paneX, startY: runStartY, endY: runEndY)
+            }
+        }
+
         for splitRow in splitRows {
             if let header = splitRow.header {
                 if header.kind == .fileHeader && !options.showsFileHeaders {
@@ -1151,33 +1288,56 @@ private final class DiffSceneBuilder {
                 } ?? false
 
                 if includesLeft || includesRight {
-                    buildSplitCell(
-                        cell: includesLeft ? splitRow.left : nil,
-                        wrappedLines: includesLeft ? leftWrappedLines : [],
-                        y: y,
-                        paneX: 0,
-                        paneWidth: columnWidth,
-                        height: rowHeight,
-                        gutterColWidth: gutterColWidth,
-                        markerWidth: markerWidth,
-                        codeStartX: paneCodeStartX,
-                        builder: &builder
-                    )
-                    buildSplitCell(
-                        cell: includesRight ? splitRow.right : nil,
-                        wrappedLines: includesRight ? rightWrappedLines : [],
-                        y: y,
-                        paneX: columnWidth,
-                        paneWidth: columnWidth,
-                        height: rowHeight,
-                        gutterColWidth: gutterColWidth,
-                        markerWidth: markerWidth,
-                        codeStartX: paneCodeStartX,
-                        builder: &builder
-                    )
+                    // Pass 1: backgrounds only. Empty-pane placeholders are merged
+                    // across contiguous runs after row collection.
+                    let leftCell = includesLeft ? splitRow.left : nil
+                    let rightCell = includesRight ? splitRow.right : nil
+                    buildSplitCellBackground(cell: leftCell, y: y, paneX: 0, paneWidth: columnWidth, height: rowHeight, builder: &builder)
+                    buildSplitCellBackground(cell: rightCell, y: y, paneX: columnWidth, paneWidth: columnWidth, height: rowHeight, builder: &builder)
+
+                    collectedSplits.append(CollectedSplit(
+                        splitRow: splitRow, y: y, height: rowHeight,
+                        leftCell: leftCell, rightCell: rightCell,
+                        leftWrappedLines: includesLeft ? leftWrappedLines : [],
+                        rightWrappedLines: includesRight ? rightWrappedLines : []
+                    ))
                 }
                 y += rowHeight
             }
+        }
+
+        buildMergedEmptyPaneRuns()
+
+        // Pane-ordered content with pane-wide clips
+        if !collectedSplits.isEmpty {
+            let leftPaneClip = CGRect(x: 0, y: 0, width: columnWidth, height: y)
+            let rightPaneClip = CGRect(x: columnWidth, y: 0, width: columnWidth, height: y)
+
+            builder.pushClip(leftPaneClip)
+            for item in collectedSplits {
+                if let cell = item.leftCell {
+                    buildSplitCellContent(
+                        cell: cell, wrappedLines: item.leftWrappedLines,
+                        y: item.y, paneX: 0, paneWidth: columnWidth, height: item.height,
+                        gutterColWidth: gutterColWidth, markerWidth: markerWidth,
+                        codeStartX: paneCodeStartX, builder: &builder
+                    )
+                }
+            }
+            builder.popClip()
+
+            builder.pushClip(rightPaneClip)
+            for item in collectedSplits {
+                if let cell = item.rightCell {
+                    buildSplitCellContent(
+                        cell: cell, wrappedLines: item.rightWrappedLines,
+                        y: item.y, paneX: columnWidth, paneWidth: columnWidth, height: item.height,
+                        gutterColWidth: gutterColWidth, markerWidth: markerWidth,
+                        codeStartX: paneCodeStartX, builder: &builder
+                    )
+                }
+            }
+            builder.popClip()
         }
 
         return (builder.scene, y)
@@ -1422,16 +1582,14 @@ private final class DiffSceneBuilder {
         }
     }
 
-    private func buildSplitCell(
+    /// Background quad (z=-2). Empty-pane placeholders are merged separately so
+    /// large asymmetric gaps render as one continuous overlay instead of many slices.
+    private func buildSplitCellBackground(
         cell: ParsedDiffSplitRow.Cell?,
-        wrappedLines: [WrappedTextSegment],
         y: CGFloat,
         paneX: CGFloat,
         paneWidth: CGFloat,
         height: CGFloat,
-        gutterColWidth: CGFloat,
-        markerWidth: CGFloat,
-        codeStartX: CGFloat,
         builder: inout VVSceneBuilder
     ) {
         let paneRect = CGRect(x: paneX, y: y, width: paneWidth, height: height)
@@ -1443,68 +1601,191 @@ private final class DiffSceneBuilder {
             default: background = backgroundColor
             }
         } else {
-            background = withAlpha(headerBgColor, 0.30)
+            background = emptyPaneBgColor
         }
         builder.add(
-            kind: .quad(
-                VVQuadPrimitive(
-                    frame: paneRect,
-                    color: background
-                )
-            ),
-            zIndex: -1
+            kind: .quad(VVQuadPrimitive(frame: paneRect, color: background)),
+            zIndex: -2
         )
+    }
 
-        guard let cell else { return }
+    /// Markers (z=1), inline highlights (z=-1), text (z=0).
+    /// Caller must have pushed a pane-wide clip before calling.
+    private func buildSplitCellContent(
+        cell: ParsedDiffSplitRow.Cell,
+        wrappedLines: [WrappedTextSegment],
+        y: CGFloat,
+        paneX: CGFloat,
+        paneWidth: CGFloat,
+        height: CGFloat,
+        gutterColWidth: CGFloat,
+        markerWidth: CGFloat,
+        codeStartX: CGFloat,
+        builder: inout VVSceneBuilder
+    ) {
+        let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+        buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
 
-        builder.withClip(paneRect) { builder in
-            let firstBaselineY = y + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-            buildMarkerIndicator(kind: cell.kind, x: paneX, y: y, width: markerWidth, height: height, builder: &builder)
+        if let lineNumber = cell.lineNumber {
+            let glyphs = lineNumberGlyphs(text: String(lineNumber), color: lineNumberColor(for: cell.kind))
+            let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
+            let numX = paneX + markerWidth + gutterColWidth - width - 8
+            addTextGlyphs(glyphs, offsetX: numX, baselineY: firstBaselineY, builder: &builder)
+        }
 
-            if let lineNumber = cell.lineNumber {
-                let glyphs = lineNumberGlyphs(text: String(lineNumber), color: lineNumberColor(for: cell.kind))
-                let width = glyphs.map { $0.position.x + $0.size.width }.max() ?? 0
-                let numX = paneX + markerWidth + gutterColWidth - width - 8
-                addTextGlyphs(glyphs, offsetX: numX, baselineY: firstBaselineY, builder: &builder)
+        let inlineHighlightColor = cell.kind == .deleted ? withAlpha(deletedMarkerColor, 0.22) : withAlpha(addedMarkerColor, 0.22)
+        for (lineIndex, lineText) in wrappedLines.enumerated() {
+            let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
+            let baseGlyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: textColor)
+            let highlightRanges = clippedHighlightRanges(for: cell.rowID, segment: lineText)
+
+            for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
+                let startX = glyphXForCharIndex(range.start, in: baseGlyphs)
+                let endX = glyphXForCharIndex(range.end, in: baseGlyphs)
+                let highlightWidth = endX - startX
+                if highlightWidth > 0 {
+                    builder.add(
+                        kind: .quad(
+                            VVQuadPrimitive(
+                                frame: CGRect(
+                                    x: paneX + codeStartX + codeInsetX + startX,
+                                    y: y + CGFloat(lineIndex) * lineHeight,
+                                    width: highlightWidth,
+                                    height: lineHeight
+                                ),
+                                color: inlineHighlightColor
+                            )
+                        ),
+                        zIndex: -1
+                    )
+                }
             }
 
-            let inlineHighlightColor = cell.kind == .deleted ? withAlpha(deletedMarkerColor, 0.22) : withAlpha(addedMarkerColor, 0.22)
-            for (lineIndex, lineText) in wrappedLines.enumerated() {
-                let baselineY = y + CGFloat(lineIndex) * lineHeight + (lineHeight + font.pointSize) / 2 - font.pointSize * 0.15
-                let baseGlyphs = layoutEngine.layoutTextGlyphs(lineText.text, variant: .monospace, at: .zero, color: textColor)
-                let highlightRanges = clippedHighlightRanges(for: cell.rowID, segment: lineText)
+            addTextGlyphs(
+                baseGlyphs,
+                highlightRanges: highlightRanges,
+                offsetX: paneX + codeStartX + codeInsetX,
+                baselineY: baselineY,
+                builder: &builder
+            )
+        }
 
-                for range in clippedInlineChanges(cell.inlineChanges, segment: lineText) {
-                    let startX = glyphXForCharIndex(range.start, in: baseGlyphs)
-                    let endX = glyphXForCharIndex(range.end, in: baseGlyphs)
-                    let highlightWidth = endX - startX
-                    if highlightWidth > 0 {
-                        builder.add(
-                            kind: .quad(
-                                VVQuadPrimitive(
-                                    frame: CGRect(
-                                        x: paneX + codeStartX + codeInsetX + startX,
-                                        y: y + CGFloat(lineIndex) * lineHeight,
-                                        width: highlightWidth,
-                                        height: lineHeight
-                                    ),
-                                    color: inlineHighlightColor
-                                )
-                            ),
-                            zIndex: 0
-                        )
-                    }
-                }
+    }
 
-                addTextGlyphs(
-                    baseGlyphs,
-                    highlightRanges: highlightRanges,
-                    offsetX: paneX + codeStartX + codeInsetX,
-                    baselineY: baselineY,
-                    builder: &builder
+    private func buildEmptySplitPanePlaceholder(
+        paneRect: CGRect,
+        builder: inout VVSceneBuilder
+    ) {
+        guard paneRect.width > 12, paneRect.height > 6 else { return }
+
+        let stripeColor = emptyPaneGuideColor
+        let stripeThickness: CGFloat = max(4, floor(lineHeight * 0.28))
+        let stripeSpacing: CGFloat = max(14, floor(lineHeight * 0.92))
+        let stripeTravel = max(paneRect.width + paneRect.height, 24)
+        let phaseShift = paneRect.minY.truncatingRemainder(dividingBy: stripeSpacing)
+        let startX = paneRect.minX - stripeTravel - stripeSpacing - phaseShift
+        let endX = paneRect.maxX + stripeSpacing
+
+        var x = startX
+        while x <= endX {
+            let dx = stripeTravel
+            let dy = stripeTravel
+            let invLength = 1 / max(1, hypot(dx, dy))
+            let normalX = -dy * invLength * stripeThickness * 0.5
+            let normalY = dx * invLength * stripeThickness * 0.5
+            let p0 = CGPoint(x: round(x), y: round(paneRect.maxY))
+            let p1 = CGPoint(x: round(x + dx), y: round(paneRect.maxY - dy))
+            let polygon = [
+                CGPoint(x: p0.x + normalX, y: p0.y + normalY),
+                CGPoint(x: p0.x - normalX, y: p0.y - normalY),
+                CGPoint(x: p1.x - normalX, y: p1.y - normalY),
+                CGPoint(x: p1.x + normalX, y: p1.y + normalY)
+            ]
+            let clipped = clipPolygon(polygon, to: paneRect)
+            if clipped.count >= 3 {
+                var path = VVPathBuilder()
+                path.addPolygon(clipped)
+                builder.add(
+                    kind: .path(path.build(fill: stripeColor)),
+                    zIndex: -2
                 )
+            }
+            x += stripeSpacing
+        }
+    }
+
+    private func clipPolygon(_ polygon: [CGPoint], to rect: CGRect) -> [CGPoint] {
+        guard polygon.count >= 3 else { return [] }
+
+        enum Edge {
+            case left
+            case right
+            case top
+            case bottom
+        }
+
+        func inside(_ point: CGPoint, edge: Edge) -> Bool {
+            switch edge {
+            case .left:
+                return point.x >= rect.minX
+            case .right:
+                return point.x <= rect.maxX
+            case .top:
+                return point.y >= rect.minY
+            case .bottom:
+                return point.y <= rect.maxY
             }
         }
+
+        func intersection(from start: CGPoint, to end: CGPoint, edge: Edge) -> CGPoint {
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+
+            switch edge {
+            case .left:
+                let x = rect.minX
+                let t = dx == 0 ? 0 : (x - start.x) / dx
+                return CGPoint(x: x, y: start.y + dy * t)
+            case .right:
+                let x = rect.maxX
+                let t = dx == 0 ? 0 : (x - start.x) / dx
+                return CGPoint(x: x, y: start.y + dy * t)
+            case .top:
+                let y = rect.minY
+                let t = dy == 0 ? 0 : (y - start.y) / dy
+                return CGPoint(x: start.x + dx * t, y: y)
+            case .bottom:
+                let y = rect.maxY
+                let t = dy == 0 ? 0 : (y - start.y) / dy
+                return CGPoint(x: start.x + dx * t, y: y)
+            }
+        }
+
+        var output = polygon
+        for edge in [Edge.left, .right, .top, .bottom] {
+            guard !output.isEmpty else { break }
+            let input = output
+            output = []
+            var previous = input[input.count - 1]
+
+            for current in input {
+                let currentInside = inside(current, edge: edge)
+                let previousInside = inside(previous, edge: edge)
+
+                if currentInside {
+                    if !previousInside {
+                        output.append(intersection(from: previous, to: current, edge: edge))
+                    }
+                    output.append(current)
+                } else if previousInside {
+                    output.append(intersection(from: previous, to: current, edge: edge))
+                }
+
+                previous = current
+            }
+        }
+
+        return output
     }
 
     private func addTextGlyphs(
@@ -1727,6 +2008,17 @@ private func brightness(of color: SIMD4<Float>) -> Double {
 
 private func withAlpha(_ color: SIMD4<Float>, _ alpha: Float) -> SIMD4<Float> {
     SIMD4(color.x, color.y, color.z, alpha)
+}
+
+private func blended(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ t: Float) -> SIMD4<Float> {
+    let clampedT = max(0, min(1, t))
+    let inverse = 1 - clampedT
+    return SIMD4(
+        a.x * inverse + b.x * clampedT,
+        a.y * inverse + b.y * clampedT,
+        a.z * inverse + b.z * clampedT,
+        a.w * inverse + b.w * clampedT
+    )
 }
 
 private func toVVFontVariant(_ variant: MDFontVariant) -> VVFontVariant {

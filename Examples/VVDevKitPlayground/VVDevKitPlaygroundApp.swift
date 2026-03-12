@@ -1120,6 +1120,7 @@ struct ChatPlaygroundView: View {
     @State private var toolGroupsByID: [String: PlaygroundToolGroup] = [:]
     @State private var nextScriptedTurn = 0
     @State private var chatState = VVChatTimelineState()
+    @State private var memorySamples: [String] = []
     private let maxTimelineEntries = 300
     private let pruneTargetEntries = 200
     var body: some View {
@@ -1186,6 +1187,39 @@ struct ChatPlaygroundView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                 }
+
+                Button("Copy Memory Log (\(memorySamples.count))") {
+                    let header = "turn  rss_mb  malloc_mb  entries  rendered  prepared  scenes  sel  parses  layouts  scenes_built  draftReuse  draftRebuild"
+                    let log = ([header] + memorySamples).joined(separator: "\n")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(log, forType: .string)
+                }
+
+                Button("Clear Memory Log") {
+                    memorySamples.removeAll()
+                }
+
+                Button("Copy heap profile") {
+                    let text = runMemoryTool("/usr/bin/heap", args: ["\(ProcessInfo.processInfo.processIdentifier)", "--showSizes"])
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+
+                Button("Copy vmmap summary") {
+                    let text = runMemoryTool("/usr/bin/vmmap", args: ["--summary", "\(ProcessInfo.processInfo.processIdentifier)"])
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+
+                Button("Copy footprint") {
+                    let text = runMemoryTool("/usr/bin/footprint", args: ["\(ProcessInfo.processInfo.processIdentifier)"])
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+
+                Text("PID: \(ProcessInfo.processInfo.processIdentifier)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
 
                 Spacer()
             }
@@ -1785,15 +1819,17 @@ struct ChatPlaygroundView: View {
 
     private func summaryFileIconURL(for path: String) -> String? {
         let ext = URL(fileURLWithPath: path).pathExtension
-        let contentType = UTType(filenameExtension: ext.isEmpty ? "txt" : ext) ?? .plainText
-        let icon = NSWorkspace.shared.icon(for: contentType)
-        guard let data = icon.tiffRepresentation else { return nil }
+        let resolvedExt = ext.isEmpty ? "txt" : ext
         return PlaygroundHeaderIconStore.urlString(
-            for: .customImage(data),
-            fallbackAgentId: "summary-file-\(path.hashValue)",
+            fallbackAgentId: "summary-file-ext-\(resolvedExt)",
             tintColor: nil,
             targetPointSize: 16
-        )
+        ) {
+            let contentType = UTType(filenameExtension: resolvedExt) ?? .plainText
+            let icon = NSWorkspace.shared.icon(for: contentType)
+            guard let data = icon.tiffRepresentation else { return nil }
+            return .customImage(data)
+        }
     }
 
     private func toolHeaderSymbol(for rawKind: String?) -> String {
@@ -1986,8 +2022,54 @@ struct ChatPlaygroundView: View {
                     markUnread: true
                 )
             }
-            pruneTimelineIfNeeded()
+            memorySamples.append(memorySampleLine(turn: sequence + 1))
         }
+    }
+
+    private func runMemoryTool(_ path: String, args: [String]) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return "Failed to run \(path): \(error.localizedDescription)\nPID: \(ProcessInfo.processInfo.processIdentifier)\nRun manually: \(path) \(args.joined(separator: " "))"
+        }
+        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+        var result = String(data: outData, encoding: .utf8) ?? ""
+        if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
+            result += "\n--- stderr ---\n" + errStr
+        }
+        if result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result = "No output. PID: \(ProcessInfo.processInfo.processIdentifier)\nRun manually: \(path) \(args.joined(separator: " "))"
+        }
+        return result
+    }
+
+    private func memorySampleLine(turn: Int) -> String {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout.size(ofValue: info) / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer -> kern_return_t in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), rebound, &count)
+            }
+        }
+        let rss = result == KERN_SUCCESS
+            ? String(format: "%.1f", Double(info.phys_footprint) / 1_048_576.0)
+            : "?"
+        var zone = malloc_statistics_t()
+        malloc_zone_statistics(nil, &zone)
+        let malloc = String(format: "%.1f", Double(zone.size_in_use) / 1_048_576.0)
+
+        let snap = controller.debugSnapshot()
+        let entries = controller.entries.count
+        return "\(turn)  \(rss)  \(malloc)  \(entries)  \(snap.renderedMessageCacheCount)  \(snap.preparedMarkdownCacheCount)  \(snap.sceneWindowCache.count)  \(snap.selectionWindowCache.count)  \(snap.markdownParseCount)  \(snap.markdownLayoutCount)  \(snap.markdownSceneBuildCount)  \(snap.incrementalDraftReuseCount)  \(snap.incrementalDraftFullRebuildCount)"
     }
 
     private func memorySnapshotText() -> String {
@@ -2493,6 +2575,23 @@ private enum PlaygroundHeaderIconStore {
         try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    static func urlString(
+        fallbackAgentId: String,
+        tintColor: NSColor?,
+        targetPointSize: CGFloat,
+        iconTypeProvider: () -> PlaygroundHeaderIconType?
+    ) -> String? {
+        let cacheKey = "\(fallbackAgentId)-\(targetPointSize)-\(tintColor?.description ?? "default")"
+        lock.lock()
+        if let cached = cache[cacheKey] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        guard let iconType = iconTypeProvider() else { return nil }
+        return urlString(for: iconType, fallbackAgentId: fallbackAgentId, tintColor: tintColor, targetPointSize: targetPointSize)
+    }
 
     static func urlString(
         for iconType: PlaygroundHeaderIconType,

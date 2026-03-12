@@ -38,12 +38,48 @@ enum RenderingStressFixtures {
             lines.append("+++ b/Sources/File\(fileIndex).swift")
             lines.append("@@ -1,\(linesPerHunk) +1,\(linesPerHunk) @@")
             for lineIndex in 0..<linesPerHunk {
-                lines.append("-let removed\(fileIndex)_\(lineIndex) = \(fileIndex + lineIndex)")
-                lines.append("+let added\(fileIndex)_\(lineIndex) = \"line \(fileIndex)-\(lineIndex) with renderer pressure\"")
-                lines.append(" context\(fileIndex)_\(lineIndex) = added\(fileIndex)_\(lineIndex)")
+                lines.append(contentsOf: stressDiffTriplet(fileIndex: fileIndex, lineIndex: lineIndex))
             }
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private static func stressDiffTriplet(fileIndex: Int, lineIndex: Int) -> [String] {
+        let symbol = "slot_\(fileIndex)_\(lineIndex)"
+        let pattern = (fileIndex * 29 + lineIndex) % 5
+
+        switch pattern {
+        case 0:
+            return [
+                "-let \(symbol) = LegacyRenderer.render(id: \(fileIndex), line: \(lineIndex), isEnabled: false)",
+                "+let \(symbol) = DiffRenderer.render(id: \(fileIndex), line: \(lineIndex), theme: .dark, isEnabled: true) ?? \"fallback-\(fileIndex)-\(lineIndex)\"",
+                " metrics[\(lineIndex)] = \(symbol).count"
+            ]
+        case 1:
+            return [
+                "-let \(symbol) = cache[\"item-\(lineIndex)\"] as! [String]",
+                "+let \(symbol) = (cache[\"item-\(lineIndex)\"] as? [String]) ?? fallbackItems(prefix: \"f\(fileIndex)\")",
+                " totals[\(lineIndex)] = \(symbol).joined(separator: \":\").utf8.count"
+            ]
+        case 2:
+            return [
+                "-let \(symbol) = URL(string: rawEndpoints[\(lineIndex % 4)])!.absoluteString",
+                "+let \(symbol) = URL(string: rawEndpoints[\(lineIndex % 4)])?.standardized.absoluteString ?? \"/fallback/\(fileIndex)/\(lineIndex)\"",
+                " debugTrail.append(\(symbol))"
+            ]
+        case 3:
+            return [
+                "-let \(symbol) = rows.map { $0.name }.joined(separator: \",\")",
+                "+let \(symbol) = rows.lazy.map(\\.name).filter { !$0.isEmpty }.joined(separator: \", \")",
+                " renderWidth += \(symbol).count"
+            ]
+        default:
+            return [
+                "-let \(symbol) = callbacks[\(lineIndex)]?(state) ?? .idle",
+                "+let \(symbol) = pipeline.run(stage: \(lineIndex % 6), state: state, retries: \(lineIndex % 3))",
+                " timeline.append(\"\(lineIndex):\\(\(symbol))\")"
+            ]
+        }
     }
 }

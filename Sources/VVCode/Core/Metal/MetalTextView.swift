@@ -1452,11 +1452,15 @@ public final class MetalTextView: MTKView {
             combinedTransform = .identity
         }
 
-        let transformedVertices = path.vertices.map {
-            VVPathVertex(position: transformed(point: $0.position, by: combinedTransform), stPosition: $0.stPosition)
+        let vertices = path.vertices.map { vertex in
+            let position = transformed(point: vertex.position, by: combinedTransform)
+            return PathRenderVertex(
+                position: SIMD2<Float>(Float(position.x), Float(position.y)),
+                stPosition: SIMD2<Float>(Float(vertex.stPosition.x), Float(vertex.stPosition.y))
+            )
         }
 
-        guard let buffer = renderer.makeBuffer(for: transformedVertices) else { return }
+        guard let buffer = renderer.makeBuffer(for: vertices) else { return }
         if let fill = path.fill, path.fillVertexCount > 0 {
             renderer.renderPath(encoder: encoder, vertices: buffer, vertexStart: 0, vertexCount: path.fillVertexCount, color: fill)
         }

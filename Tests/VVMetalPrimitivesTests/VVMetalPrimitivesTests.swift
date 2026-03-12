@@ -318,6 +318,7 @@ final class VVPathBuilderTests: XCTestCase {
         XCTAssertFalse(path.vertices.isEmpty)
         XCTAssertNotNil(path.stroke)
         XCTAssertNil(path.fill)
+        XCTAssertEqual(path.strokeVertexCount, 24)
     }
 
     func testFillAndStroke() {
@@ -385,6 +386,44 @@ final class VVPathBuilderTests: XCTestCase {
         let transform = VVTransform2D.identity.scaled(by: 2)
         let path = builder.build(fill: SIMD4(1, 0, 0, 1), transform: transform)
         XCTAssertEqual(path.transform.m00, 2)
+    }
+
+    func testOpenStrokePathDoesNotImplicitlyClose() {
+        var builder = VVPathBuilder()
+        builder.move(to: CGPoint(x: 0, y: 0))
+        builder.line(to: CGPoint(x: 10, y: 0))
+        builder.line(to: CGPoint(x: 10, y: 10))
+
+        let path = builder.build(stroke: VVStrokeStyle(color: SIMD4(1, 1, 1, 1), width: 2))
+
+        XCTAssertEqual(path.strokeVertexCount, 12)
+    }
+
+    func testMultipleSubpathsBuildIndependently() {
+        var builder = VVPathBuilder()
+        builder.addRect(CGRect(x: 0, y: 0, width: 10, height: 10))
+        builder.addRect(CGRect(x: 20, y: 0, width: 10, height: 10))
+
+        let path = builder.build(fill: SIMD4(1, 0, 0, 1))
+
+        XCTAssertEqual(path.fillVertexCount, 24)
+        XCTAssertEqual(path.bounds.maxX, 30, accuracy: 0.001)
+    }
+
+    func testPolygonFillBuildsSlantedQuad() {
+        var builder = VVPathBuilder()
+        builder.addPolygon([
+            CGPoint(x: 0, y: 12),
+            CGPoint(x: 2, y: 10),
+            CGPoint(x: 14, y: 22),
+            CGPoint(x: 12, y: 24)
+        ])
+
+        let path = builder.build(fill: SIMD4(1, 1, 1, 1))
+
+        XCTAssertEqual(path.fillVertexCount, 12)
+        XCTAssertEqual(path.bounds.minX, 0, accuracy: 0.001)
+        XCTAssertEqual(path.bounds.maxY, 24, accuracy: 0.001)
     }
 }
 

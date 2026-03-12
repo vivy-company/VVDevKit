@@ -640,16 +640,90 @@ private enum DiffSamples {
             lines.append("--- a/\(path)")
             lines.append("+++ b/\(path)")
             lines.append("@@ -1,\(linesPerHunk) +1,\(linesPerHunk) @@")
-
-            for lineIndex in 0..<linesPerHunk {
-                lines.append("-private let removed\(fileIndex)_\(lineIndex) = LegacyRenderer.render(id: \(fileIndex), line: \(lineIndex), isEnabled: false) // legacy")
-                lines.append("+let added\(fileIndex)_\(lineIndex): String? = DiffRenderer.render(id: \(fileIndex), line: \(lineIndex), theme: .dark, isEnabled: true) ?? \"fallback-\\(\\(lineIndex))\"")
-                lines.append(" if let context\(fileIndex)_\(lineIndex) = added\(fileIndex)_\(lineIndex), context\(fileIndex)_\(lineIndex).hasPrefix(\"line\") { metrics[\(lineIndex)] = context\(fileIndex)_\(lineIndex).count }")
+            var emitted = 0
+            while emitted < linesPerHunk {
+                let chunk = heavySwiftStressSeedBodies[(fileIndex + emitted) % heavySwiftStressSeedBodies.count]
+                for line in chunk {
+                    guard emitted < linesPerHunk else { break }
+                    lines.append(
+                        line
+                            .replacingOccurrences(of: "__FILE__", with: "\(fileIndex)")
+                            .replacingOccurrences(of: "__LINE__", with: "\(emitted)")
+                            .replacingOccurrences(of: "__NEXT__", with: "\(emitted + 1)")
+                    )
+                    emitted += 1
+                }
             }
         }
 
         return lines.joined(separator: "\n")
     }
+
+    fileprivate static let heavySwiftStressSeedBodies: [[String]] = [
+        [
+            " import Foundation",
+            "+import os.log",
+            "-func greet(name: String) -> String {",
+            "-    return \"Hello, \" + name + \"!\"",
+            "+struct GreetingFormatter__FILE__ {",
+            "+    func render(name: String, style: Greeting.Style) -> String {",
+            "+        style == .formal ? \"Good day, \\(name).\" : \"Hey \\(name)!\"",
+            "+    }",
+            " }",
+        ],
+        [
+            " struct AppConfig__FILE__ {",
+            "-    static let apiBaseURL = URL(string: \"https://api.old.example.com\")!",
+            "-    static let timeout: TimeInterval = 15",
+            "+    static let apiBaseURL = URL(string: \"https://api.service.example.com/v2\")!",
+            "+    static let timeout: TimeInterval = 30",
+            "+    static let retryBudget = RetryBudget(maxAttempts: 3, backoff: .exponential(base: 0.25))",
+            " }",
+            " let currentTimeout__LINE__ = AppConfig__FILE__.timeout",
+        ],
+        [
+            " enum Route__FILE__ {",
+            "-    case profile(id: String)",
+            "-    case settings",
+            "+    case profile(id: String, tab: ProfileTab)",
+            "+    case settings(section: SettingsSection = .general)",
+            "+    case billing(invoiceID: String)",
+            " }",
+            " let route__LINE__ = Route__FILE__.settings(section: .notifications)",
+        ],
+        [
+            " enum Token: Equatable {",
+            "-    case number(Int)",
+            "+    case number(Double)",
+            "+    case string(String)",
+            "+    case keyword(String)",
+            " }",
+            "-func tokenize(_ input: String) -> [Token] {",
+            "+struct Tokenizer__FILE__ {",
+            "+    mutating func tokenize() -> [Token] {",
+        ],
+        [
+            " final class ParserCache__FILE__ {",
+            "-    private var storage: [String: [Token]] = [:]",
+            "+    private var storage: LRUCache<String, [Token]>(capacity: 256)",
+            "+    private var accessLog: RingBuffer<String>(capacity: 64)",
+            " }",
+            "-func cachedTokens(for source: String) -> [Token]? { storage[source] }",
+            "+func cachedTokens(for source: String) -> [Token]? {",
+            "+    accessLog.append(\"lookup-__FILE__-__LINE__\")",
+            "+    return storage[source]",
+        ],
+        [
+            " @MainActor",
+            "-func renderPreview() {",
+            "-    renderer.renderSynchronously()",
+            "+func renderPreview() async {",
+            "+    let snapshot = await renderer.snapshot(for: .init(id: \"preview-__FILE__-__LINE__\"))",
+            "+    await previewStore.apply(snapshot)",
+            " }",
+            " let previewID__NEXT__ = \"preview-__FILE__\"",
+        ],
+    ]
 }
 
 private enum DiffStressFixtures {

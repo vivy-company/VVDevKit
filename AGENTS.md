@@ -44,6 +44,7 @@ swift build --product TreeSitterSwift
 - `Sources/VVLSP`: LSP clients/transports
 - `Sources/Grammars`: vendored/generated Tree-sitter grammars
 - `Docs/Architecture.md`: boundary contract and extraction plan
+- `Docs/VVChatTimelinePerformance.md`: memory, CPU, animation profiling guide
 
 ## Architecture Rules
 
