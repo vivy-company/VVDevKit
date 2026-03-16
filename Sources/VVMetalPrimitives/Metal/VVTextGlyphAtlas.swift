@@ -383,19 +383,6 @@ public final class VVTextGlyphAtlas {
             return glyphUnsafe(for: glyphs[0], variant: variant, fontSize: fontSize, baseFont: resolvedBase)
         }
 
-        // Try script-specific fallback first
-        if let scriptFont = scriptSpecificFallbackFont(for: character, baseFont: resolvedBase, fontSize: fontSize) {
-            var scriptGlyphs = [CGGlyph](repeating: 0, count: unichars.count)
-            if CTFontGetGlyphsForCharacters(scriptFont, &unichars, &scriptGlyphs, unichars.count) {
-                let fontName = CTFontCopyPostScriptName(scriptFont) as String
-                let fontKey = FontKey(
-                    name: fontName,
-                    size: Int(CTFontGetSize(scriptFont)),
-                    descriptorData: hiddenFontDescriptorData(for: scriptFont, fontName: fontName, provided: nil)
-                )
-                return glyphUnsafe(for: scriptGlyphs[0], font: scriptFont, variant: variant, fontKey: fontKey, fontSize: fontSize)
-            }
-        }
 
         let fallback = CTFontCreateForString(font, text as CFString, CFRangeMake(0, unichars.count))
         var fallbackGlyphs = [CGGlyph](repeating: 0, count: unichars.count)
@@ -433,63 +420,12 @@ public final class VVTextGlyphAtlas {
         return glyphUnsafe(for: fallbackGlyphs[0], font: fallback, variant: variant, fontKey: fontKey, fontSize: fontSize)
     }
 
-    private func scriptSpecificFallbackFont(for character: Character, baseFont: VVFont, fontSize: CGFloat) -> CTFont? {
-        guard let firstScalar = character.unicodeScalars.first else { return nil }
-        let value = firstScalar.value
-
-        let fallbackNames: [String]
-        switch value {
-        case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: // Korean
-            fallbackNames = [
-                "AppleSDGothicNeo-Regular",
-                "Apple SD Gothic Neo",
-                "AppleGothic",
-                "Apple Gothic",
-                "NanumGothic",
-                "AppleMyungjo",
-                "Helvetica"
-            ]
-        case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF: // Arabic
-            fallbackNames = [
-                "GeezaPro",
-                "Geeza Pro",
-                "GeezaPro-Regular",
-                "Baghdad",
-                "KufiStandardGK",
-                "AlBayan",
-                "Damascus",
-                "Arial Unicode MS"
-            ]
-        case 0x0900...0x097F: // Devanagari (Hindi)
-            fallbackNames = ["KohinoorDevanagari-Regular", "Kohinoor Devanagari", "DevanagariMT", "Devanagari MT"]
-        default:
-            return nil
-        }
-
-        for name in fallbackNames {
-            #if canImport(AppKit)
-            if let font = NSFont(name: name, size: fontSize) {
-                print("✅ Atlas: Using font '\(name)' for character '\(character)'")
-                return font as CTFont
-            } else {
-                print("❌ Atlas: Font '\(name)' not available")
-            }
-            #else
-            if let font = UIFont(name: name, size: fontSize) {
-                return font as CTFont
-            }
-            #endif
-        }
-
-        print("⚠️ Atlas: No script-specific font found for character '\(character)' (U+\(String(format: "%04X", value)))")
-        return nil
-    }
 
     private func shouldRejectChineseFallback(fontName: String, character: Character) -> Bool {
         guard let firstScalar = character.unicodeScalars.first else { return false }
         let value = firstScalar.value
 
-        // Reject Chinese fonts for Korean, Arabic, and Hindi characters
+        // Identify non-CJK scripts that shouldn't use Chinese fonts
         let isNonCJKScript = (0x1100...0x11FF ~= value) || // Hangul Jamo
                             (0x3130...0x318F ~= value) || // Hangul Compatibility Jamo
                             (0xAC00...0xD7AF ~= value) || // Hangul Syllables
@@ -500,12 +436,28 @@ public final class VVTextGlyphAtlas {
                             (0xFB50...0xFDFF ~= value) || // Arabic Presentation Forms-A
                             (0xFE70...0xFEFF ~= value)    // Arabic Presentation Forms-B
 
-        let isChineseFont = fontName.lowercased().contains("chinese") ||
-                          fontName.lowercased().contains("simplified") ||
-                          fontName.lowercased().contains("traditional") ||
-                          fontName.hasPrefix("PingFang")
+        // Detect Chinese/CJK fonts more comprehensively
+        let lowerName = fontName.lowercased()
+        let isChineseFont = lowerName.contains("chinese") ||
+                          lowerName.contains("simplified") ||
+                          lowerName.contains("traditional") ||
+                          lowerName.contains("pingfang") ||
+                          lowerName.contains("simsun") ||
+                          lowerName.contains("simhei") ||
+                          lowerName.contains("stfangsong") ||
+                          lowerName.contains("stheiti") ||
+                          lowerName.contains("yuanti") ||
+                          fontName.hasPrefix("PingFang") ||
+                          fontName.hasPrefix("STFang") ||
+                          fontName.hasPrefix("STHei") ||
+                          fontName.hasPrefix("STSong") ||
+                          fontName.hasPrefix("Yu") && fontName.contains("Chinese")
 
-        return isNonCJKScript && isChineseFont
+        let shouldReject = isNonCJKScript && isChineseFont
+        if shouldReject {
+            print("🚫 Rejecting Chinese font '\(fontName)' for non-CJK character '\(character)' (U+\(String(format: "%04X", value)))")
+        }
+        return shouldReject
     }
 
     private func hiddenFontDescriptorData(for font: CTFont, fontName: String, provided: Data?) -> Data? {

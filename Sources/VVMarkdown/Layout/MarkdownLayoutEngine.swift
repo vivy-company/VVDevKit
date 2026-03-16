@@ -3446,9 +3446,7 @@ public final class MarkdownLayoutEngine {
             let chunk = String(ch)
             let utf16Count = chunk.utf16.count
 
-            // Try script-specific font selection first
-            let fallback = scriptSpecificFont(for: chunk, baseFont: baseFont) ??
-                           CTFontCreateForString(baseFont, chunk as CFString, CFRangeMake(0, utf16Count))
+            let fallback = CTFontCreateForString(baseFont, chunk as CFString, CFRangeMake(0, utf16Count))
             let fallbackName = CTFontCopyPostScriptName(fallback) as String
 
             if buffer.isEmpty {
@@ -3484,27 +3482,10 @@ public final class MarkdownLayoutEngine {
 
         switch value {
         case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: // Korean
-            fallbackFontNames = [
-                "AppleSDGothicNeo-Regular",
-                "Apple SD Gothic Neo",
-                "AppleGothic",
-                "Apple Gothic",
-                "NanumGothic",
-                "AppleMyungjo",
-                "Helvetica"
-            ]
+            fallbackFontNames = ["AppleSDGothicNeo-Regular", "Apple SD Gothic Neo", "NanumGothic", "Helvetica"]
 
         case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF: // Arabic
-            fallbackFontNames = [
-                "GeezaPro",
-                "Geeza Pro",
-                "GeezaPro-Regular",
-                "Baghdad",
-                "KufiStandardGK",
-                "AlBayan",
-                "Damascus",
-                "Arial Unicode MS"
-            ]
+            fallbackFontNames = ["GeezaPro", "Geeza Pro", "Baghdad", "Arial Unicode MS"]
 
         case 0x0900...0x097F: // Devanagari (Hindi)
             fallbackFontNames = ["KohinoorDevanagari-Regular", "Kohinoor Devanagari", "DevanagariMT", "Devanagari MT"]
