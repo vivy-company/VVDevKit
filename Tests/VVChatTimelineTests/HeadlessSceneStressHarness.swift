@@ -359,7 +359,7 @@ final class HeadlessSceneStressHarness {
     private func cachedGlyph(for glyph: VVTextGlyph) -> VVTextCachedGlyph? {
         let cgGlyph = CGGlyph(glyph.glyphID)
         if let fontName = glyph.fontName {
-            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, fontDescriptorData: glyph.fontDescriptorData, variant: glyph.fontVariant)
+            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: glyph.fontVariant)
         }
         return renderer.glyphAtlas.glyph(for: cgGlyph, variant: glyph.fontVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }

@@ -2766,7 +2766,6 @@ public final class VVChatMessageRenderer {
                         fontVariant: glyph.fontVariant,
                         fontSize: glyph.fontSize,
                         fontName: glyph.fontName,
-                        fontDescriptorData: glyph.fontDescriptorData,
                         stringIndex: glyph.stringIndex
                     )
                 }
@@ -2804,7 +2803,6 @@ public final class VVChatMessageRenderer {
                         fontVariant: glyph.fontVariant,
                         fontSize: glyph.fontSize,
                         fontName: glyph.fontName,
-                        fontDescriptorData: glyph.fontDescriptorData,
                         stringIndex: glyph.stringIndex
                     )
                     remaining -= 1
@@ -3194,7 +3192,6 @@ public final class VVChatMessageRenderer {
                         fontVariant: g.fontVariant,
                         fontSize: g.fontSize,
                         fontName: g.fontName,
-                        fontDescriptorData: g.fontDescriptorData,
                         stringIndex: g.stringIndex
                     )
                 }

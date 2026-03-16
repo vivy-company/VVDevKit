@@ -76,7 +76,6 @@ public final class MarkdownScenePrimitiveRenderer {
             hasher.combine(glyph.size.width.bitPattern)
             hasher.combine(glyph.size.height.bitPattern)
             hasher.combine(glyph.fontName)
-            hasher.combine(glyph.fontDescriptorData)
         }
 
         return hasher.finalize()
@@ -722,7 +721,7 @@ public final class MarkdownScenePrimitiveRenderer {
         }
         let cgGlyph = CGGlyph(glyph.glyphID)
         if let fontName = glyph.fontName {
-            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, fontDescriptorData: glyph.fontDescriptorData, variant: layoutVariant)
+            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
         }
         return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }

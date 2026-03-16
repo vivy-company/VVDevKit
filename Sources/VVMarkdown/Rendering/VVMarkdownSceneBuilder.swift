@@ -167,7 +167,6 @@ struct VVMarkdownSceneBuilder {
                     fontVariant: resolved.fontVariant,
                     fontSize: resolved.fontSize,
                     fontName: resolved.fontName,
-                    fontDescriptorData: resolved.fontDescriptorData,
                     stringIndex: resolved.stringIndex
                 )
             }
@@ -989,7 +988,6 @@ struct VVMarkdownSceneBuilder {
             fontVariant: toVVFontVariant(glyph.fontVariant),
             fontSize: glyph.fontSize,
             fontName: glyph.fontName,
-            fontDescriptorData: glyph.fontDescriptorData,
             stringIndex: glyph.stringIndex
         )
     }

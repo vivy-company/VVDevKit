@@ -2,12 +2,6 @@ import Foundation
 import CoreGraphics
 import CoreText
 
-#if canImport(AppKit)
-import AppKit
-#else
-import UIKit
-#endif
-
 // MARK: - Font Spec
 
 public struct VVFontSpec: Sendable, Hashable {
@@ -190,7 +184,6 @@ public struct VText: VVView {
                 let runAttributes = CTRunGetAttributes(run) as NSDictionary
                 let runFont = runAttributes[kCTFontAttributeName] as! CTFont
                 let storedFontName = storedFontName(for: runFont, requestedFont: ctFont)
-                let storedFontDescriptorData = archivedFontDescriptorData(for: runFont)
                 let runFontSize = CTFontGetSize(runFont)
 
                 var runGlyphs = [CGGlyph](repeating: 0, count: glyphCount)
@@ -219,7 +212,6 @@ public struct VText: VVView {
                         fontVariant: font.variant,
                         fontSize: runFontSize,
                         fontName: storedFontName,
-                        fontDescriptorData: storedFontDescriptorData,
                         stringIndex: Int(stringIndices[i])
                     )
                     allGlyphs.append(glyph)
@@ -285,33 +277,17 @@ public struct VText: VVView {
     private func storedFontName(for resolvedFont: CTFont, requestedFont: CTFont) -> String? {
         let resolvedName = CTFontCopyPostScriptName(resolvedFont) as String
         let requestedName = CTFontCopyPostScriptName(requestedFont) as String
-        let usesRequestedFont =
-            resolvedName == requestedName &&
-            abs(CTFontGetSize(resolvedFont) - CTFontGetSize(requestedFont)) < 0.5
-
-        // Always store font names for complex scripts to prevent fallback font mismatches
-        if isComplexScriptFont(resolvedName) {
-            return resolvedName
-        }
-
-        if usesRequestedFont && isSystemUIFontName(resolvedName) {
+        if resolvedName == requestedName && isSystemUIFontName(resolvedName) {
             return nil
         }
+        // Hidden system fonts (dot-prefixed) can't be recreated by PostScript name —
+        // CoreText returns a wrong font. Store family+style instead, which resolves
+        // to the exact same font variant via kCTFontFamilyNameAttribute/StyleNameAttribute.
+        if resolvedName.hasPrefix(".") {
+            let family = CTFontCopyFamilyName(resolvedFont) as String
+            let style = CTFontCopyAttribute(resolvedFont, kCTFontStyleNameAttribute) as? String ?? "Regular"
+            return "\(family)|\(style)"
+        }
         return resolvedName
-    }
-
-    private func isComplexScriptFont(_ fontName: String) -> Bool {
-        let lowerName = fontName.lowercased()
-        return lowerName.contains("arabic") || lowerName.contains("geeza") ||
-               lowerName.contains("devanagari") || lowerName.contains("kohinoor") ||
-               lowerName.contains("gothic") || lowerName.contains("hangul") ||
-               lowerName.contains("korean") || lowerName.contains("hindi") ||
-               !lowerName.contains("chinese") && !lowerName.contains("simplified") &&
-               !lowerName.contains("traditional") && !lowerName.hasPrefix("pingfang")
-    }
-
-    private func archivedFontDescriptorData(for font: CTFont) -> Data? {
-        let descriptor = (font as VVFont).fontDescriptor
-        return try? NSKeyedArchiver.archivedData(withRootObject: descriptor, requiringSecureCoding: true)
     }
 }

@@ -60,7 +60,6 @@ private struct GlyphKey: Hashable {
 private struct FontKey: Hashable {
     let name: String
     let size: Int  // Scaled font size for cache key
-    let descriptorData: Data?
 }
 
 private struct FontGlyphKey: Hashable {
@@ -93,8 +92,6 @@ public final class VVTextGlyphAtlas {
     private var fontGlyphCache: [FontGlyphKey: VVTextCachedGlyph] = [:]
     private var variantFontCache: [VariantFontKey: CTFont] = [:]
     private var fontCache: [FontKey: CTFont] = [:]
-    private var archivedDescriptorCache: [ObjectIdentifier: Data] = [:]
-
     private var baseFont: VVFont
     private var scaleFactor: CGFloat = 2.0
 
@@ -257,45 +254,38 @@ public final class VVTextGlyphAtlas {
         }
     }
 
-    private func fontFor(name: String, size: CGFloat, descriptorData: Data? = nil) -> CTFont {
+    private func fontFor(name: String, size: CGFloat) -> CTFont {
         let intSize = Int(size * scaleFactor)
         let resolvedName = normalizedFontName(name)
-        let key = FontKey(name: resolvedName, size: intSize, descriptorData: descriptorData)
+        let key = FontKey(name: resolvedName, size: intSize)
 
         if let cached = fontCache[key] {
             return cached
         }
 
-        let font: CTFont
-        if let descriptorData,
-           let archivedFont = archivedFont(from: descriptorData, size: size) {
-            font = archivedFont
-        } else if resolvedName.hasPrefix(".") {
-            let descriptor = CTFontDescriptorCreateWithAttributes([
-                kCTFontNameAttribute: resolvedName as CFString,
-                kCTFontSizeAttribute: size as CFNumber
-            ] as CFDictionary)
-            font = CTFontCreateWithFontDescriptor(descriptor, size, nil)
-        } else {
-            font = CTFontCreateWithName(resolvedName as CFString, size, nil)
-        }
+        let font = resolveFont(name: resolvedName, size: size)
         fontCache[key] = font
         return font
     }
 
-    private func archivedFont(from descriptorData: Data, size: CGFloat) -> CTFont? {
-        #if canImport(AppKit)
-        guard let descriptor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSFontDescriptor.self, from: descriptorData),
-              let font = NSFont(descriptor: descriptor, size: size) else {
-            return nil
+    /// Resolve a CTFont from a stored name. The name is either:
+    /// - A PostScript name (e.g. "Menlo-Regular") for public fonts
+    /// - A "family|style" pair (e.g. ".PingFang UI SC|RegularText") for hidden system
+    ///   fonts whose PostScript names can't be used with CTFontCreateWithName.
+    private func resolveFont(name: String, size: CGFloat) -> CTFont {
+        // Check for family|style encoding (used for hidden system fonts)
+        if let pipeIndex = name.firstIndex(of: "|") {
+            let family = String(name[name.startIndex..<pipeIndex])
+            let style = String(name[name.index(after: pipeIndex)...])
+            let descriptor = CTFontDescriptorCreateWithAttributes([
+                kCTFontFamilyNameAttribute: family as CFString,
+                kCTFontStyleNameAttribute: style as CFString
+            ] as CFDictionary)
+            return CTFontCreateWithFontDescriptor(descriptor, size, nil)
         }
-        return font as CTFont
-        #else
-        guard let descriptor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIFontDescriptor.self, from: descriptorData) else {
-            return nil
-        }
-        return UIFont(descriptor: descriptor, size: size) as CTFont
-        #endif
+
+        // PostScript name — works for all public fonts
+        return CTFontCreateWithName(name as CFString, size, nil)
     }
 
     // MARK: - Public API
@@ -334,15 +324,13 @@ public final class VVTextGlyphAtlas {
     public func glyph(
         for glyphID: CGGlyph,
         font: CTFont,
-        fontDescriptorData: Data? = nil,
         variant: VVFontVariant = .regular
     ) -> VVTextCachedGlyph? {
         let fontName = CTFontCopyPostScriptName(font) as String
-        let resolvedDescriptorData = hiddenFontDescriptorData(for: font, fontName: fontName, provided: fontDescriptorData)
         let intSize = Int(CTFontGetSize(font) * scaleFactor)
         let key = FontGlyphKey(
             glyphID: glyphID,
-            fontKey: FontKey(name: fontName, size: intSize, descriptorData: resolvedDescriptorData)
+            fontKey: FontKey(name: fontName, size: intSize)
         )
 
         if let cached = fontGlyphCache[key] {
@@ -359,9 +347,9 @@ public final class VVTextGlyphAtlas {
         }
     }
 
-    public func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, fontDescriptorData: Data? = nil, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
-        let font = fontFor(name: fontName, size: fontSize, descriptorData: fontDescriptorData)
-        return glyph(for: glyphID, font: font, fontDescriptorData: fontDescriptorData, variant: variant)
+    public func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
+        let font = fontFor(name: fontName, size: fontSize)
+        return glyph(for: glyphID, font: font, variant: variant)
     }
 
     /// Get glyph for a character
@@ -383,7 +371,6 @@ public final class VVTextGlyphAtlas {
             return glyphUnsafe(for: glyphs[0], variant: variant, fontSize: fontSize, baseFont: resolvedBase)
         }
 
-
         let fallback = CTFontCreateForString(font, text as CFString, CFRangeMake(0, unichars.count))
         var fallbackGlyphs = [CGGlyph](repeating: 0, count: unichars.count)
         guard CTFontGetGlyphsForCharacters(fallback, &unichars, &fallbackGlyphs, unichars.count) else {
@@ -391,99 +378,11 @@ public final class VVTextGlyphAtlas {
         }
 
         let fontName = CTFontCopyPostScriptName(fallback) as String
-
-        // Reject Chinese fonts for non-CJK scripts
-        if shouldRejectChineseFallback(fontName: fontName, character: character) {
-            // Try system font as final fallback
-            #if canImport(AppKit)
-            let systemFallback = NSFont.systemFont(ofSize: fontSize) as CTFont
-            #else
-            let systemFallback = UIFont.systemFont(ofSize: fontSize) as CTFont
-            #endif
-            var systemGlyphs = [CGGlyph](repeating: 0, count: unichars.count)
-            if CTFontGetGlyphsForCharacters(systemFallback, &unichars, &systemGlyphs, unichars.count) {
-                let systemFontName = CTFontCopyPostScriptName(systemFallback) as String
-                let systemFontKey = FontKey(
-                    name: systemFontName,
-                    size: Int(CTFontGetSize(systemFallback)),
-                    descriptorData: hiddenFontDescriptorData(for: systemFallback, fontName: systemFontName, provided: nil)
-                )
-                return glyphUnsafe(for: systemGlyphs[0], font: systemFallback, variant: variant, fontKey: systemFontKey, fontSize: fontSize)
-            }
-        }
-
         let fontKey = FontKey(
             name: fontName,
-            size: Int(CTFontGetSize(fallback)),
-            descriptorData: hiddenFontDescriptorData(for: fallback, fontName: fontName, provided: nil)
+            size: Int(CTFontGetSize(fallback))
         )
         return glyphUnsafe(for: fallbackGlyphs[0], font: fallback, variant: variant, fontKey: fontKey, fontSize: fontSize)
-    }
-
-
-    private func shouldRejectChineseFallback(fontName: String, character: Character) -> Bool {
-        guard let firstScalar = character.unicodeScalars.first else { return false }
-        let value = firstScalar.value
-
-        // Identify non-CJK scripts that shouldn't use Chinese fonts
-        let isNonCJKScript = (0x1100...0x11FF ~= value) || // Hangul Jamo
-                            (0x3130...0x318F ~= value) || // Hangul Compatibility Jamo
-                            (0xAC00...0xD7AF ~= value) || // Hangul Syllables
-                            (0x0600...0x06FF ~= value) || // Arabic
-                            (0x0750...0x077F ~= value) || // Arabic Supplement
-                            (0x08A0...0x08FF ~= value) || // Arabic Extended-A
-                            (0x0900...0x097F ~= value) || // Devanagari
-                            (0xFB50...0xFDFF ~= value) || // Arabic Presentation Forms-A
-                            (0xFE70...0xFEFF ~= value)    // Arabic Presentation Forms-B
-
-        // Detect Chinese/CJK fonts more comprehensively
-        let lowerName = fontName.lowercased()
-        let isChineseFont = lowerName.contains("chinese") ||
-                          lowerName.contains("simplified") ||
-                          lowerName.contains("traditional") ||
-                          lowerName.contains("pingfang") ||
-                          lowerName.contains("simsun") ||
-                          lowerName.contains("simhei") ||
-                          lowerName.contains("stfangsong") ||
-                          lowerName.contains("stheiti") ||
-                          lowerName.contains("yuanti") ||
-                          fontName.hasPrefix("PingFang") ||
-                          fontName.hasPrefix("STFang") ||
-                          fontName.hasPrefix("STHei") ||
-                          fontName.hasPrefix("STSong") ||
-                          fontName.hasPrefix("Yu") && fontName.contains("Chinese")
-
-        let shouldReject = isNonCJKScript && isChineseFont
-        if shouldReject {
-            print("🚫 Rejecting Chinese font '\(fontName)' for non-CJK character '\(character)' (U+\(String(format: "%04X", value)))")
-        }
-        return shouldReject
-    }
-
-    private func hiddenFontDescriptorData(for font: CTFont, fontName: String, provided: Data?) -> Data? {
-        if let provided {
-            return provided
-        }
-        guard fontName.hasPrefix(".") else {
-            return nil
-        }
-
-        let key = ObjectIdentifier(font as AnyObject)
-        if let cached = archivedDescriptorCache[key] {
-            return cached
-        }
-
-        #if canImport(AppKit)
-        let descriptor = (font as NSFont).fontDescriptor
-        #else
-        let descriptor = (font as UIFont).fontDescriptor
-        #endif
-
-        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: descriptor, requiringSecureCoding: true) else {
-            return nil
-        }
-        archivedDescriptorCache[key] = data
-        return data
     }
 
     private func glyphUnsafe(
@@ -537,7 +436,6 @@ public final class VVTextGlyphAtlas {
             fontGlyphCache.removeAll()
             variantFontCache.removeAll()
             fontCache.removeAll()
-            archivedDescriptorCache.removeAll()
 
             // Keep one alpha and one color page, clear them
             while atlasPages.count > 1 { atlasPages.removeLast() }
@@ -915,7 +813,6 @@ public final class VVTextGlyphAtlas {
             fontGlyphCache.removeAll()
             variantFontCache.removeAll()
             fontCache.removeAll()
-            archivedDescriptorCache.removeAll()
             atlasPages.removeAll()
             colorAtlasPages.removeAll()
             currentAtlasIndex = 0

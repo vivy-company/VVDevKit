@@ -553,7 +553,6 @@ actor VVChatMarkdownPreparationService {
                         fontVariant: glyph.fontVariant,
                         fontSize: glyph.fontSize,
                         fontName: glyph.fontName,
-                        fontDescriptorData: glyph.fontDescriptorData,
                         stringIndex: glyph.stringIndex
                     )
                 }
@@ -591,7 +590,6 @@ actor VVChatMarkdownPreparationService {
                         fontVariant: glyph.fontVariant,
                         fontSize: glyph.fontSize,
                         fontName: glyph.fontName,
-                        fontDescriptorData: glyph.fontDescriptorData,
                         stringIndex: glyph.stringIndex
                     )
                     remaining -= 1

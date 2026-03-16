@@ -227,16 +227,14 @@ final class VVTextGlyphAtlasFallbackTests: XCTestCase {
         let expected = try XCTUnwrap(
             atlas.glyph(
                 for: sample.glyphID,
-                font: sample.font,
-                fontDescriptorData: sample.fontDescriptorData
+                font: sample.font
             )
         )
         let recreated = try XCTUnwrap(
             atlas.glyph(
                 for: sample.glyphID,
                 fontName: sample.fontName,
-                fontSize: CTFontGetSize(sample.font),
-                fontDescriptorData: sample.fontDescriptorData
+                fontSize: CTFontGetSize(sample.font)
             )
         )
 
@@ -249,23 +247,21 @@ final class VVTextGlyphAtlasFallbackTests: XCTestCase {
     }
 
     #if canImport(AppKit)
-    private func hiddenFallbackSample(using baseFont: CTFont) -> (glyphID: CGGlyph, font: CTFont, fontName: String, fontDescriptorData: Data)? {
+    private func hiddenFallbackSample(using baseFont: CTFont) -> (glyphID: CGGlyph, font: CTFont, fontName: String)? {
         for sample in ["简", "這", "日", "한", "ع", "ह"] {
             var utf16 = Array(sample.utf16)
             let fallback = CTFontCreateForString(baseFont, sample as CFString, CFRangeMake(0, utf16.count))
-            let fontName = CTFontCopyPostScriptName(fallback) as String
-            guard fontName.hasPrefix(".") else { continue }
-            let descriptorData = try? NSKeyedArchiver.archivedData(
-                withRootObject: (fallback as NSFont).fontDescriptor,
-                requiringSecureCoding: true
-            )
+            let psName = CTFontCopyPostScriptName(fallback) as String
+            guard psName.hasPrefix(".") else { continue }
 
             var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
             guard CTFontGetGlyphsForCharacters(fallback, &utf16, &glyphs, utf16.count),
                   let glyphID = glyphs.first,
-                  glyphID != 0,
-                  let descriptorData else { continue }
-            return (glyphID, fallback, fontName, descriptorData)
+                  glyphID != 0 else { continue }
+            // Encode as family|style — matches storedFontName for hidden system fonts
+            let family = CTFontCopyFamilyName(fallback) as String
+            let style = CTFontCopyAttribute(fallback, kCTFontStyleNameAttribute) as? String ?? "Regular"
+            return (glyphID, fallback, "\(family)|\(style)")
         }
         return nil
     }

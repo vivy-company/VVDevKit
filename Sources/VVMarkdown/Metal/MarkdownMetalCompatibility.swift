@@ -42,12 +42,11 @@ public extension VVTextGlyphAtlas {
         glyph(for: glyphID, font: font, variant: VVFontVariant(markdownVariant: variant))
     }
 
-    func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, fontDescriptorData: Data? = nil, variant: FontVariant = .regular) -> VVTextCachedGlyph? {
+    func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, variant: FontVariant = .regular) -> VVTextCachedGlyph? {
         glyph(
             for: glyphID,
             fontName: fontName,
             fontSize: fontSize,
-            fontDescriptorData: fontDescriptorData,
             variant: VVFontVariant(markdownVariant: variant)
         )
     }

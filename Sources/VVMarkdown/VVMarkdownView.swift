@@ -1139,7 +1139,6 @@ public class MetalMarkdownNSView: NSView {
             fontVariant: toVVFontVariant(glyph.fontVariant),
             fontSize: glyph.fontSize,
             fontName: glyph.fontName,
-            fontDescriptorData: glyph.fontDescriptorData,
             stringIndex: glyph.stringIndex
         )
     }
@@ -1601,7 +1600,7 @@ public class MetalMarkdownNSView: NSView {
 
     private func cachedGlyph(for glyph: LayoutGlyph, renderer: MarkdownMetalRenderer) -> MarkdownCachedGlyph? {
         if let fontName = glyph.fontName {
-            return renderer.glyphAtlas.glyph(for: glyph.glyphID, fontName: fontName, fontSize: glyph.fontSize, fontDescriptorData: glyph.fontDescriptorData, variant: glyph.fontVariant)
+            return renderer.glyphAtlas.glyph(for: glyph.glyphID, fontName: fontName, fontSize: glyph.fontSize, variant: glyph.fontVariant)
         }
         return renderer.glyphAtlas.glyph(for: glyph.glyphID, variant: glyph.fontVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
