@@ -302,9 +302,10 @@ public struct LayoutGlyph {
     public let fontVariant: FontVariant
     public let fontSize: CGFloat
     public let fontName: String?
+    public let fontDescriptorData: Data?
     public let stringIndex: Int?
 
-    public init(glyphID: CGGlyph, position: CGPoint, size: CGSize, color: SIMD4<Float>, fontVariant: FontVariant, fontSize: CGFloat = 14, fontName: String? = nil, stringIndex: Int? = nil) {
+    public init(glyphID: CGGlyph, position: CGPoint, size: CGSize, color: SIMD4<Float>, fontVariant: FontVariant, fontSize: CGFloat = 14, fontName: String? = nil, fontDescriptorData: Data? = nil, stringIndex: Int? = nil) {
         self.glyphID = glyphID
         self.position = position
         self.size = size
@@ -312,6 +313,7 @@ public struct LayoutGlyph {
         self.fontVariant = fontVariant
         self.fontSize = fontSize
         self.fontName = fontName
+        self.fontDescriptorData = fontDescriptorData
         self.stringIndex = stringIndex
     }
 }
@@ -413,6 +415,7 @@ public final class MarkdownLayoutEngine {
     private var fonts: [FontVariant: CTFont] = [:]
     private var monospaceAdvanceCache: [FontAdvanceKey: CGFloat] = [:]
     private var postScriptNameCache: [ObjectIdentifier: String] = [:]
+    private var fontDescriptorDataCache: [ObjectIdentifier: Data] = [:]
     private var lineHeight: CGFloat = 20
     private var ascent: CGFloat = 14
     private var descent: CGFloat = 4
@@ -3238,6 +3241,19 @@ public final class MarkdownLayoutEngine {
             return ([], [], startX, startY, startCharIndex + text.count)
         }
 
+        if requiresFullTextShaping(text) {
+            return layoutFullyShapedText(
+                text,
+                style: style,
+                variant: variant,
+                startX: startX,
+                startY: startY,
+                maxX: maxX,
+                lineStartX: lineStartX,
+                startCharIndex: startCharIndex
+            )
+        }
+
         let tokens = tokenize(text: text)
         var runs: [LayoutTextRun] = []
         var currentX = startX
@@ -3350,6 +3366,76 @@ public final class MarkdownLayoutEngine {
         return (runs, [], currentX, currentY, charIndex)
     }
 
+    private func layoutFullyShapedText(
+        _ text: String,
+        style: TextRunStyle,
+        variant: FontVariant,
+        startX: CGFloat,
+        startY: CGFloat,
+        maxX: CGFloat,
+        lineStartX: CGFloat,
+        startCharIndex: Int
+    ) -> InlineLayoutResult {
+        guard let baseFont = fonts[variant] else {
+            return ([], [], startX, startY, startCharIndex + text.count)
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .ligature: 1
+        ]
+        let attrString = NSAttributedString(string: text, attributes: attributes)
+        let typesetter = CTTypesetterCreateWithAttributedString(attrString)
+        let nsText = text as NSString
+        let length = nsText.length
+
+        var runs: [LayoutTextRun] = []
+        var x = startX
+        var y = startY
+        var charIndex = startCharIndex
+        var index = 0
+
+        while index < length {
+            let availableWidth = max(1, (x == lineStartX ? maxX - lineStartX : maxX - x))
+            let breakCount = CTTypesetterSuggestLineBreak(typesetter, index, Double(availableWidth))
+            let count = max(1, min(breakCount, length - index))
+            let substring = nsText.substring(with: NSRange(location: index, length: count))
+            let metrics = typographicMetrics(for: substring, font: baseFont)
+            let baselineY = y + metrics.baselineOffset
+            let glyphsResult = layoutGlyphs(
+                for: substring,
+                font: baseFont,
+                variant: variant,
+                color: style.color,
+                startX: x,
+                startY: baselineY
+            )
+
+            runs.append(
+                LayoutTextRun(
+                    text: substring,
+                    position: CGPoint(x: x, y: baselineY),
+                    glyphs: glyphsResult.glyphs,
+                    style: style,
+                    characterRange: charIndex..<(charIndex + substring.count),
+                    lineY: y,
+                    lineHeight: metrics.lineHeight
+                )
+            )
+
+            index += count
+            charIndex += substring.count
+            x += glyphsResult.advance
+
+            if index < length {
+                x = lineStartX
+                y += metrics.lineHeight
+            }
+        }
+
+        return (runs, [], x, y, charIndex)
+    }
+
     private func splitFontSegments(_ text: String, baseFont: CTFont) -> [(text: String, font: CTFont)] {
         var segments: [(text: String, font: CTFont)] = []
         var buffer = ""
@@ -3387,11 +3473,40 @@ public final class MarkdownLayoutEngine {
     }
 
     private func inlineContentHeight(runs: [LayoutTextRun], images: [LayoutInlineImage], startY: CGFloat) -> CGFloat {
+        let textMaxY = runs.reduce(startY) { partial, run in
+            let lineY = run.lineY ?? startY
+            let lineHeight = run.lineHeight ?? self.lineHeight
+            return max(partial, lineY + lineHeight)
+        }
+        let imageMaxY = images.reduce(startY) { partial, image in
+            max(partial, image.frame.maxY)
+        }
+        let computedMaxY = max(textMaxY, imageMaxY)
+        if computedMaxY > startY {
+            return computedMaxY - startY
+        }
+
         if let bounds = inlineContentBounds(runs: runs, images: images) {
             let maxY = max(startY + lineHeight, bounds.maxY)
             return maxY - startY
         }
         return lineHeight
+    }
+
+    private func typographicMetrics(for text: String, font: CTFont) -> (lineHeight: CGFloat, baselineOffset: CGFloat) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .ligature: 1
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
+        let lineHeight = max(self.lineHeight, ceil(ascent + descent + leading))
+        let extraLeading = max(0, lineHeight - (ascent + descent))
+        let baselineOffset = ascent + extraLeading * 0.5
+        return (lineHeight, baselineOffset)
     }
 
     private func inlineContentBounds(runs: [LayoutTextRun], images: [LayoutInlineImage]) -> CGRect? {
@@ -3442,6 +3557,7 @@ public final class MarkdownLayoutEngine {
                     fontVariant: glyph.fontVariant,
                     fontSize: glyph.fontSize,
                     fontName: glyph.fontName,
+                    fontDescriptorData: glyph.fontDescriptorData,
                     stringIndex: glyph.stringIndex
                 )
             }
@@ -3512,7 +3628,8 @@ public final class MarkdownLayoutEngine {
             let runFont = attributes[kCTFontAttributeName] as! CTFont
             let fontName = postScriptName(for: runFont)
             let isEmoji = fontName.contains("Emoji")
-            let storedFontName: String? = isEmoji ? nil : (isSystemUIFontName(fontName) ? nil : fontName)
+            let storedFontName = isEmoji ? nil : storedFontName(for: runFont, requestedFont: font)
+            let storedFontDescriptorData = isEmoji ? nil : archivedFontDescriptorData(for: runFont)
             let glyphVariant: FontVariant = isEmoji ? .emoji : variant
             let runFontSize = CTFontGetSize(runFont)
 
@@ -3542,6 +3659,7 @@ public final class MarkdownLayoutEngine {
                     fontVariant: glyphVariant,
                     fontSize: runFontSize,
                     fontName: storedFontName,
+                    fontDescriptorData: storedFontDescriptorData,
                     stringIndex: Int(stringIndices[i])
                 )
                 glyphs.append(glyph)
@@ -3589,8 +3707,8 @@ public final class MarkdownLayoutEngine {
             return nil
         }
 
-        let fontName = postScriptName(for: font)
-        let storedFontName: String? = isSystemUIFontName(fontName) ? nil : fontName
+        let storedFontName = storedFontName(for: font, requestedFont: font)
+        let storedFontDescriptorData = archivedFontDescriptorData(for: font)
         let advanceWidth = monospaceAdvance(for: font)
         let runFontSize = CTFontGetSize(font)
 
@@ -3614,6 +3732,7 @@ public final class MarkdownLayoutEngine {
                     fontVariant: variant,
                     fontSize: runFontSize,
                     fontName: storedFontName,
+                    fontDescriptorData: storedFontDescriptorData,
                     stringIndex: index
                 )
             )
@@ -3631,6 +3750,38 @@ public final class MarkdownLayoutEngine {
         let name = CTFontCopyPostScriptName(font) as String
         postScriptNameCache[key] = name
         return name
+    }
+
+    private func storedFontName(for resolvedFont: CTFont, requestedFont: CTFont) -> String? {
+        let resolvedName = postScriptName(for: resolvedFont)
+        let requestedName = postScriptName(for: requestedFont)
+        let usesRequestedFont =
+            resolvedName == requestedName &&
+            abs(CTFontGetSize(resolvedFont) - CTFontGetSize(requestedFont)) < 0.5
+
+        if usesRequestedFont && isSystemUIFontName(resolvedName) {
+            return nil
+        }
+        return resolvedName
+    }
+
+    private func archivedFontDescriptorData(for font: CTFont) -> Data? {
+        let key = ObjectIdentifier(font as AnyObject)
+        if let cached = fontDescriptorDataCache[key] {
+            return cached
+        }
+
+        #if canImport(AppKit)
+        let descriptor = (font as NSFont).fontDescriptor
+        #else
+        let descriptor = (font as UIFont).fontDescriptor
+        #endif
+
+        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: descriptor, requiringSecureCoding: true) else {
+            return nil
+        }
+        fontDescriptorDataCache[key] = data
+        return data
     }
 
     private func tokenize(text: String) -> [String] {
@@ -3657,6 +3808,35 @@ public final class MarkdownLayoutEngine {
         }
 
         return tokens
+    }
+
+    private func requiresFullTextShaping(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            let value = scalar.value
+            switch value {
+            case 0x0590...0x05FF, // Hebrew
+                 0x0600...0x06FF, // Arabic
+                 0x0700...0x074F, // Syriac
+                 0x0750...0x077F, // Arabic Supplement
+                 0x0780...0x07BF, // Thaana
+                 0x08A0...0x08FF, // Arabic Extended-A
+                 0x0900...0x097F, // Devanagari
+                 0x0980...0x09FF, // Bengali
+                 0x0A00...0x0A7F, // Gurmukhi
+                 0x0A80...0x0AFF, // Gujarati
+                 0x0B00...0x0B7F, // Oriya
+                 0x0B80...0x0BFF, // Tamil
+                 0x0C00...0x0C7F, // Telugu
+                 0x0C80...0x0CFF, // Kannada
+                 0x0D00...0x0D7F, // Malayalam
+                 0x0D80...0x0DFF, // Sinhala
+                 0xFB50...0xFDFF, // Arabic Presentation Forms-A
+                 0xFE70...0xFEFF: // Arabic Presentation Forms-B
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private func isSystemUIFontName(_ name: String) -> Bool {

@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 import simd
 
@@ -214,6 +215,7 @@ public struct VVTextGlyph: Hashable, Sendable {
     public let fontVariant: VVFontVariant
     public let fontSize: CGFloat
     public let fontName: String?
+    public let fontDescriptorData: Data?
     public let stringIndex: Int?
 
     public init(
@@ -224,6 +226,7 @@ public struct VVTextGlyph: Hashable, Sendable {
         fontVariant: VVFontVariant,
         fontSize: CGFloat,
         fontName: String? = nil,
+        fontDescriptorData: Data? = nil,
         stringIndex: Int? = nil
     ) {
         self.glyphID = glyphID
@@ -233,6 +236,7 @@ public struct VVTextGlyph: Hashable, Sendable {
         self.fontVariant = fontVariant
         self.fontSize = fontSize
         self.fontName = fontName
+        self.fontDescriptorData = fontDescriptorData
         self.stringIndex = stringIndex
     }
 }

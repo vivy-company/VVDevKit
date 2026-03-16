@@ -29,6 +29,8 @@ public final class MarkdownScenePrimitiveRenderer {
     private struct SceneStorageToken: Equatable {
         let baseAddress: Int
         let count: Int
+        let atlasID: ObjectIdentifier
+        let atlasGeneration: UInt64
     }
 
     private struct PreparedTextRun {
@@ -46,6 +48,7 @@ public final class MarkdownScenePrimitiveRenderer {
         let glyphCount: Int
         let firstGlyphID: UInt16
         let fontSize: Float
+        let glyphFingerprint: Int
     }
 
     private static func cacheKey(for run: VVTextRunPrimitive) -> TextRunCacheKey {
@@ -54,8 +57,29 @@ public final class MarkdownScenePrimitiveRenderer {
             posY: Float(run.position.y),
             glyphCount: run.glyphs.count,
             firstGlyphID: run.glyphs.first?.glyphID ?? 0,
-            fontSize: Float(run.fontSize)
+            fontSize: Float(run.fontSize),
+            glyphFingerprint: glyphFingerprint(for: run)
         )
+    }
+
+    private static func glyphFingerprint(for run: VVTextRunPrimitive) -> Int {
+        var hasher = Hasher()
+        hasher.combine(run.glyphs.count)
+        hasher.combine(run.fontSize.bitPattern)
+
+        for glyph in run.glyphs {
+            hasher.combine(glyph.glyphID)
+            hasher.combine(glyph.fontVariant)
+            hasher.combine(glyph.fontSize.bitPattern)
+            hasher.combine(glyph.position.x.bitPattern)
+            hasher.combine(glyph.position.y.bitPattern)
+            hasher.combine(glyph.size.width.bitPattern)
+            hasher.combine(glyph.size.height.bitPattern)
+            hasher.combine(glyph.fontName)
+            hasher.combine(glyph.fontDescriptorData)
+        }
+
+        return hasher.finalize()
     }
 
     private let baseFont: VVFont
@@ -123,7 +147,8 @@ public final class MarkdownScenePrimitiveRenderer {
             baseAddress: orderedPrimitives.withUnsafeBufferPointer { buffer in
                 buffer.baseAddress.map { Int(bitPattern: $0) } ?? 0
             },
-            count: orderedPrimitives.count
+            count: orderedPrimitives.count,
+            renderer: renderer
         )
 
         func flushTextBatches() {
@@ -221,7 +246,8 @@ public final class MarkdownScenePrimitiveRenderer {
         resetScratchBatches()
         updatePreparedTextRunCacheToken(
             baseAddress: primitivesStorageBaseAddress(for: scene),
-            count: scene.primitives.count
+            count: scene.primitives.count,
+            renderer: renderer
         )
 
         func flushTextBatches() {
@@ -696,7 +722,7 @@ public final class MarkdownScenePrimitiveRenderer {
         }
         let cgGlyph = CGGlyph(glyph.glyphID)
         if let fontName = glyph.fontName {
-            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, variant: layoutVariant)
+            return renderer.glyphAtlas.glyph(for: cgGlyph, fontName: fontName, fontSize: glyph.fontSize, fontDescriptorData: glyph.fontDescriptorData, variant: layoutVariant)
         }
         return renderer.glyphAtlas.glyph(for: cgGlyph, variant: layoutVariant, fontSize: glyph.fontSize, baseFont: renderer.baseFont)
     }
@@ -861,12 +887,17 @@ public final class MarkdownScenePrimitiveRenderer {
         }
     }
 
-    private func updatePreparedTextRunCacheToken(baseAddress: Int, count: Int) {
-        // With content-based cache keys (TextRunCacheKey), we no longer need to
-        // invalidate when the scene's storage address changes. The same text run
-        // at the same position produces the same key regardless of which scene
-        // rebuild it belongs to. LRU eviction handles memory.
-        let token = SceneStorageToken(baseAddress: baseAddress, count: count)
+    private func updatePreparedTextRunCacheToken(baseAddress: Int, count: Int, renderer: MarkdownMetalRenderer) {
+        let token = SceneStorageToken(
+            baseAddress: baseAddress,
+            count: count,
+            atlasID: ObjectIdentifier(renderer.glyphAtlas),
+            atlasGeneration: renderer.glyphAtlas.cacheGeneration
+        )
+        if let existing = preparedTextRunSceneToken,
+           existing.atlasID != token.atlasID || existing.atlasGeneration != token.atlasGeneration {
+            clearPreparedTextRunCache()
+        }
         preparedTextRunSceneToken = token
     }
 

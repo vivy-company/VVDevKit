@@ -2,6 +2,12 @@ import Foundation
 import CoreGraphics
 import CoreText
 
+#if canImport(AppKit)
+import AppKit
+#else
+import UIKit
+#endif
+
 // MARK: - Font Spec
 
 public struct VVFontSpec: Sendable, Hashable {
@@ -183,8 +189,8 @@ public struct VText: VVView {
 
                 let runAttributes = CTRunGetAttributes(run) as NSDictionary
                 let runFont = runAttributes[kCTFontAttributeName] as! CTFont
-                let fontName = CTFontCopyPostScriptName(runFont) as String
-                let storedFontName = isSystemUIFontName(fontName) ? nil : fontName
+                let storedFontName = storedFontName(for: runFont, requestedFont: ctFont)
+                let storedFontDescriptorData = archivedFontDescriptorData(for: runFont)
                 let runFontSize = CTFontGetSize(runFont)
 
                 var runGlyphs = [CGGlyph](repeating: 0, count: glyphCount)
@@ -213,6 +219,7 @@ public struct VText: VVView {
                         fontVariant: font.variant,
                         fontSize: runFontSize,
                         fontName: storedFontName,
+                        fontDescriptorData: storedFontDescriptorData,
                         stringIndex: Int(stringIndices[i])
                     )
                     allGlyphs.append(glyph)
@@ -273,5 +280,23 @@ public struct VText: VVView {
             return true
         }
         return false
+    }
+
+    private func storedFontName(for resolvedFont: CTFont, requestedFont: CTFont) -> String? {
+        let resolvedName = CTFontCopyPostScriptName(resolvedFont) as String
+        let requestedName = CTFontCopyPostScriptName(requestedFont) as String
+        let usesRequestedFont =
+            resolvedName == requestedName &&
+            abs(CTFontGetSize(resolvedFont) - CTFontGetSize(requestedFont)) < 0.5
+
+        if usesRequestedFont && isSystemUIFontName(resolvedName) {
+            return nil
+        }
+        return resolvedName
+    }
+
+    private func archivedFontDescriptorData(for font: CTFont) -> Data? {
+        let descriptor = (font as VVFont).fontDescriptor
+        return try? NSKeyedArchiver.archivedData(withRootObject: descriptor, requiringSecureCoding: true)
     }
 }

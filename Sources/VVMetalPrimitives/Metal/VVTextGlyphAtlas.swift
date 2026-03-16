@@ -60,6 +60,7 @@ private struct GlyphKey: Hashable {
 private struct FontKey: Hashable {
     let name: String
     let size: Int  // Scaled font size for cache key
+    let descriptorData: Data?
 }
 
 private struct FontGlyphKey: Hashable {
@@ -92,6 +93,7 @@ public final class VVTextGlyphAtlas {
     private var fontGlyphCache: [FontGlyphKey: VVTextCachedGlyph] = [:]
     private var variantFontCache: [VariantFontKey: CTFont] = [:]
     private var fontCache: [FontKey: CTFont] = [:]
+    private var archivedDescriptorCache: [ObjectIdentifier: Data] = [:]
 
     private var baseFont: VVFont
     private var scaleFactor: CGFloat = 2.0
@@ -107,6 +109,7 @@ public final class VVTextGlyphAtlas {
     private var colorRowHeight = 0
 
     private let queue = DispatchQueue(label: "com.vvdevkit.textglyphatlas")
+    public private(set) var cacheGeneration: UInt64 = 0
 
     // MARK: - Initialization
 
@@ -254,18 +257,45 @@ public final class VVTextGlyphAtlas {
         }
     }
 
-    private func fontFor(name: String, size: CGFloat) -> CTFont {
+    private func fontFor(name: String, size: CGFloat, descriptorData: Data? = nil) -> CTFont {
         let intSize = Int(size * scaleFactor)
         let resolvedName = normalizedFontName(name)
-        let key = FontKey(name: resolvedName, size: intSize)
+        let key = FontKey(name: resolvedName, size: intSize, descriptorData: descriptorData)
 
         if let cached = fontCache[key] {
             return cached
         }
 
-        let font = CTFontCreateWithName(resolvedName as CFString, size, nil)
+        let font: CTFont
+        if let descriptorData,
+           let archivedFont = archivedFont(from: descriptorData, size: size) {
+            font = archivedFont
+        } else if resolvedName.hasPrefix(".") {
+            let descriptor = CTFontDescriptorCreateWithAttributes([
+                kCTFontNameAttribute: resolvedName as CFString,
+                kCTFontSizeAttribute: size as CFNumber
+            ] as CFDictionary)
+            font = CTFontCreateWithFontDescriptor(descriptor, size, nil)
+        } else {
+            font = CTFontCreateWithName(resolvedName as CFString, size, nil)
+        }
         fontCache[key] = font
         return font
+    }
+
+    private func archivedFont(from descriptorData: Data, size: CGFloat) -> CTFont? {
+        #if canImport(AppKit)
+        guard let descriptor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSFontDescriptor.self, from: descriptorData),
+              let font = NSFont(descriptor: descriptor, size: size) else {
+            return nil
+        }
+        return font as CTFont
+        #else
+        guard let descriptor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIFontDescriptor.self, from: descriptorData) else {
+            return nil
+        }
+        return UIFont(descriptor: descriptor, size: size) as CTFont
+        #endif
     }
 
     // MARK: - Public API
@@ -301,10 +331,19 @@ public final class VVTextGlyphAtlas {
         return rasterizeGlyph(glyphID: glyphID, font: font, variant: variant, fontSize: fontSize, baseFontID: baseFontID)
     }
 
-    public func glyph(for glyphID: CGGlyph, font: CTFont, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
+    public func glyph(
+        for glyphID: CGGlyph,
+        font: CTFont,
+        fontDescriptorData: Data? = nil,
+        variant: VVFontVariant = .regular
+    ) -> VVTextCachedGlyph? {
         let fontName = CTFontCopyPostScriptName(font) as String
+        let resolvedDescriptorData = hiddenFontDescriptorData(for: font, fontName: fontName, provided: fontDescriptorData)
         let intSize = Int(CTFontGetSize(font) * scaleFactor)
-        let key = FontGlyphKey(glyphID: glyphID, fontKey: FontKey(name: fontName, size: intSize))
+        let key = FontGlyphKey(
+            glyphID: glyphID,
+            fontKey: FontKey(name: fontName, size: intSize, descriptorData: resolvedDescriptorData)
+        )
 
         if let cached = fontGlyphCache[key] {
             return cached
@@ -320,9 +359,9 @@ public final class VVTextGlyphAtlas {
         }
     }
 
-    public func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
-        let font = fontFor(name: fontName, size: fontSize)
-        return glyph(for: glyphID, font: font, variant: variant)
+    public func glyph(for glyphID: CGGlyph, fontName: String, fontSize: CGFloat, fontDescriptorData: Data? = nil, variant: VVFontVariant = .regular) -> VVTextCachedGlyph? {
+        let font = fontFor(name: fontName, size: fontSize, descriptorData: fontDescriptorData)
+        return glyph(for: glyphID, font: font, fontDescriptorData: fontDescriptorData, variant: variant)
     }
 
     /// Get glyph for a character
@@ -351,8 +390,38 @@ public final class VVTextGlyphAtlas {
         }
 
         let fontName = CTFontCopyPostScriptName(fallback) as String
-        let fontKey = FontKey(name: fontName, size: Int(CTFontGetSize(fallback)))
+        let fontKey = FontKey(
+            name: fontName,
+            size: Int(CTFontGetSize(fallback)),
+            descriptorData: hiddenFontDescriptorData(for: fallback, fontName: fontName, provided: nil)
+        )
         return glyphUnsafe(for: fallbackGlyphs[0], font: fallback, variant: variant, fontKey: fontKey, fontSize: fontSize)
+    }
+
+    private func hiddenFontDescriptorData(for font: CTFont, fontName: String, provided: Data?) -> Data? {
+        if let provided {
+            return provided
+        }
+        guard fontName.hasPrefix(".") else {
+            return nil
+        }
+
+        let key = ObjectIdentifier(font as AnyObject)
+        if let cached = archivedDescriptorCache[key] {
+            return cached
+        }
+
+        #if canImport(AppKit)
+        let descriptor = (font as NSFont).fontDescriptor
+        #else
+        let descriptor = (font as UIFont).fontDescriptor
+        #endif
+
+        guard let data = try? NSKeyedArchiver.archivedData(withRootObject: descriptor, requiringSecureCoding: true) else {
+            return nil
+        }
+        archivedDescriptorCache[key] = data
+        return data
     }
 
     private func glyphUnsafe(
@@ -401,10 +470,12 @@ public final class VVTextGlyphAtlas {
     /// The next glyph request will re-rasterize on demand.
     public func purge() {
         queue.sync {
+            cacheGeneration &+= 1
             glyphCache.removeAll()
             fontGlyphCache.removeAll()
             variantFontCache.removeAll()
             fontCache.removeAll()
+            archivedDescriptorCache.removeAll()
 
             // Keep one alpha and one color page, clear them
             while atlasPages.count > 1 { atlasPages.removeLast() }
@@ -773,6 +844,7 @@ public final class VVTextGlyphAtlas {
     /// Update the base font
     public func updateFont(_ font: VVFont, scaleFactor: CGFloat? = nil) {
         queue.sync {
+            cacheGeneration &+= 1
             if let scaleFactor = scaleFactor, scaleFactor > 0 {
                 self.scaleFactor = scaleFactor
             }
@@ -781,6 +853,7 @@ public final class VVTextGlyphAtlas {
             fontGlyphCache.removeAll()
             variantFontCache.removeAll()
             fontCache.removeAll()
+            archivedDescriptorCache.removeAll()
             atlasPages.removeAll()
             colorAtlasPages.removeAll()
             currentAtlasIndex = 0

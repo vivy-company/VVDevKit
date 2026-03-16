@@ -3317,6 +3317,32 @@ enum SampleData {
             ],
             revision: 1
         )
+        let thirdUser = PlaygroundChatMessage(
+            id: "seed-user-3",
+            role: .user,
+            state: .final,
+            content: "Add a multilingual rendering check. I want CJK in the seeded chat plus a few other scripts for comparison.",
+            revision: 1,
+            timestamp: base.addingTimeInterval(28)
+        )
+        let thirdAssistant = PlaygroundChatMessage(
+            id: "seed-assistant-5",
+            role: .assistant,
+            state: .final,
+            content: """
+            Yes. This seeded turn includes fallback-heavy lines so you can inspect `VVChatTimeline` rendering directly:
+
+            - 简体中文: 你好，世界。欢迎来到 VVDevKit 聊天时间线。
+            - 繁體中文: 這一行用來檢查字型回退是否正確。
+            - 日本語: 日本語の段落では句読点と全角文字の見え方を確認します。
+            - 한국어: 한글 조사와 받침이 자연스럽게 렌더링되는지 확인하세요.
+            - العربية: هذا سطر عربي لاختبار اتجاه النص وأشكال الحروف.
+            - हिन्दी: यह पंक्ति देवनागरी रेंडरिंग की जाँच के लिए है.
+            - Français: Vérifiez aussi les accents, cédilles et ligatures éventuelles.
+            """,
+            revision: 1,
+            timestamp: base.addingTimeInterval(31)
+        )
 
         var items: [PlaygroundChatTimelineItem] = [
             .message(PlaygroundChatMessage(
@@ -3350,7 +3376,9 @@ enum SampleData {
             .message(secondAssistant),
             .toolGroup(secondGroup),
             .message(secondAssistantFinal),
-            .turnSummary(secondSummary)
+            .turnSummary(secondSummary),
+            .message(thirdUser),
+            .message(thirdAssistant)
         ])
 
         return items

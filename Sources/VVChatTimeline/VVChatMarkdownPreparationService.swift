@@ -52,11 +52,23 @@ struct VVChatMarkdownPreparationStyleSnapshot: Sendable {
 
         func makeFont(scale: CGFloat) -> VVFont {
             let scaledSize = max(8, pointSize * scale)
+            // For system fonts, always use the canonical systemFont method to ensure
+            // consistent CTFont instances between background layout and main thread rendering
             #if canImport(AppKit)
+            if isSystemFont() {
+                return NSFont.systemFont(ofSize: scaledSize)
+            }
             return NSFont(name: name, size: scaledSize) ?? .systemFont(ofSize: scaledSize)
             #else
+            if isSystemFont() {
+                return UIFont.systemFont(ofSize: scaledSize)
+            }
             return UIFont(name: name, size: scaledSize) ?? .systemFont(ofSize: scaledSize)
             #endif
+        }
+
+        private func isSystemFont() -> Bool {
+            return name.hasPrefix(".") || name == "SystemFont" || name == ".AppleSystemUIFont" || name == ".SFUI-Regular"
         }
     }
 
@@ -541,6 +553,7 @@ actor VVChatMarkdownPreparationService {
                         fontVariant: glyph.fontVariant,
                         fontSize: glyph.fontSize,
                         fontName: glyph.fontName,
+                        fontDescriptorData: glyph.fontDescriptorData,
                         stringIndex: glyph.stringIndex
                     )
                 }
@@ -578,6 +591,7 @@ actor VVChatMarkdownPreparationService {
                         fontVariant: glyph.fontVariant,
                         fontSize: glyph.fontSize,
                         fontName: glyph.fontName,
+                        fontDescriptorData: glyph.fontDescriptorData,
                         stringIndex: glyph.stringIndex
                     )
                     remaining -= 1

@@ -171,6 +171,7 @@ public struct VVNode: Hashable, Sendable {
                     fontVariant: glyph.fontVariant,
                     fontSize: glyph.fontSize,
                     fontName: glyph.fontName,
+                    fontDescriptorData: glyph.fontDescriptorData,
                     stringIndex: glyph.stringIndex
                 )
             }

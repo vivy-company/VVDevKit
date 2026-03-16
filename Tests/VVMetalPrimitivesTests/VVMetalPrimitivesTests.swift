@@ -1,5 +1,10 @@
 import XCTest
 @testable import VVMetalPrimitives
+#if canImport(AppKit)
+import AppKit
+import CoreText
+import Metal
+#endif
 
 final class VVCornerRadiiTests: XCTestCase {
     func testUniformInit() {
@@ -180,6 +185,91 @@ final class VVGradientQuadTests: XCTestCase {
         XCTAssertEqual(grad.angle, .pi / 4)
         XCTAssertEqual(grad.cornerRadii.topLeft, 4)
     }
+}
+
+final class VVTextGlyphAtlasFallbackTests: XCTestCase {
+    func testAtlasGenerationAdvancesOnCacheReset() throws {
+        #if canImport(AppKit)
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("Metal device unavailable.")
+        }
+
+        let atlas = VVTextGlyphAtlas(device: device, baseFont: NSFont.systemFont(ofSize: 14), scaleFactor: 1)
+        let initial = atlas.cacheGeneration
+        atlas.purge()
+        let afterPurge = atlas.cacheGeneration
+        XCTAssertGreaterThan(afterPurge, initial)
+
+        atlas.updateFont(NSFont.monospacedSystemFont(ofSize: 14, weight: .regular))
+        XCTAssertGreaterThan(atlas.cacheGeneration, afterPurge)
+        #else
+        throw XCTSkip("Atlas generation test requires AppKit.")
+        #endif
+    }
+
+    func testHiddenSystemFallbackFontNameResolvesToMatchingGlyphMetrics() throws {
+        #if canImport(AppKit)
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("Metal device unavailable.")
+        }
+
+        let baseFont = NSFont.systemFont(ofSize: 14)
+        guard let sample = hiddenFallbackSample(using: baseFont as CTFont) else {
+            throw XCTSkip("No hidden fallback font was exposed in this environment.")
+        }
+
+        let atlas = VVTextGlyphAtlas(device: device, baseFont: baseFont, scaleFactor: 1)
+        _ = atlas.glyph(
+            for: sample.glyphID,
+            fontName: sample.fontName,
+            fontSize: CTFontGetSize(sample.font)
+        )
+        let expected = try XCTUnwrap(
+            atlas.glyph(
+                for: sample.glyphID,
+                font: sample.font,
+                fontDescriptorData: sample.fontDescriptorData
+            )
+        )
+        let recreated = try XCTUnwrap(
+            atlas.glyph(
+                for: sample.glyphID,
+                fontName: sample.fontName,
+                fontSize: CTFontGetSize(sample.font),
+                fontDescriptorData: sample.fontDescriptorData
+            )
+        )
+
+        XCTAssertEqual(recreated.advance, expected.advance, accuracy: 0.01)
+        XCTAssertEqual(recreated.size.width, expected.size.width, accuracy: 0.01)
+        XCTAssertEqual(recreated.size.height, expected.size.height, accuracy: 0.01)
+        #else
+        throw XCTSkip("Fallback font test requires AppKit.")
+        #endif
+    }
+
+    #if canImport(AppKit)
+    private func hiddenFallbackSample(using baseFont: CTFont) -> (glyphID: CGGlyph, font: CTFont, fontName: String, fontDescriptorData: Data)? {
+        for sample in ["简", "這", "日", "한", "ع", "ह"] {
+            var utf16 = Array(sample.utf16)
+            let fallback = CTFontCreateForString(baseFont, sample as CFString, CFRangeMake(0, utf16.count))
+            let fontName = CTFontCopyPostScriptName(fallback) as String
+            guard fontName.hasPrefix(".") else { continue }
+            let descriptorData = try? NSKeyedArchiver.archivedData(
+                withRootObject: (fallback as NSFont).fontDescriptor,
+                requiringSecureCoding: true
+            )
+
+            var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+            guard CTFontGetGlyphsForCharacters(fallback, &utf16, &glyphs, utf16.count),
+                  let glyphID = glyphs.first,
+                  glyphID != 0,
+                  let descriptorData else { continue }
+            return (glyphID, fallback, fontName, descriptorData)
+        }
+        return nil
+    }
+    #endif
 }
 
 final class VVShadowQuadTests: XCTestCase {
