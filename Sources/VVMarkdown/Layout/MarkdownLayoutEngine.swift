@@ -3484,10 +3484,27 @@ public final class MarkdownLayoutEngine {
 
         switch value {
         case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: // Korean
-            fallbackFontNames = ["AppleSDGothicNeo-Regular", "Apple SD Gothic Neo", "NanumGothic", "Helvetica"]
+            fallbackFontNames = [
+                "AppleSDGothicNeo-Regular",
+                "Apple SD Gothic Neo",
+                "AppleGothic",
+                "Apple Gothic",
+                "NanumGothic",
+                "AppleMyungjo",
+                "Helvetica"
+            ]
 
         case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF: // Arabic
-            fallbackFontNames = ["GeezaPro", "Geeza Pro", "Baghdad", "Arial Unicode MS"]
+            fallbackFontNames = [
+                "GeezaPro",
+                "Geeza Pro",
+                "GeezaPro-Regular",
+                "Baghdad",
+                "KufiStandardGK",
+                "AlBayan",
+                "Damascus",
+                "Arial Unicode MS"
+            ]
 
         case 0x0900...0x097F: // Devanagari (Hindi)
             fallbackFontNames = ["KohinoorDevanagari-Regular", "Kohinoor Devanagari", "DevanagariMT", "Devanagari MT"]

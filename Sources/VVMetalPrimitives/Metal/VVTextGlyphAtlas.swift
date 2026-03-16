@@ -440,11 +440,28 @@ public final class VVTextGlyphAtlas {
         let fallbackNames: [String]
         switch value {
         case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: // Korean
-            fallbackNames = ["AppleSDGothicNeo-Regular", "Apple SD Gothic Neo"]
+            fallbackNames = [
+                "AppleSDGothicNeo-Regular",
+                "Apple SD Gothic Neo",
+                "AppleGothic",
+                "Apple Gothic",
+                "NanumGothic",
+                "AppleMyungjo",
+                "Helvetica"
+            ]
         case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF: // Arabic
-            fallbackNames = ["GeezaPro", "Geeza Pro"]
+            fallbackNames = [
+                "GeezaPro",
+                "Geeza Pro",
+                "GeezaPro-Regular",
+                "Baghdad",
+                "KufiStandardGK",
+                "AlBayan",
+                "Damascus",
+                "Arial Unicode MS"
+            ]
         case 0x0900...0x097F: // Devanagari (Hindi)
-            fallbackNames = ["KohinoorDevanagari-Regular", "Kohinoor Devanagari"]
+            fallbackNames = ["KohinoorDevanagari-Regular", "Kohinoor Devanagari", "DevanagariMT", "Devanagari MT"]
         default:
             return nil
         }
@@ -452,7 +469,10 @@ public final class VVTextGlyphAtlas {
         for name in fallbackNames {
             #if canImport(AppKit)
             if let font = NSFont(name: name, size: fontSize) {
+                print("✅ Atlas: Using font '\(name)' for character '\(character)'")
                 return font as CTFont
+            } else {
+                print("❌ Atlas: Font '\(name)' not available")
             }
             #else
             if let font = UIFont(name: name, size: fontSize) {
@@ -460,6 +480,8 @@ public final class VVTextGlyphAtlas {
             }
             #endif
         }
+
+        print("⚠️ Atlas: No script-specific font found for character '\(character)' (U+\(String(format: "%04X", value)))")
         return nil
     }
 
