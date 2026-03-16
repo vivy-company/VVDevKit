@@ -3445,7 +3445,10 @@ public final class MarkdownLayoutEngine {
         for ch in text {
             let chunk = String(ch)
             let utf16Count = chunk.utf16.count
-            let fallback = CTFontCreateForString(baseFont, chunk as CFString, CFRangeMake(0, utf16Count))
+
+            // Try script-specific font selection first
+            let fallback = scriptSpecificFont(for: chunk, baseFont: baseFont) ??
+                           CTFontCreateForString(baseFont, chunk as CFString, CFRangeMake(0, utf16Count))
             let fallbackName = CTFontCopyPostScriptName(fallback) as String
 
             if buffer.isEmpty {
@@ -3470,6 +3473,66 @@ public final class MarkdownLayoutEngine {
         }
 
         return segments
+    }
+
+    private func scriptSpecificFont(for text: String, baseFont: CTFont) -> CTFont? {
+        guard let firstScalar = text.unicodeScalars.first else { return nil }
+        let value = firstScalar.value
+
+        let fontSize = CTFontGetSize(baseFont)
+
+        switch value {
+        case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: // Korean
+            #if canImport(AppKit)
+            if let font = NSFont(name: "Apple SD Gothic Neo", size: fontSize) {
+                return font as CTFont
+            }
+            if let font = NSFont(name: "Helvetica", size: fontSize) {
+                return font as CTFont
+            }
+            return NSFont.systemFont(ofSize: fontSize) as CTFont
+            #else
+            if let font = UIFont(name: "Apple SD Gothic Neo", size: fontSize) {
+                return font as CTFont
+            }
+            return UIFont.systemFont(ofSize: fontSize) as CTFont
+            #endif
+
+        case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF: // Arabic
+            #if canImport(AppKit)
+            if let font = NSFont(name: "Geeza Pro", size: fontSize) {
+                return font as CTFont
+            }
+            if let font = NSFont(name: "Arial Unicode MS", size: fontSize) {
+                return font as CTFont
+            }
+            return NSFont.systemFont(ofSize: fontSize) as CTFont
+            #else
+            if let font = UIFont(name: "Geeza Pro", size: fontSize) {
+                return font as CTFont
+            }
+            return UIFont.systemFont(ofSize: fontSize) as CTFont
+            #endif
+
+        case 0x0900...0x097F: // Devanagari (Hindi)
+            #if canImport(AppKit)
+            if let font = NSFont(name: "Kohinoor Devanagari", size: fontSize) {
+                return font as CTFont
+            }
+            if let font = NSFont(name: "Devanagari MT", size: fontSize) {
+                return font as CTFont
+            }
+            return NSFont.systemFont(ofSize: fontSize) as CTFont
+            #else
+            if let font = UIFont(name: "Kohinoor Devanagari", size: fontSize) {
+                return font as CTFont
+            }
+            return UIFont.systemFont(ofSize: fontSize) as CTFont
+            #endif
+
+        default:
+            return nil
+        }
     }
 
     private func inlineContentHeight(runs: [LayoutTextRun], images: [LayoutInlineImage], startY: CGFloat) -> CGFloat {
@@ -3830,6 +3893,9 @@ public final class MarkdownLayoutEngine {
                  0x0C80...0x0CFF, // Kannada
                  0x0D00...0x0D7F, // Malayalam
                  0x0D80...0x0DFF, // Sinhala
+                 0x1100...0x11FF, // Hangul Jamo
+                 0x3130...0x318F, // Hangul Compatibility Jamo
+                 0xAC00...0xD7AF, // Hangul Syllables
                  0xFB50...0xFDFF, // Arabic Presentation Forms-A
                  0xFE70...0xFEFF: // Arabic Presentation Forms-B
                 return true
