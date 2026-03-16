@@ -289,10 +289,25 @@ public struct VText: VVView {
             resolvedName == requestedName &&
             abs(CTFontGetSize(resolvedFont) - CTFontGetSize(requestedFont)) < 0.5
 
+        // Always store font names for complex scripts to prevent fallback font mismatches
+        if isComplexScriptFont(resolvedName) {
+            return resolvedName
+        }
+
         if usesRequestedFont && isSystemUIFontName(resolvedName) {
             return nil
         }
         return resolvedName
+    }
+
+    private func isComplexScriptFont(_ fontName: String) -> Bool {
+        let lowerName = fontName.lowercased()
+        return lowerName.contains("arabic") || lowerName.contains("geeza") ||
+               lowerName.contains("devanagari") || lowerName.contains("kohinoor") ||
+               lowerName.contains("gothic") || lowerName.contains("hangul") ||
+               lowerName.contains("korean") || lowerName.contains("hindi") ||
+               !lowerName.contains("chinese") && !lowerName.contains("simplified") &&
+               !lowerName.contains("traditional") && !lowerName.hasPrefix("pingfang")
     }
 
     private func archivedFontDescriptorData(for font: CTFont) -> Data? {

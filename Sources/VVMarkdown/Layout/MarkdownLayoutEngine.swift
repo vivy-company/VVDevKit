@@ -3480,59 +3480,62 @@ public final class MarkdownLayoutEngine {
         let value = firstScalar.value
 
         let fontSize = CTFontGetSize(baseFont)
+        let fallbackFontNames: [String]
 
         switch value {
         case 0x1100...0x11FF, 0x3130...0x318F, 0xAC00...0xD7AF: // Korean
-            #if canImport(AppKit)
-            if let font = NSFont(name: "Apple SD Gothic Neo", size: fontSize) {
-                return font as CTFont
-            }
-            if let font = NSFont(name: "Helvetica", size: fontSize) {
-                return font as CTFont
-            }
-            return NSFont.systemFont(ofSize: fontSize) as CTFont
-            #else
-            if let font = UIFont(name: "Apple SD Gothic Neo", size: fontSize) {
-                return font as CTFont
-            }
-            return UIFont.systemFont(ofSize: fontSize) as CTFont
-            #endif
+            fallbackFontNames = ["AppleSDGothicNeo-Regular", "Apple SD Gothic Neo", "NanumGothic", "Helvetica"]
 
         case 0x0600...0x06FF, 0x0750...0x077F, 0x08A0...0x08FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF: // Arabic
-            #if canImport(AppKit)
-            if let font = NSFont(name: "Geeza Pro", size: fontSize) {
-                return font as CTFont
-            }
-            if let font = NSFont(name: "Arial Unicode MS", size: fontSize) {
-                return font as CTFont
-            }
-            return NSFont.systemFont(ofSize: fontSize) as CTFont
-            #else
-            if let font = UIFont(name: "Geeza Pro", size: fontSize) {
-                return font as CTFont
-            }
-            return UIFont.systemFont(ofSize: fontSize) as CTFont
-            #endif
+            fallbackFontNames = ["GeezaPro", "Geeza Pro", "Baghdad", "Arial Unicode MS"]
 
         case 0x0900...0x097F: // Devanagari (Hindi)
-            #if canImport(AppKit)
-            if let font = NSFont(name: "Kohinoor Devanagari", size: fontSize) {
-                return font as CTFont
-            }
-            if let font = NSFont(name: "Devanagari MT", size: fontSize) {
-                return font as CTFont
-            }
-            return NSFont.systemFont(ofSize: fontSize) as CTFont
-            #else
-            if let font = UIFont(name: "Kohinoor Devanagari", size: fontSize) {
-                return font as CTFont
-            }
-            return UIFont.systemFont(ofSize: fontSize) as CTFont
-            #endif
+            fallbackFontNames = ["KohinoorDevanagari-Regular", "Kohinoor Devanagari", "DevanagariMT", "Devanagari MT"]
 
         default:
             return nil
         }
+
+        // Try each fallback font name
+        for fontName in fallbackFontNames {
+            #if canImport(AppKit)
+            if let font = NSFont(name: fontName, size: fontSize) {
+                print("✅ Using font \(fontName) for script \(String(firstScalar))")
+                return font as CTFont
+            }
+            #else
+            if let font = UIFont(name: fontName, size: fontSize) {
+                return font as CTFont
+            }
+            #endif
+        }
+
+        // Force CoreText to find an appropriate font using font cascade list
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: baseFont as CTFont
+        ]
+        let attrString = NSAttributedString(string: text, attributes: attributes)
+        let line = CTLineCreateWithAttributedString(attrString)
+        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
+
+        for run in runs {
+            let runAttributes = CTRunGetAttributes(run) as NSDictionary
+            let runFont = runAttributes[kCTFontAttributeName] as! CTFont
+            let fontName = CTFontCopyPostScriptName(runFont) as String
+            // Avoid Chinese fonts for non-CJK scripts
+            if !fontName.contains("Chinese") && !fontName.contains("Simplified") &&
+               !fontName.contains("Traditional") && !fontName.hasPrefix("Pingfang") {
+                print("✅ CoreText selected \(fontName) for script \(String(firstScalar))")
+                return runFont
+            }
+        }
+
+        print("⚠️ Falling back to system font for script \(String(firstScalar))")
+        #if canImport(AppKit)
+        return NSFont.systemFont(ofSize: fontSize) as CTFont
+        #else
+        return UIFont.systemFont(ofSize: fontSize) as CTFont
+        #endif
     }
 
     private func inlineContentHeight(runs: [LayoutTextRun], images: [LayoutInlineImage], startY: CGFloat) -> CGFloat {
@@ -3822,10 +3825,25 @@ public final class MarkdownLayoutEngine {
             resolvedName == requestedName &&
             abs(CTFontGetSize(resolvedFont) - CTFontGetSize(requestedFont)) < 0.5
 
+        // Always store font names for complex scripts to prevent fallback font mismatches
+        if isComplexScriptFont(resolvedName) {
+            print("📝 Storing font name '\(resolvedName)' for complex script")
+            return resolvedName
+        }
+
         if usesRequestedFont && isSystemUIFontName(resolvedName) {
             return nil
         }
         return resolvedName
+    }
+
+    private func isComplexScriptFont(_ fontName: String) -> Bool {
+        let lowerName = fontName.lowercased()
+        return lowerName.contains("arabic") || lowerName.contains("geeza") ||
+               lowerName.contains("devanagari") || lowerName.contains("kohinoor") ||
+               lowerName.contains("gothic") || lowerName.contains("hangul") ||
+               lowerName.contains("korean") || lowerName.contains("hindi") ||
+               fontName.contains("MT")  // Common suffix for system fonts
     }
 
     private func archivedFontDescriptorData(for font: CTFont) -> Data? {
